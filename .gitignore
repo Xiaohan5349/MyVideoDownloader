@@ -8,5 +8,6 @@ helper/helper-settings.json
 animeSamplePage.*
 sample_small.*
 dist/
+CLAUDE.md
 .DS_Store
 Thumbs.db
