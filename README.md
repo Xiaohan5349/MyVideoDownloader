@@ -2,6 +2,8 @@
 
 A Chrome MV3 extension for downloading HLS/DASH streaming videos and direct media files. Anime-themed UI with tactical HUD aesthetics inspired by Honkai: Star Rail and Zenless Zone Zero.
 
+> [中文版](README_zh.md)
+
 ## How It Works
 
 The extension detects media on pages you visit and sends download requests to a local Node.js helper server. For HLS (`.m3u8`) and DASH (`.mpd`) streams, the helper invokes `ffmpeg` to download and remux the video. For direct files (`.mp4`, `.webm`, etc.), it uses Chrome's built-in download API.
