@@ -1,0 +1,12 @@
+node_modules/
+.env
+helper/downloads/*
+!helper/downloads/.gitkeep
+helper/test-media/
+helper/helper-settings.json
+*.log
+animeSamplePage.*
+sample_small.*
+dist/
+.DS_Store
+Thumbs.db

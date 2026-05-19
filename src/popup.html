@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>DS Video Downloader</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=M+PLUS+1+Code:wght@400;600;700&family=Rajdhani:wght@500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main class="popup">
+      <header class="topbar">
+        <div>
+          <div class="brand-mark" aria-hidden="true"></div>
+          <h1>DS Video Downloader</h1>
+          <div id="helperSummary" class="helper-summary">Checking helper...</div>
+        </div>
+        <button id="rescanButton" class="secondary-button" type="button" title="Scan this page again">Rescan</button>
+      </header>
+      <section id="notice" class="notice" hidden></section>
+
+      <nav class="tabs" aria-label="Popup views">
+        <button class="tab-button is-active" type="button" data-panel="mediaPanel">Media</button>
+        <button class="tab-button" type="button" data-panel="helperPanel">Helper</button>
+        <button class="tab-button" type="button" data-panel="settingsPanel">Settings</button>
+      </nav>
+
+      <section id="mediaPanel" class="panel">
+        <div class="section-bar">
+          <span id="mediaCount">0 detected</span>
+          <span id="filterSummary" class="muted"></span>
+        </div>
+        <section id="mediaList" class="media-list" aria-live="polite"></section>
+      </section>
+
+      <section id="helperPanel" class="panel" hidden>
+        <div class="section-bar">
+          <span>Helper jobs</span>
+          <button id="refreshHelperButton" class="text-button" type="button">Refresh</button>
+        </div>
+        <div id="helperStatus" class="helper-status"></div>
+        <section id="helperJobs" class="job-list" aria-live="polite"></section>
+      </section>
+
+      <section id="settingsPanel" class="panel" hidden>
+        <label class="setting-row">
+          <span>Ignore direct media smaller than</span>
+          <select id="minSizeSelect">
+            <option value="0">Do not filter</option>
+            <option value="102400">100 KB</option>
+            <option value="1048576">1 MB</option>
+            <option value="5242880">5 MB</option>
+            <option value="10485760">10 MB</option>
+          </select>
+        </label>
+        <label class="check-row">
+          <input id="showUnsupportedInput" type="checkbox">
+          <span>Show unsupported or protected media</span>
+        </label>
+        <label class="setting-row">
+          <span>Helper download directory</span>
+          <input id="downloadDirInput" type="text" placeholder="C:\Users\you\Videos">
+        </label>
+        <div class="setting-actions">
+          <button id="pickDownloadDirButton" class="secondary-button" type="button">Select folder</button>
+          <button id="saveDownloadDirButton" class="secondary-button" type="button">Save helper folder</button>
+        </div>
+        <p class="settings-note">The size filter only applies when the browser reports a direct file size. HLS/DASH playlists stay visible.</p>
+      </section>
+
+      <template id="mediaItemTemplate">
+        <article class="media-item">
+          <div class="media-thumb" aria-hidden="true"></div>
+          <div class="media-main">
+            <div class="media-title-row">
+              <div class="media-title"></div>
+              <div class="media-kind"></div>
+            </div>
+            <div class="media-meta-row"></div>
+            <div class="variant-list" hidden></div>
+            <div class="job-status" hidden></div>
+          </div>
+          <button class="download-button" type="button">Download</button>
+        </article>
+      </template>
+
+      <template id="helperJobTemplate">
+        <article class="helper-job">
+          <div class="helper-job-main">
+            <div class="helper-job-title-row">
+              <div class="helper-job-title"></div>
+              <div class="helper-job-state"></div>
+            </div>
+            <div class="helper-job-meta"></div>
+            <div class="helper-job-path"></div>
+          </div>
+          <div class="helper-job-actions">
+            <button class="cancel-button" type="button">Stop</button>
+            <button class="show-button" type="button">Folder</button>
+            <button class="delete-button" type="button">Delete</button>
+          </div>
+        </article>
+      </template>
+    </main>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>
