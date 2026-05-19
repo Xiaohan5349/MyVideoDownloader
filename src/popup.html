@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>DS Video Downloader</title>
+    <title data-i18n="brandName">DS Video Downloader</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=M+PLUS+1+Code:wght@400;600;700&family=Rajdhani:wght@500;600;700&display=swap" rel="stylesheet">
@@ -14,17 +14,17 @@
       <header class="topbar">
         <div>
           <div class="brand-mark" aria-hidden="true"></div>
-          <h1>DS Video Downloader</h1>
-          <div id="helperSummary" class="helper-summary">Checking helper...</div>
+          <h1 data-i18n="brandName">DS Video Downloader</h1>
+          <div id="helperSummary" class="helper-summary" data-i18n="statusCheckingHelper">Checking helper...</div>
         </div>
-        <button id="rescanButton" class="secondary-button" type="button" title="Scan this page again">Rescan</button>
+        <button id="rescanButton" class="secondary-button" type="button" data-i18n-title="btnRescanTitle" data-i18n="btnRescan">Rescan</button>
       </header>
       <section id="notice" class="notice" hidden></section>
 
-      <nav class="tabs" aria-label="Popup views">
-        <button class="tab-button is-active" type="button" data-panel="mediaPanel">Media</button>
-        <button class="tab-button" type="button" data-panel="helperPanel">Helper</button>
-        <button class="tab-button" type="button" data-panel="settingsPanel">Settings</button>
+      <nav class="tabs" data-i18n-aria="tabsMedia">
+        <button class="tab-button is-active" type="button" data-panel="mediaPanel" data-i18n="tabsMedia">Media</button>
+        <button class="tab-button" type="button" data-panel="helperPanel" data-i18n="tabsHelper">Helper</button>
+        <button class="tab-button" type="button" data-panel="settingsPanel" data-i18n="tabsSettings">Settings</button>
       </nav>
 
       <section id="mediaPanel" class="panel">
@@ -37,8 +37,8 @@
 
       <section id="helperPanel" class="panel" hidden>
         <div class="section-bar">
-          <span>Helper jobs</span>
-          <button id="refreshHelperButton" class="text-button" type="button">Refresh</button>
+          <span data-i18n="tabsHelper">Helper jobs</span>
+          <button id="refreshHelperButton" class="text-button" type="button" data-i18n="btnRefresh">Refresh</button>
         </div>
         <div id="helperStatus" class="helper-status"></div>
         <section id="helperJobs" class="job-list" aria-live="polite"></section>
@@ -46,9 +46,9 @@
 
       <section id="settingsPanel" class="panel" hidden>
         <label class="setting-row">
-          <span>Ignore direct media smaller than</span>
+          <span data-i18n="settingsFilterLabel">Ignore direct media smaller than</span>
           <select id="minSizeSelect">
-            <option value="0">Do not filter</option>
+            <option value="0" data-i18n="settingsNoFilter">Do not filter</option>
             <option value="102400">100 KB</option>
             <option value="1048576">1 MB</option>
             <option value="5242880">5 MB</option>
@@ -57,17 +57,24 @@
         </label>
         <label class="check-row">
           <input id="showUnsupportedInput" type="checkbox">
-          <span>Show unsupported or protected media</span>
+          <span data-i18n="settingsShowUnsupported">Show unsupported or protected media</span>
         </label>
         <label class="setting-row">
-          <span>Helper download directory</span>
-          <input id="downloadDirInput" type="text" placeholder="C:\Users\you\Videos">
+          <span data-i18n="settingsDownloadDirLabel">Helper download directory</span>
+          <input id="downloadDirInput" type="text" data-i18n-placeholder="settingsDownloadDirPlaceholder" placeholder="C:\Users\you\Videos">
         </label>
         <div class="setting-actions">
-          <button id="pickDownloadDirButton" class="secondary-button" type="button">Select folder</button>
-          <button id="saveDownloadDirButton" class="secondary-button" type="button">Save helper folder</button>
+          <button id="pickDownloadDirButton" class="secondary-button" type="button" data-i18n="btnSelectFolder">Select folder</button>
+          <button id="saveDownloadDirButton" class="secondary-button" type="button" data-i18n="btnSaveHelperFolder">Save helper folder</button>
         </div>
-        <p class="settings-note">The size filter only applies when the browser reports a direct file size. HLS/DASH playlists stay visible.</p>
+        <label class="setting-row">
+          <span data-i18n="settingsLanguageLabel">Language</span>
+          <select id="langSelector" class="lang-select">
+            <option value="en" data-i18n="settingsLanguageEn">English</option>
+            <option value="zh_CN" data-i18n="settingsLanguageZh">简体中文</option>
+          </select>
+        </label>
+        <p class="settings-note" data-i18n="settingsNote">The size filter only applies when the browser reports a direct file size. HLS/DASH playlists stay visible.</p>
       </section>
 
       <template id="mediaItemTemplate">
@@ -82,7 +89,7 @@
             <div class="variant-list" hidden></div>
             <div class="job-status" hidden></div>
           </div>
-          <button class="download-button" type="button">Download</button>
+          <button class="download-button" type="button" data-i18n="btnDownload">Download</button>
         </article>
       </template>
 
@@ -97,9 +104,9 @@
             <div class="helper-job-path"></div>
           </div>
           <div class="helper-job-actions">
-            <button class="cancel-button" type="button">Stop</button>
-            <button class="show-button" type="button">Folder</button>
-            <button class="delete-button" type="button">Delete</button>
+            <button class="cancel-button" type="button" data-i18n="btnStop">Stop</button>
+            <button class="show-button" type="button" data-i18n="btnFolder">Folder</button>
+            <button class="delete-button" type="button" data-i18n="btnDelete">Delete</button>
           </div>
         </article>
       </template>

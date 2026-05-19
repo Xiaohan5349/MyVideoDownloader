@@ -1,4 +1,5 @@
 import { MESSAGE, sanitizeFilename } from "./shared.js";
+import { getMessage, getUserLanguage, setUserLanguage, applyLanguageUI } from "./i18n.js";
 
 const list = document.querySelector("#mediaList");
 const notice = document.querySelector("#notice");
@@ -16,6 +17,7 @@ const showUnsupportedInput = document.querySelector("#showUnsupportedInput");
 const downloadDirInput = document.querySelector("#downloadDirInput");
 const saveDownloadDirButton = document.querySelector("#saveDownloadDirButton");
 const pickDownloadDirButton = document.querySelector("#pickDownloadDirButton");
+const langSelector = document.querySelector("#langSelector");
 
 let activeTab = null;
 let settings = null;
@@ -43,7 +45,15 @@ showUnsupportedInput.addEventListener("change", () => updateSettings({
 
 saveDownloadDirButton.addEventListener("click", updateHelperDownloadDir);
 pickDownloadDirButton.addEventListener("click", pickHelperDownloadDir);
+if (langSelector) {
+  langSelector.value = (await getUserLanguage()).startsWith("zh") ? "zh_CN" : "en";
+  langSelector.addEventListener("change", async () => {
+    await setUserLanguage(langSelector.value);
+    await applyLanguageUI();
+  });
+}
 
+await applyLanguageUI();
 await loadSettings();
 await loadMedia();
 await loadHelperStatus();
@@ -64,7 +74,7 @@ async function updateSettings(patch) {
     settings: patch
   });
   if (!response?.ok) {
-    showNotice(response?.error || "Settings could not be saved.", true);
+    showNotice(response?.error || getMessage("msgSettingsSaveFailed"), true);
     return;
   }
   settings = response.settings;
@@ -75,7 +85,7 @@ async function updateSettings(patch) {
 async function loadMedia() {
   [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!activeTab?.id) {
-    showNotice("No active tab found.", true);
+    showNotice(getMessage("msgNoActiveTab"), true);
     return;
   }
 
@@ -85,7 +95,7 @@ async function loadMedia() {
   });
 
   if (!response?.ok) {
-    showNotice(response?.error || "Could not read detected media.", true);
+    showNotice(response?.error || getMessage("msgCouldNotReadMedia"), true);
     return;
   }
 
@@ -99,12 +109,12 @@ async function loadHelperStatus() {
   const downloadDir = response?.health?.downloadDir || "";
 
   helperSummary.textContent = online
-    ? `${runningCount(jobs)} active, ${jobs.length} job${jobs.length === 1 ? "" : "s"}`
-    : "Helper offline";
+    ? getMessage("msgActiveJobs", { active: String(runningCount(jobs)), total: String(jobs.length), plural: jobs.length === 1 ? "" : "s" })
+    : getMessage("statusHelperOffline");
   helperStatus.className = `helper-status ${online ? "is-online" : "is-offline"}`;
   helperStatus.textContent = online
-    ? `Local helper is running. Downloads: ${downloadDir || "default folder"}`
-    : "Start the helper to download HLS/DASH streams and manage completed files.";
+    ? getMessage("msgHelperRunning", { dir: downloadDir || getMessage("labelDefaultFolder") })
+    : getMessage("msgHelperEmpty");
 
   if (online && downloadDir && document.activeElement !== downloadDirInput) {
     downloadDirInput.value = downloadDir;
@@ -115,10 +125,10 @@ async function loadHelperStatus() {
 
 function renderMedia(items) {
   list.textContent = "";
-  mediaCount.textContent = `${items.length} detected`;
+  mediaCount.textContent = getMessage("msgCountDetected", { count: String(items.length) });
 
   if (!items.length) {
-    showNotice("Play a video or open a direct media link, then rescan this page.");
+    showNotice(getMessage("msgEmptyHint"));
     return;
   }
 
@@ -137,7 +147,7 @@ function renderMedia(items) {
     renderMediaMeta(meta, item);
     renderVariants(variants, item.variants || [], item);
     button.disabled = Boolean(item.isProtected);
-    button.textContent = item.kind === "direct" ? "Save" : "Download";
+    button.textContent = item.kind === "direct" ? getMessage("btnSave") : getMessage("btnDownload");
     button.addEventListener("click", () => startDownload(item, variants, status));
 
     list.appendChild(node);
@@ -147,7 +157,7 @@ function renderMedia(items) {
 function renderHelperJobs(jobs) {
   helperJobs.textContent = "";
   if (!jobs.length) {
-    helperJobs.innerHTML = '<div class="helper-status">No helper jobs yet.</div>';
+    helperJobs.innerHTML = `<div class="helper-status">${getMessage("msgNoJobs")}</div>`;
     return;
   }
 
@@ -183,7 +193,7 @@ async function startDownload(item, variantContainer, statusContainer) {
     if (!hasPermission) {
       const granted = await chrome.permissions.request({ permissions: ["downloads"] });
       if (!granted) {
-        showNotice("Download permission is required for managed downloads.", true);
+        showNotice(getMessage("msgDownloadPermission"), true);
         return;
       }
     }
@@ -199,20 +209,20 @@ async function startDownload(item, variantContainer, statusContainer) {
       showJobStatus(statusContainer, response.helperJob);
       pollJob(response.helperJob.id, statusContainer);
       await loadHelperStatus();
-      showNotice("Local helper started the stream download.");
+      showNotice(getMessage("msgHelperStreamStarted"));
     } else {
-      showNotice("Download started.");
+      showNotice(getMessage("msgDownloadStarted"));
     }
     return;
   }
 
   if (response?.error === "DRM_PROTECTED_UNSUPPORTED") {
-    showNotice("DRM-protected streams are unsupported.", true);
+    showNotice(getMessage("msgDrmUnsupported"), true);
     return;
   }
 
   if (response?.error === "SERVER_PROTECTED_UNSUPPORTED") {
-    showNotice("This server blocks extension fetches, so it is unsupported.", true);
+    showNotice(getMessage("msgServerBlocked"), true);
     return;
   }
 
@@ -220,7 +230,9 @@ async function startDownload(item, variantContainer, statusContainer) {
     const variants = response.variants || [];
     renderVariants(variantContainer, variants, item);
     const count = variants.length;
-    showNotice(count ? `Stream detected with ${count} variant(s). Start the local helper, then choose a quality.` : "Start the local helper to download HLS/DASH streams.", true);
+    showNotice(count
+      ? getMessage("msgStreamVariantsHint", { count: String(count), plural: count === 1 ? "" : "s" })
+      : getMessage("msgStartHelperHint"), true);
     return;
   }
 
@@ -229,7 +241,7 @@ async function startDownload(item, variantContainer, statusContainer) {
     return;
   }
 
-  showNotice(response?.error || "Download could not be started.", true);
+  showNotice(response?.error || getMessage("msgDownloadFailed"), true);
 }
 
 function renderVariants(container, variants, item = null) {
@@ -248,7 +260,7 @@ function renderVariants(container, variants, item = null) {
       chip.addEventListener("click", () => startVariantDownload(item, variant, container.closest(".media-item")?.querySelector(".job-status")));
     }
     chip.textContent = [
-      variant.quality || "Stream",
+      variant.quality || getMessage("labelStream"),
       variant.bandwidth ? `${Math.round(variant.bandwidth / 1000)} kbps` : "",
       variantSizeLabel(variant)
     ].filter(Boolean).join(" - ");
@@ -270,16 +282,16 @@ async function startVariantDownload(item, variant, statusContainer) {
       pollJob(response.helperJob.id, statusContainer);
       await loadHelperStatus();
     }
-    showNotice("Local helper started the selected stream download.");
+    showNotice(getMessage("msgVariantStreamStarted"));
     return;
   }
 
   if (response?.error === "HELPER_OFFLINE") {
-    showNotice("Start the local helper before downloading stream variants.", true);
+    showNotice(getMessage("msgVariantHelperOffline"), true);
     return;
   }
 
-  showNotice(response?.error || "Selected stream could not be started.", true);
+  showNotice(response?.error || getMessage("msgVariantFailed"), true);
 }
 
 function pollJob(jobId, container) {
@@ -295,7 +307,7 @@ function pollJob(jobId, container) {
     if (!response?.ok) {
       container.hidden = false;
       container.classList.add("is-error");
-      container.textContent = response?.error || "Could not read helper status.";
+      container.textContent = response?.error || getMessage("msgCouldNotReadHelperStatus");
       window.clearInterval(timer);
       jobPollers.delete(jobId);
       return;
@@ -320,17 +332,17 @@ function showJobStatus(container, job) {
   container.classList.toggle("is-cancelled", job.status === "cancelled");
 
   if (job.status === "completed") {
-    container.textContent = `Completed: ${job.outputPath}`;
+    container.textContent = getMessage("statusCompletedLabel", { path: job.outputPath });
     return;
   }
 
   if (job.status === "failed") {
-    container.textContent = `Failed: ${job.error || "unknown error"}`;
+    container.textContent = getMessage("statusFailedLabel", { error: job.error || getMessage("statusUnknownError") });
     return;
   }
 
   if (job.status === "cancelled") {
-    container.textContent = "Stopped by user.";
+    container.textContent = getMessage("statusStoppedByUser");
     return;
   }
 
@@ -339,33 +351,33 @@ function showJobStatus(container, job) {
 
 async function showJobInFolder(jobId) {
   const response = await chrome.runtime.sendMessage({ type: MESSAGE.DOWNLOADS_JOB_SHOW, jobId });
-  if (!response?.ok) showNotice(response?.error || "Could not show the file.", true);
+  if (!response?.ok) showNotice(response?.error || getMessage("msgCouldNotShowFile"), true);
 }
 
 async function deleteJob(jobId) {
   const response = await chrome.runtime.sendMessage({ type: MESSAGE.DOWNLOADS_JOB_DELETE, jobId });
   if (!response?.ok) {
-    showNotice(response?.error || "Could not delete the helper file.", true);
+    showNotice(response?.error || getMessage("msgCouldNotDeleteFile"), true);
     return;
   }
-  showNotice("Deleted helper output.");
+  showNotice(getMessage("msgDeletedOutput"));
   await loadHelperStatus();
 }
 
 async function cancelJob(jobId) {
   const response = await chrome.runtime.sendMessage({ type: MESSAGE.DOWNLOADS_JOB_CANCEL, jobId });
   if (!response?.ok) {
-    showNotice(response?.error || "Could not stop the helper job.", true);
+    showNotice(response?.error || getMessage("msgCouldNotStopJob"), true);
     return;
   }
-  showNotice("Stopped helper job.");
+  showNotice(getMessage("msgStoppedJob"));
   await loadHelperStatus();
 }
 
 async function updateHelperDownloadDir() {
   const downloadDir = downloadDirInput.value.trim();
   if (!downloadDir) {
-    showNotice("Enter a download directory path.", true);
+    showNotice(getMessage("msgEnterDownloadDir"), true);
     return;
   }
 
@@ -375,29 +387,33 @@ async function updateHelperDownloadDir() {
   });
 
   if (!response?.ok) {
-    showNotice(response?.error === "HELPER_OFFLINE" ? "Start the helper before saving its folder." : response?.error || "Could not save helper folder.", true);
+    showNotice(response?.error === "HELPER_OFFLINE"
+      ? getMessage("msgHelperOfflineSaveDir")
+      : response?.error || getMessage("msgCouldNotSaveDir"), true);
     return;
   }
 
   downloadDirInput.value = response.settings?.downloadDir || downloadDir;
-  showNotice("Helper download folder saved.");
+  showNotice(getMessage("msgDirSaved"));
   await loadHelperStatus();
 }
 
 async function pickHelperDownloadDir() {
   pickDownloadDirButton.disabled = true;
-  showNotice("Opening Windows folder picker. Check the taskbar if it appears behind Chrome.");
+  showNotice(getMessage("msgPickerOpening"));
   const response = await chrome.runtime.sendMessage({ type: MESSAGE.HELPER_FOLDER_PICK });
   pickDownloadDirButton.disabled = false;
 
   if (!response?.ok) {
     if (response?.error === "FOLDER_PICK_CANCELLED") return;
-    showNotice(response?.error === "HELPER_OFFLINE" ? "Start the helper before selecting a folder." : response?.error || "Could not open folder picker.", true);
+    showNotice(response?.error === "HELPER_OFFLINE"
+      ? getMessage("msgHelperOfflinePickDir")
+      : response?.error || getMessage("msgCouldNotOpenPicker"), true);
     return;
   }
 
   downloadDirInput.value = response.settings?.downloadDir || downloadDirInput.value;
-  showNotice("Helper download folder selected.");
+  showNotice(getMessage("msgFolderSelected"));
   await loadHelperStatus();
 }
 
@@ -413,8 +429,8 @@ function activatePanel(panelId) {
 function updateFilterSummary() {
   if (!settings) return;
   filterSummary.textContent = settings.minSizeBytes > 0
-    ? `Direct files under ${formatBytes(settings.minSizeBytes)} hidden`
-    : "No size filter";
+    ? getMessage("msgDirectFilesHidden", { size: formatBytes(settings.minSizeBytes) })
+    : getMessage("msgNoSizeFilter");
 }
 
 function renderMediaMeta(container, item) {
@@ -423,7 +439,7 @@ function renderMediaMeta(container, item) {
     { text: item.extension ? `.${item.extension}` : "", className: "" },
     { text: item.quality || "", className: "is-quality" },
     { text: mediaSizeLabel(item), className: item.estimatedSize && !item.size ? "is-quality" : "" },
-    { text: item.isProtected ? item.unsupportedReason || "unsupported" : "", className: "is-warning" }
+    { text: item.isProtected ? item.unsupportedReason || getMessage("labelUnsupported") : "", className: "is-warning" }
   ].filter((chip) => chip.text);
 
   for (const chip of chips) {
@@ -437,7 +453,7 @@ function renderMediaMeta(container, item) {
 function mediaSizeLabel(item) {
   if (item.size) return formatBytes(item.size);
   if (item.estimatedSize) return `~${formatBytes(item.estimatedSize)}`;
-  return "Size unknown";
+  return getMessage("labelSizeUnknown");
 }
 
 function variantSizeLabel(variant) {
@@ -447,8 +463,8 @@ function variantSizeLabel(variant) {
 }
 
 function jobTitle(job) {
-  const name = String(job.outputPath || job.url || "Helper job").split(/[\\/]/).pop();
-  return name || "Helper job";
+  const name = String(job.outputPath || job.url || getMessage("statusHelperJob")).split(/[\\/]/).pop();
+  return name || getMessage("statusHelperJob");
 }
 
 function runningCount(jobs) {
@@ -456,11 +472,18 @@ function runningCount(jobs) {
 }
 
 function humanStatus(value) {
-  return ({ queued: "Queued", running: "Downloading", completed: "Completed", failed: "Failed", cancelled: "Stopped" })[value] || value || "Downloading";
+  const statusMap = {
+    queued: getMessage("statusQueued"),
+    running: getMessage("statusDownloading"),
+    completed: getMessage("statusCompleted"),
+    failed: getMessage("statusFailed"),
+    cancelled: getMessage("statusStopped")
+  };
+  return statusMap[value] || value || getMessage("statusDownloading");
 }
 
 function sizeLabel(job) {
-  if (!job.totalBytes) return "total unknown";
+  if (!job.totalBytes) return getMessage("labelTotalUnknown");
   return `${job.totalSizeSource === "estimated" ? "~" : ""}${formatBytes(job.totalBytes)} ${job.totalSizeSource || ""}`.trim();
 }
 
