@@ -113,10 +113,14 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, HOST, () => {
-  console.log(`DS Video Downloader helper listening on http://${HOST}:${PORT}`);
-  console.log(`Downloads folder: ${downloadDir}`);
-});
+if (process.env.NODE_ENV !== "test") {
+  server.listen(PORT, HOST, () => {
+    console.log(`DS Video Downloader helper listening on http://${HOST}:${PORT}`);
+    console.log(`Downloads folder: ${downloadDir}`);
+  });
+}
+
+export { server, jobs };
 
 async function startDownload(payload) {
   const url = validateUrl(payload?.url);
@@ -592,6 +596,11 @@ function parseHlsVariants(text, manifestUrl) {
   }
   return variants;
 }
+
+// ⚠️ SYNC-POINT: Functions below are duplicated from src/shared.js.
+// server.js is a standalone Node.js process and cannot import extension source.
+// When changing estimateBytes, fallbackBandwidthForQuality, inferQualityLabel,
+// qualityLabel, readAttribute, or resolveUrl in shared.js, you MUST manually sync here.
 
 function readAttribute(line, key) {
   const match = line.match(new RegExp(`${key}=([^,]+)`, "i"));

@@ -1,3 +1,7 @@
+// ⚠️ SYNC-POINT: Functions below are duplicated from src/shared.js.
+// MV3 content scripts cannot import ES modules. When changing
+// classifyMedia, detectExtension, normalizeMediaItem, inferQualityLabel,
+// or DIRECT_EXTENSIONS in shared.js, you MUST manually sync here.
 const MESSAGE_MEDIA_ADD_DETECTED = "media:addDetected";
 const DIRECT_EXTENSIONS = new Set([
   "mp4",

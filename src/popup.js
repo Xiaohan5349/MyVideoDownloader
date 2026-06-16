@@ -54,9 +54,7 @@ if (langSelector) {
 }
 
 await applyLanguageUI();
-await loadSettings();
-await loadMedia();
-await loadHelperStatus();
+await Promise.all([loadSettings(), loadMedia(), loadHelperStatus()]);
 window.setInterval(loadHelperStatus, 2000);
 
 async function loadSettings() {
