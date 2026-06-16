@@ -23,6 +23,8 @@ let activeTab = null;
 let settings = null;
 const jobPollers = new Map();
 const pendingDownloads = new Set();
+let statusLoading = false;
+let statusPending = false;
 
 rescanButton.addEventListener("click", async () => {
   if (!activeTab?.id) return;
@@ -102,32 +104,49 @@ async function loadMedia() {
 }
 
 async function loadHelperStatus() {
-  const response = await chrome.runtime.sendMessage({ type: MESSAGE.HELPER_STATUS_GET });
-  const online = Boolean(response?.online);
-  const liveJobs = response?.jobs || [];
-  const cachedJobs = response?.cachedJobs || [];
-  const downloadDir = response?.health?.downloadDir || "";
-
-  // Merge: live jobs take priority, then fill with cached history
-  const liveIds = new Set(liveJobs.map(j => j.id));
-  const merged = [
-    ...liveJobs,
-    ...cachedJobs.filter(j => !liveIds.has(j.id))
-  ].sort((a, b) => (b.startedAt || "").localeCompare(a.startedAt || "")).slice(0, 20);
-
-  helperSummary.textContent = online
-    ? getMessage("msgActiveJobs", { active: String(runningCount(liveJobs)), total: String(liveJobs.length), plural: liveJobs.length === 1 ? "" : "s" })
-    : getMessage("statusHelperOffline");
-  helperStatus.className = `helper-status ${online ? "is-online" : "is-offline"}`;
-  helperStatus.textContent = online
-    ? getMessage("msgHelperRunning", { dir: downloadDir || getMessage("labelDefaultFolder") })
-    : getMessage("msgHelperEmpty");
-
-  if (online && downloadDir && document.activeElement !== downloadDirInput) {
-    downloadDirInput.value = downloadDir;
+  // Prevent concurrent calls from overwriting each other's results.
+  // The 2s poll and post-download refresh can interleave: the poll's
+  // response (fetched before the job was created) could arrive after
+  // the download's response and clear the just-rendered job list.
+  if (statusLoading) {
+    statusPending = true;
+    return;
   }
+  statusLoading = true;
+  try {
+    const response = await chrome.runtime.sendMessage({ type: MESSAGE.HELPER_STATUS_GET });
+    const online = Boolean(response?.online);
+    const liveJobs = response?.jobs || [];
+    const cachedJobs = response?.cachedJobs || [];
+    const downloadDir = response?.health?.downloadDir || "";
 
-  renderHelperJobs(merged);
+    // Merge: live jobs take priority, then fill with cached history
+    const liveIds = new Set(liveJobs.map(j => j.id));
+    const merged = [
+      ...liveJobs,
+      ...cachedJobs.filter(j => !liveIds.has(j.id))
+    ].sort((a, b) => (b.startedAt || "").localeCompare(a.startedAt || "")).slice(0, 20);
+
+    helperSummary.textContent = online
+      ? getMessage("msgActiveJobs", { active: String(runningCount(liveJobs)), total: String(liveJobs.length), plural: liveJobs.length === 1 ? "" : "s" })
+      : getMessage("statusHelperOffline");
+    helperStatus.className = `helper-status ${online ? "is-online" : "is-offline"}`;
+    helperStatus.textContent = online
+      ? getMessage("msgHelperRunning", { dir: downloadDir || getMessage("labelDefaultFolder") })
+      : getMessage("msgHelperEmpty");
+
+    if (online && downloadDir && document.activeElement !== downloadDirInput) {
+      downloadDirInput.value = downloadDir;
+    }
+
+    renderHelperJobs(merged);
+  } finally {
+    statusLoading = false;
+    if (statusPending) {
+      statusPending = false;
+      await loadHelperStatus();
+    }
+  }
 }
 
 function renderMedia(items) {

@@ -466,15 +466,13 @@ function showJobOutput(id) {
       // File exists — open Explorer with file selected
       spawn("explorer.exe", [`/select,${job.outputPath}`], {
         detached: true,
-        stdio: "ignore",
-        windowsHide: true
+        stdio: "ignore"
       }).unref();
     } else {
       // File not on disk yet — open download directory
       spawn("explorer.exe", [baseDir], {
         detached: true,
-        stdio: "ignore",
-        windowsHide: true
+        stdio: "ignore"
       }).unref();
     }
     return { ok: true };
