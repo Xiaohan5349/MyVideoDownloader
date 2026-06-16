@@ -104,11 +104,19 @@ async function loadMedia() {
 async function loadHelperStatus() {
   const response = await chrome.runtime.sendMessage({ type: MESSAGE.HELPER_STATUS_GET });
   const online = Boolean(response?.online);
-  const jobs = response?.jobs || [];
+  const liveJobs = response?.jobs || [];
+  const cachedJobs = response?.cachedJobs || [];
   const downloadDir = response?.health?.downloadDir || "";
 
+  // Merge: live jobs take priority, then fill with cached history
+  const liveIds = new Set(liveJobs.map(j => j.id));
+  const merged = [
+    ...liveJobs,
+    ...cachedJobs.filter(j => !liveIds.has(j.id))
+  ].sort((a, b) => (b.startedAt || "").localeCompare(a.startedAt || "")).slice(0, 20);
+
   helperSummary.textContent = online
-    ? getMessage("msgActiveJobs", { active: String(runningCount(jobs)), total: String(jobs.length), plural: jobs.length === 1 ? "" : "s" })
+    ? getMessage("msgActiveJobs", { active: String(runningCount(liveJobs)), total: String(liveJobs.length), plural: liveJobs.length === 1 ? "" : "s" })
     : getMessage("statusHelperOffline");
   helperStatus.className = `helper-status ${online ? "is-online" : "is-offline"}`;
   helperStatus.textContent = online
@@ -119,7 +127,7 @@ async function loadHelperStatus() {
     downloadDirInput.value = downloadDir;
   }
 
-  renderHelperJobs(jobs);
+  renderHelperJobs(merged);
 }
 
 function renderMedia(items) {
