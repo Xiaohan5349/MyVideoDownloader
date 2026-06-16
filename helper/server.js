@@ -460,20 +460,32 @@ function showJobOutput(id) {
   if (!job) return { ok: false, status: 404, error: "JOB_NOT_FOUND" };
   const baseDir = job.downloadDir || downloadDir;
   if (!isSafeDownloadPath(job.outputPath, baseDir)) return { ok: false, status: 403, error: "OUTPUT_PATH_UNSAFE" };
-  const targetPath = existsSync(job.outputPath) ? job.outputPath : baseDir;
+
   if (process.platform === "win32") {
-    const explorerArg = targetPath === job.outputPath ? `/select,${targetPath}` : targetPath;
-    spawn("powershell.exe", [
-      "-NoProfile",
-      "-ExecutionPolicy",
-      "Bypass",
-      "-Command",
-      "Start-Process -FilePath explorer.exe -ArgumentList $args[0]",
-      explorerArg
-    ], { detached: true, windowsHide: false, stdio: "ignore" }).unref();
+    if (existsSync(job.outputPath)) {
+      // File exists — open Explorer with file selected
+      spawn("explorer.exe", [`/select,${job.outputPath}`], {
+        detached: true,
+        stdio: "ignore",
+        windowsHide: true
+      }).unref();
+    } else {
+      // File not on disk yet — open download directory
+      spawn("explorer.exe", [baseDir], {
+        detached: true,
+        stdio: "ignore",
+        windowsHide: true
+      }).unref();
+    }
     return { ok: true };
   }
-  spawn(process.platform === "darwin" ? "open" : "xdg-open", [targetPath === job.outputPath ? path.dirname(targetPath) : targetPath], { detached: true, stdio: "ignore" }).unref();
+
+  // Non-Windows: open containing folder
+  const targetPath = existsSync(job.outputPath) ? job.outputPath : baseDir;
+  spawn(process.platform === "darwin" ? "open" : "xdg-open",
+    [targetPath === job.outputPath ? path.dirname(targetPath) : targetPath],
+    { detached: true, stdio: "ignore" }
+  ).unref();
   return { ok: true };
 }
 
