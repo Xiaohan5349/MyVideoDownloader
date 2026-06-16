@@ -331,14 +331,32 @@ async function getHelperStatus() {
     ]);
     const health = await healthResponse.json().catch(() => ({}));
     const jobs = await jobsResponse.json().catch(() => ({}));
+    const jobsList = Array.isArray(jobs.jobs) ? jobs.jobs : [];
+
+    // Cache recent jobs in chrome.storage for offline display
+    if (healthResponse.ok) {
+      const recent = jobsList
+        .sort((a, b) => (b.startedAt || "").localeCompare(a.startedAt || ""))
+        .slice(0, 20);
+      await chrome.storage.local.set({ recentJobs: recent }).catch(() => {});
+    }
+
     return {
       ok: healthResponse.ok && jobsResponse.ok,
       online: healthResponse.ok,
       health,
-      jobs: Array.isArray(jobs.jobs) ? jobs.jobs : []
+      jobs: jobsList
     };
   } catch {
-    return { ok: true, online: false, health: null, jobs: [] };
+    // Return cached jobs when helper is offline
+    const cached = await chrome.storage.local.get("recentJobs").catch(() => ({}));
+    return {
+      ok: true,
+      online: false,
+      health: null,
+      jobs: [],
+      cachedJobs: cached.recentJobs || []
+    };
   }
 }
 
