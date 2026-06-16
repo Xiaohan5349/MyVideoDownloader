@@ -14,7 +14,7 @@ process.env.DOWNLOAD_DIR = path.join(__dirname, "..", "helper", "test-downloads"
 // Dynamic import to get server reference
 const serverPath = pathToFileURL(path.join(__dirname, "..", "helper", "server.js")).href;
 const serverModule = await import(serverPath);
-const { server } = serverModule;
+const { server, isSafeDownloadPath } = serverModule;
 
 let baseUrl;
 
@@ -166,5 +166,24 @@ it("POST /settings with valid dir returns 200", async () => {
 // ─── Pick Folder ───
 // Skipped: /pick-folder spawns a GUI dialog on Windows which cannot run in CI.
 // The endpoint is tested manually. Non-Windows platforms correctly return 501.
+
+// ─── isSafeDownloadPath ───
+
+it("isSafeDownloadPath: valid path within download dir returns true", () => {
+  const baseDir = process.platform === "win32" ? "C:\\Users\\test\\Downloads" : "/home/test/Downloads";
+  assert.equal(isSafeDownloadPath(path.join(baseDir, "video.mp4"), baseDir), true);
+  assert.equal(isSafeDownloadPath(path.join(baseDir, "sub", "video.mp4"), baseDir), true);
+});
+
+it("isSafeDownloadPath: path outside download dir returns false", () => {
+  const baseDir = process.platform === "win32" ? "C:\\Users\\test\\Downloads" : "/home/test/Downloads";
+  const outside = process.platform === "win32" ? "C:\\Users\\test\\Documents\\video.mp4" : "/home/test/Documents/video.mp4";
+  assert.equal(isSafeDownloadPath(outside, baseDir), false);
+});
+
+it("isSafeDownloadPath: falsy value returns false", () => {
+  assert.equal(isSafeDownloadPath("", "/tmp"), false);
+  assert.equal(isSafeDownloadPath(null, "/tmp"), false);
+});
 
 }); // close describe

@@ -120,7 +120,7 @@ if (process.env.NODE_ENV !== "test") {
   });
 }
 
-export { server, jobs };
+export { server, jobs, isSafeDownloadPath };
 
 async function startDownload(payload) {
   const url = validateUrl(payload?.url);
@@ -483,8 +483,9 @@ function cancelJob(id) {
 
 function isSafeDownloadPath(value, baseDir = downloadDir) {
   if (!value) return false;
-  const relative = path.relative(baseDir, path.resolve(value));
-  return relative && !relative.startsWith("..") && !path.isAbsolute(relative);
+  const resolved = path.resolve(value);
+  const base = path.resolve(baseDir);
+  return resolved.toLowerCase().startsWith(base.toLowerCase());
 }
 
 async function getManifestSizeInfo(text, kind, url, headers) {
