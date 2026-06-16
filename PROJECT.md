@@ -172,11 +172,11 @@ background.js fetches manifest URL (with captured headers)
 - **Not tested**: `background.js`, `content.js`, `popup.js`, `i18n.js`, `server.js`
 - **Run**: `npm test`
 
-## Version Inconsistency
+## Version
 
-- `manifest.json`: version `1.0.1`
-- `package.json`: version `1.0.0`
-- These should be synced — `manifest.json` version is what Chrome displays.
+- `manifest.json`: version `1.1.1`
+- `package.json`: version `1.1.1`
+- Versions are kept in sync. Always bump both together.
 
 ## Development Workflow
 
