@@ -145,17 +145,31 @@ function renderMedia(items) {
     const title = node.querySelector(".media-title");
     const kind = node.querySelector(".media-kind");
     const meta = node.querySelector(".media-meta-row");
-    const button = node.querySelector(".download-button");
     const variants = node.querySelector(".variant-list");
     const status = node.querySelector(".job-status");
+    const button = node.querySelector(".download-button");
 
     title.textContent = sanitizeFilename(item.title, item.extension);
     kind.textContent = item.kind.toUpperCase();
     renderMediaMeta(meta, item);
     renderVariants(variants, item.variants || [], item);
-    button.disabled = Boolean(item.isProtected);
-    button.textContent = item.kind === "direct" ? getMessage("btnSave") : getMessage("btnDownload");
-    button.addEventListener("click", () => startDownload(item, variants, status));
+
+    // Remove the separate download button — clicking the media item itself initiates download
+    if (button) button.remove();
+
+    // Make the entire media item a clickable download trigger
+    node.style.cursor = "pointer";
+    node.title = item.isProtected
+      ? (item.unsupportedReason || "Unsupported")
+      : `Click to download ${sanitizeFilename(item.title, item.extension)}`;
+
+    if (!item.isProtected) {
+      node.addEventListener("click", (e) => {
+        // Don't trigger when clicking variant chips (those have their own handlers)
+        if (e.target.closest(".variant-chip")) return;
+        confirmDownload(item, () => startDownload(item, variants, status));
+      });
+    }
 
     list.appendChild(node);
   }
@@ -164,6 +178,10 @@ function renderMedia(items) {
 const helperJobNodes = new Map();
 
 function renderHelperJobs(jobs) {
+  // Clear empty-state if we have jobs now
+  if (jobs.length && helperJobNodes.size === 0) {
+    helperJobs.textContent = "";
+  }
   const seenIds = new Set();
 
   for (const job of jobs) {
@@ -231,6 +249,41 @@ function renderHelperJobs(jobs) {
     helperJobs.innerHTML = `<div class="helper-status">${getMessage("msgNoJobs")}</div>`;
     helperJobNodes.clear();
   }
+}
+
+function confirmDownload(item, callback) {
+  // Remove any existing overlay
+  const existing = document.querySelector(".confirm-overlay");
+  if (existing) existing.remove();
+
+  const overlay = document.createElement("div");
+  overlay.className = "confirm-overlay";
+
+  const title = sanitizeFilename(item.title, item.extension);
+  const quality = item.quality ? ` (${item.quality})` : "";
+  const kindLabel = item.kind === "direct" ? "Direct download" : `${item.kind.toUpperCase()} stream`;
+
+  overlay.innerHTML = `
+    <div class="confirm-dialog">
+      <h3>Start Download</h3>
+      <p>${title}${quality}<br><span style="color:var(--faint);font-size:10px;">${kindLabel}</span></p>
+      <div class="confirm-actions">
+        <button class="btn-cancel">Cancel</button>
+        <button class="btn-primary">Download</button>
+      </div>
+    </div>
+  `;
+
+  overlay.querySelector(".btn-cancel").addEventListener("click", () => overlay.remove());
+  overlay.querySelector(".btn-primary").addEventListener("click", () => {
+    overlay.remove();
+    callback();
+  });
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) overlay.remove();
+  });
+
+  document.body.appendChild(overlay);
 }
 
 async function startDownload(item, variantContainer, statusContainer) {
@@ -347,7 +400,7 @@ function renderVariants(container, variants, item = null) {
     chip.className = "variant-chip";
     if (item) {
       chip.type = "button";
-      chip.addEventListener("click", () => startVariantDownload(item, variant, container.closest(".media-item")?.querySelector(".job-status")));
+      chip.addEventListener("click", () => confirmDownload(item, () => startVariantDownload(item, variant, container.closest(".media-item")?.querySelector(".job-status"))));
     }
     chip.textContent = [
       variant.quality || getMessage("labelStream"),
