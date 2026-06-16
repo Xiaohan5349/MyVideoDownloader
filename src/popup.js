@@ -22,6 +22,7 @@ const langSelector = document.querySelector("#langSelector");
 let activeTab = null;
 let settings = null;
 const jobPollers = new Map();
+const pendingDownloads = new Set();
 
 rescanButton.addEventListener("click", async () => {
   if (!activeTab?.id) return;
@@ -186,11 +187,32 @@ function renderHelperJobs(jobs) {
 }
 
 async function startDownload(item, variantContainer, statusContainer) {
+  // Optimistic feedback + double-click guard
+  const downloadButton = statusContainer?.closest(".media-item")?.querySelector(".download-button");
+  if (pendingDownloads.has(item.url)) return;
+  pendingDownloads.add(item.url);
+
+  if (downloadButton) {
+    downloadButton.disabled = true;
+    downloadButton.textContent = "Starting...";
+  }
+  if (statusContainer) {
+    statusContainer.hidden = false;
+    statusContainer.classList.add("is-pending");
+    statusContainer.textContent = "Connecting to helper...";
+  }
+
   if (item.kind === "direct") {
     const hasPermission = await chrome.permissions.contains({ permissions: ["downloads"] });
     if (!hasPermission) {
       const granted = await chrome.permissions.request({ permissions: ["downloads"] });
       if (!granted) {
+        pendingDownloads.delete(item.url);
+        if (downloadButton) {
+          downloadButton.disabled = false;
+          downloadButton.textContent = item.kind === "direct" ? getMessage("btnSave") : getMessage("btnDownload");
+        }
+        if (statusContainer) statusContainer.classList.remove("is-pending");
         showNotice(getMessage("msgDownloadPermission"), true);
         return;
       }
@@ -201,6 +223,9 @@ async function startDownload(item, variantContainer, statusContainer) {
     type: MESSAGE.DOWNLOADS_START,
     item
   });
+
+  pendingDownloads.delete(item.url);
+  if (statusContainer) statusContainer.classList.remove("is-pending");
 
   if (response?.ok) {
     if (response.helperJob) {
@@ -215,11 +240,19 @@ async function startDownload(item, variantContainer, statusContainer) {
   }
 
   if (response?.error === "DRM_PROTECTED_UNSUPPORTED") {
+    if (downloadButton) {
+      downloadButton.disabled = false;
+      downloadButton.textContent = item.kind === "direct" ? getMessage("btnSave") : getMessage("btnDownload");
+    }
     showNotice(getMessage("msgDrmUnsupported"), true);
     return;
   }
 
   if (response?.error === "SERVER_PROTECTED_UNSUPPORTED") {
+    if (downloadButton) {
+      downloadButton.disabled = false;
+      downloadButton.textContent = item.kind === "direct" ? getMessage("btnSave") : getMessage("btnDownload");
+    }
     showNotice(getMessage("msgServerBlocked"), true);
     return;
   }
@@ -228,6 +261,10 @@ async function startDownload(item, variantContainer, statusContainer) {
     const variants = response.variants || [];
     renderVariants(variantContainer, variants, item);
     const count = variants.length;
+    if (downloadButton) {
+      downloadButton.disabled = false;
+      downloadButton.textContent = item.kind === "direct" ? getMessage("btnSave") : getMessage("btnDownload");
+    }
     showNotice(count
       ? getMessage("msgStreamVariantsHint", { count: String(count), plural: count === 1 ? "" : "s" })
       : getMessage("msgStartHelperHint"), true);
@@ -235,10 +272,18 @@ async function startDownload(item, variantContainer, statusContainer) {
   }
 
   if (response?.error === "STREAM_VARIANTS_ONLY") {
+    if (downloadButton) {
+      downloadButton.disabled = false;
+      downloadButton.textContent = item.kind === "direct" ? getMessage("btnSave") : getMessage("btnDownload");
+    }
     renderVariants(variantContainer, response.variants || [], item);
     return;
   }
 
+  if (downloadButton) {
+    downloadButton.disabled = false;
+    downloadButton.textContent = item.kind === "direct" ? getMessage("btnSave") : getMessage("btnDownload");
+  }
   showNotice(response?.error || getMessage("msgDownloadFailed"), true);
 }
 
