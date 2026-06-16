@@ -120,6 +120,9 @@ async function loadHelperStatus() {
     const cachedJobs = response?.cachedJobs || [];
     const downloadDir = response?.health?.downloadDir || "";
 
+    console.log("[ds-video-downloader] loadHelperStatus online=%s jobs=%d cached=%d",
+      online, liveJobs.length, cachedJobs.length);
+
     // Merge: live jobs take priority, then fill with cached history
     const liveIds = new Set(liveJobs.map(j => j.id));
     const merged = [
@@ -127,19 +130,25 @@ async function loadHelperStatus() {
       ...cachedJobs.filter(j => !liveIds.has(j.id))
     ].sort((a, b) => (b.startedAt || "").localeCompare(a.startedAt || "")).slice(0, 20);
 
-    helperSummary.textContent = online
-      ? getMessage("msgActiveJobs", { active: String(runningCount(liveJobs)), total: String(liveJobs.length), plural: liveJobs.length === 1 ? "" : "s" })
-      : getMessage("statusHelperOffline");
-    helperStatus.className = `helper-status ${online ? "is-online" : "is-offline"}`;
-    helperStatus.textContent = online
-      ? getMessage("msgHelperRunning", { dir: downloadDir || getMessage("labelDefaultFolder") })
-      : getMessage("msgHelperEmpty");
+    try {
+      helperSummary.textContent = online
+        ? getMessage("msgActiveJobs", { active: String(runningCount(liveJobs)), total: String(liveJobs.length), plural: liveJobs.length === 1 ? "" : "s" })
+        : getMessage("statusHelperOffline");
+      helperStatus.className = `helper-status ${online ? "is-online" : "is-offline"}`;
+      helperStatus.textContent = online
+        ? getMessage("msgHelperRunning", { dir: downloadDir || getMessage("labelDefaultFolder") })
+        : getMessage("msgHelperEmpty");
 
-    if (online && downloadDir && document.activeElement !== downloadDirInput) {
-      downloadDirInput.value = downloadDir;
+      if (online && downloadDir && document.activeElement !== downloadDirInput) {
+        downloadDirInput.value = downloadDir;
+      }
+    } catch (domError) {
+      console.warn("[ds-video-downloader] loadHelperStatus DOM update failed", domError);
     }
 
     renderHelperJobs(merged);
+  } catch (error) {
+    console.error("[ds-video-downloader] loadHelperStatus failed", error);
   } finally {
     statusLoading = false;
     if (statusPending) {
@@ -197,6 +206,10 @@ function renderMedia(items) {
 const helperJobNodes = new Map();
 
 function renderHelperJobs(jobs) {
+  if (!helperJobTemplate) {
+    console.warn("[ds-video-downloader] helperJobTemplate not found in DOM");
+    return;
+  }
   // Clear empty-state if we have jobs now
   if (jobs.length && helperJobNodes.size === 0) {
     helperJobs.textContent = "";
@@ -342,6 +355,9 @@ async function startDownload(item, variantContainer, statusContainer) {
     type: MESSAGE.DOWNLOADS_START,
     item
   });
+
+  console.log("[ds-video-downloader] startDownload response ok=%s helperJob=%s error=%s",
+    response?.ok, Boolean(response?.helperJob), response?.error);
 
   pendingDownloads.delete(item.url);
   if (statusContainer) statusContainer.classList.remove("is-pending");

@@ -462,19 +462,15 @@ function showJobOutput(id) {
   if (!isSafeDownloadPath(job.outputPath, baseDir)) return { ok: false, status: 403, error: "OUTPUT_PATH_UNSAFE" };
 
   if (process.platform === "win32") {
-    if (existsSync(job.outputPath)) {
-      // File exists — open Explorer with file selected
-      spawn("explorer.exe", [`/select,${job.outputPath}`], {
-        detached: true,
-        stdio: "ignore"
-      }).unref();
-    } else {
-      // File not on disk yet — open download directory
-      spawn("explorer.exe", [baseDir], {
-        detached: true,
-        stdio: "ignore"
-      }).unref();
-    }
+    // Open the containing directory. We avoid explorer /select,<path>
+    // because its argument parsing is fragile — when the path contains
+    // spaces or special characters, Explorer may silently fall back to
+    // opening the user's Documents folder.
+    const targetDir = existsSync(job.outputPath) ? path.dirname(job.outputPath) : baseDir;
+    spawn("explorer.exe", [targetDir], {
+      detached: true,
+      stdio: "ignore"
+    }).unref();
     return { ok: true };
   }
 
