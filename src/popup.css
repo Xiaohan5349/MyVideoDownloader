@@ -940,3 +940,70 @@ h1 {
   color: var(--cyan);
   animation: pulseRunning 2.4s ease-in-out infinite;
 }
+
+/* ─── Download confirmation modal ─── */
+.confirm-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(6, 7, 9, 0.75);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  animation: fadeIn 0.15s var(--ease);
+}
+.confirm-dialog {
+  min-width: 280px;
+  max-width: 360px;
+  padding: 24px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--glass-elevated);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  box-shadow: 0 0 40px rgba(0,0,0,0.5);
+}
+.confirm-dialog h3 {
+  margin: 0 0 8px;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--ink);
+}
+.confirm-dialog p {
+  margin: 0 0 18px;
+  font-size: 12px;
+  color: var(--muted);
+  word-break: break-all;
+}
+.confirm-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.confirm-actions button {
+  min-width: 80px;
+}
+.confirm-actions .btn-primary {
+  border-color: var(--cyan);
+  color: var(--cyan);
+  background: rgba(0,229,255,0.06);
+}
+.confirm-actions .btn-primary:hover {
+  background: rgba(0,229,255,0.14);
+}
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* ─── Clickable media items ─── */
+.media-item:not(.is-protected) {
+  cursor: pointer;
+  transition: background 0.2s var(--ease), border-color 0.2s var(--ease);
+}
+.media-item:not(.is-protected):hover {
+  background: rgba(255,255,255,0.03);
+  border-color: var(--line-strong);
+}
