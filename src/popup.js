@@ -153,36 +153,75 @@ function renderMedia(items) {
   }
 }
 
+const helperJobNodes = new Map();
+
 function renderHelperJobs(jobs) {
-  helperJobs.textContent = "";
-  if (!jobs.length) {
-    helperJobs.innerHTML = `<div class="helper-status">${getMessage("msgNoJobs")}</div>`;
-    return;
-  }
+  const seenIds = new Set();
 
   for (const job of jobs) {
-    const node = helperJobTemplate.content.firstElementChild.cloneNode(true);
-    node.querySelector(".helper-job-title").textContent = jobTitle(job);
-    const state = node.querySelector(".helper-job-state");
-    state.textContent = humanStatus(job.status);
-    state.classList.toggle("is-complete", job.status === "completed");
-    state.classList.toggle("is-error", job.status === "failed");
-    state.classList.toggle("is-cancelled", job.status === "cancelled");
-    node.querySelector(".helper-job-meta").textContent = job.error || job.progressText || sizeLabel(job);
-    node.querySelector(".helper-job-path").textContent = job.outputPath || job.url;
+    seenIds.add(job.id);
+    const existing = helperJobNodes.get(job.id);
 
-    const cancelButton = node.querySelector(".cancel-button");
-    const showButton = node.querySelector(".show-button");
-    const deleteButton = node.querySelector(".delete-button");
-    const isActive = job.status === "queued" || job.status === "running";
-    const isFinished = job.status === "completed" || job.status === "failed" || job.status === "cancelled";
-    cancelButton.disabled = !isActive;
-    showButton.disabled = !job.outputPath;
-    deleteButton.disabled = !isFinished;
-    cancelButton.addEventListener("click", () => cancelJob(job.id));
-    showButton.addEventListener("click", () => showJobInFolder(job.id));
-    deleteButton.addEventListener("click", () => deleteJob(job.id));
-    helperJobs.appendChild(node);
+    if (existing) {
+      // Update existing node in place
+      const state = existing.querySelector(".helper-job-state");
+      const meta = existing.querySelector(".helper-job-meta");
+      const pathEl = existing.querySelector(".helper-job-path");
+      const cancelBtn = existing.querySelector(".cancel-button");
+      const showBtn = existing.querySelector(".show-button");
+      const deleteBtn = existing.querySelector(".delete-button");
+
+      state.textContent = humanStatus(job.status);
+      state.className = `helper-job-state ${job.status === "completed" ? "is-complete" : ""} ${job.status === "failed" ? "is-error" : ""} ${job.status === "cancelled" ? "is-cancelled" : ""}`;
+      meta.textContent = job.error || job.progressText || sizeLabel(job);
+      pathEl.textContent = job.outputPath || job.url;
+
+      const isActive = job.status === "queued" || job.status === "running";
+      const isFinished = job.status === "completed" || job.status === "failed" || job.status === "cancelled";
+      cancelBtn.disabled = !isActive;
+      showBtn.disabled = !job.outputPath;
+      deleteBtn.disabled = !isFinished;
+    } else {
+      // Create new node
+      const node = helperJobTemplate.content.firstElementChild.cloneNode(true);
+      node.dataset.jobId = job.id;
+      node.querySelector(".helper-job-title").textContent = jobTitle(job);
+      const state = node.querySelector(".helper-job-state");
+      state.textContent = humanStatus(job.status);
+      state.classList.toggle("is-complete", job.status === "completed");
+      state.classList.toggle("is-error", job.status === "failed");
+      state.classList.toggle("is-cancelled", job.status === "cancelled");
+      node.querySelector(".helper-job-meta").textContent = job.error || job.progressText || sizeLabel(job);
+      node.querySelector(".helper-job-path").textContent = job.outputPath || job.url;
+
+      const cancelButton = node.querySelector(".cancel-button");
+      const showButton = node.querySelector(".show-button");
+      const deleteButton = node.querySelector(".delete-button");
+      const isActive = job.status === "queued" || job.status === "running";
+      const isFinished = job.status === "completed" || job.status === "failed" || job.status === "cancelled";
+      cancelButton.disabled = !isActive;
+      showButton.disabled = !job.outputPath;
+      deleteButton.disabled = !isFinished;
+      cancelButton.addEventListener("click", () => cancelJob(job.id));
+      showButton.addEventListener("click", () => showJobInFolder(job.id));
+      deleteButton.addEventListener("click", () => deleteJob(job.id));
+
+      helperJobs.appendChild(node);
+      helperJobNodes.set(job.id, node);
+    }
+  }
+
+  // Remove stale nodes
+  for (const [id, node] of helperJobNodes) {
+    if (!seenIds.has(id)) {
+      node.remove();
+      helperJobNodes.delete(id);
+    }
+  }
+
+  if (!jobs.length) {
+    helperJobs.innerHTML = `<div class="helper-status">${getMessage("msgNoJobs")}</div>`;
+    helperJobNodes.clear();
   }
 }
 
