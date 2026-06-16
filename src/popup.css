@@ -934,3 +934,9 @@ h1 {
     animation-iteration-count: 1 !important;
   }
 }
+
+/* Pending download indicator */
+.job-status.is-pending {
+  color: var(--cyan);
+  animation: pulseRunning 2.4s ease-in-out infinite;
+}
