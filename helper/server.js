@@ -2,7 +2,7 @@ import http from "node:http";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,14 +13,43 @@ const HOST = process.env.HOST || "127.0.0.1";
 const DEFAULT_DOWNLOAD_DIR = process.env.DOWNLOAD_DIR || path.join(__dirname, "downloads");
 const CONFIG_PATH = path.join(__dirname, "helper-settings.json");
 const PICKER_SCRIPT_PATH = path.join(__dirname, "pick-folder.ps1");
+const JOBS_PATH = path.join(__dirname, "helper-jobs.json");
 const SIZE_PROBE_LIMIT = Number(process.env.SIZE_PROBE_LIMIT || 1500);
 const SIZE_PROBE_CONCURRENCY = Number(process.env.SIZE_PROBE_CONCURRENCY || 8);
 const SIZE_PROBE_TIMEOUT_MS = Number(process.env.SIZE_PROBE_TIMEOUT_MS || 5000);
 const jobs = new Map();
 const jobProcesses = new Map();
+
+async function loadJobsFromDisk() {
+  try {
+    const raw = await readFile(JOBS_PATH, "utf8");
+    const data = JSON.parse(raw);
+    if (Array.isArray(data)) {
+      for (const job of data) {
+        if (job.id) jobs.set(job.id, job);
+      }
+    }
+    console.log(`Loaded ${jobs.size} jobs from history`);
+  } catch {
+    // No history file yet — that's fine
+  }
+}
+
+async function persistJobsToDisk() {
+  try {
+    const data = Array.from(jobs.values());
+    const tmpPath = JOBS_PATH + ".tmp";
+    await writeFile(tmpPath, JSON.stringify(data, null, 2), "utf8");
+    await rename(tmpPath, JOBS_PATH);
+  } catch {
+    // Silently fail — persistence is best-effort
+  }
+}
+
 let downloadDir = await loadDownloadDir();
 
 await mkdir(downloadDir, { recursive: true });
+await loadJobsFromDisk();
 
 const server = http.createServer(async (req, res) => {
   setCorsHeaders(res);
@@ -120,7 +149,7 @@ if (process.env.NODE_ENV !== "test") {
   });
 }
 
-export { server, jobs, isSafeDownloadPath };
+export { server, jobs, isSafeDownloadPath, persistJobsToDisk };
 
 async function startDownload(payload) {
   const url = validateUrl(payload?.url);
@@ -159,6 +188,7 @@ async function startDownload(payload) {
     log: []
   };
   jobs.set(id, job);
+  persistJobsToDisk();
 
   runFfmpeg(job, headers);
   return { ok: true, job };
@@ -285,12 +315,14 @@ function runFfmpeg(job, headers) {
     job.error = error.code === "ENOENT" ? "FFMPEG_NOT_FOUND" : error.message;
     job.exitCode = error.code || null;
     job.finishedAt = new Date().toISOString();
+    persistJobsToDisk();
   });
 
   child.on("close", (code) => {
     jobProcesses.delete(job.id);
     if (job.status === "failed" || job.status === "cancelled") {
       if (!job.finishedAt) job.finishedAt = new Date().toISOString();
+      persistJobsToDisk();
       job.exitCode = code;
       return;
     }
@@ -299,6 +331,7 @@ function runFfmpeg(job, headers) {
     job.error = code === 0 ? null : describeFfmpegExit(code, job.log);
     job.progressText = code === 0 ? `Completed ${formatBytes(job.downloadedBytes)}` : job.progressText;
     job.finishedAt = new Date().toISOString();
+    persistJobsToDisk();
   });
 }
 
@@ -454,6 +487,7 @@ async function deleteJobOutput(id) {
     if (error?.code !== "ENOENT") throw error;
   });
   jobs.delete(id);
+  persistJobsToDisk();
   return { ok: true };
 }
 
@@ -466,6 +500,7 @@ function cancelJob(id) {
   job.error = null;
   job.progressText = "Stopped by user";
   job.finishedAt = new Date().toISOString();
+  persistJobsToDisk();
   job.etaSeconds = null;
 
   const child = jobProcesses.get(id);

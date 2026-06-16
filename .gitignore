@@ -11,3 +11,5 @@ dist/
 CLAUDE.md
 .DS_Store
 Thumbs.db
+helper/helper-jobs.json
+helper/helper-jobs.json.tmp
