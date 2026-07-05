@@ -15,6 +15,7 @@ import {
 test("classifyMedia detects direct URLs and manifests", () => {
   assert.deepEqual(classifyMedia("https://example.com/video.mp4"), { extension: "mp4", kind: "direct" });
   assert.deepEqual(classifyMedia("https://example.com/live/master.m3u8"), { extension: "m3u8", kind: "hls" });
+  assert.deepEqual(classifyMedia("https://example.com/watch?src=https%3A%2F%2Fcdn.example.com%2Fmaster.m3u8"), { extension: "m3u8", kind: "hls" });
   assert.deepEqual(classifyMedia("https://example.com/manifest", "application/dash+xml"), { extension: "mpd", kind: "dash" });
   assert.equal(classifyMedia("https://example.com/page.html"), null);
 });
@@ -74,6 +75,19 @@ test("parseHlsManifest marks DRM-style encrypted streams as protected", () => {
   assert.equal(parsed.hasDrm, true);
 });
 
+test("parseHlsManifest keeps DRM state when later keys are plain AES-128", () => {
+  const parsed = parseHlsManifest([
+    "#EXTM3U",
+    "#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"skd://key\"",
+    "#EXTINF:4.0,",
+    "segment0.ts",
+    "#EXT-X-KEY:METHOD=AES-128,URI=\"key.bin\"",
+    "#EXTINF:4.0,",
+    "segment1.ts"
+  ].join("\n"));
+  assert.equal(parsed.hasDrm, true);
+});
+
 test("parseHlsManifest allows accessible AES-128 HLS keys", () => {
   const parsed = parseHlsManifest("#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"key.key\"\n#EXTINF:4.0,\nsegment.ts");
   assert.equal(parsed.hasDrm, false);
@@ -105,5 +119,6 @@ test("inferQualityLabel reads common HLS quality URL patterns", () => {
   assert.equal(inferQualityLabel("https://cdn.example.com/hls/1080p/index.m3u8"), "1080p");
   assert.equal(inferQualityLabel("https://cdn.example.com/video/1280x720/playlist.m3u8"), "720p");
   assert.equal(inferQualityLabel("https://cdn.example.com/stream_360/index.m3u8"), "360p");
+  assert.equal(inferQualityLabel("https://cdn.example.com/hls/180p/video.m3u8"), "180p");
   assert.equal(inferQualityLabel("https://cdn.example.com/master.m3u8"), "");
 });

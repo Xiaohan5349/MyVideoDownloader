@@ -10,6 +10,7 @@
   "btnRescan": { "message": "Rescan" },
   "btnRescanTitle": { "message": "Scan this page again" },
   "btnRefresh": { "message": "Refresh" },
+  "btnOpenDashboard": { "message": "Dashboard" },
   "btnDownload": { "message": "Download" },
   "btnSave": { "message": "Save" },
   "btnStop": { "message": "Stop" },

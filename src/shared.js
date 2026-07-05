@@ -45,6 +45,36 @@ export const DIRECT_EXTENSIONS = new Set([
 
 export const MANIFEST_EXTENSIONS = new Set(["m3u8", "mpd"]);
 
+// Segment files: HLS/DASH fragments that should NOT show as standalone media.
+// These are downloaded as part of a stream, not useful individually.
+export const SEGMENT_EXTENSIONS = new Set([
+  "m4s",  // DASH segment
+  "jpeg", // obfuscated HLS segment (used by some CDNs)
+  "jpg",
+  "png",
+  "gif",
+  "webp",
+  "mp2t"
+]);
+
+export function isSegmentFile(url = "", contentType = "") {
+  try {
+    const path = new URL(url).pathname.toLowerCase();
+    // Image/segment extensions used as obfuscated video segments
+    if (/\.(m4s|jpeg|jpg|png|gif|webp|mp2t|vtt)(?:[?#]|$)/.test(path)) return true;
+    // Numbered .ts segments (e.g. /602930.ts)
+    if (/\/\d+\.ts(?:[?#]|$)/.test(path)) return true;
+    // Named .ts segments (e.g. /seg-000001.ts, /segment_42.ts)
+    if (/\/seg(?:ment)?[-_]?\d+\.ts(?:[?#]|$)/i.test(path)) return true;
+    // Hex-named .ts segments (e.g. /98639578bfa59372.ts)
+    if (/\/[0-9a-f]{8,}\.ts(?:[?#]|$)/i.test(path)) return true;
+    // Non-video .ts files (e.g. /thumbvtt.ts)
+    if (/\/(?:thumb|subtitle|caption|vtt|key|init)\.ts/i.test(path)) return true;
+  } catch {}
+  const ext = detectExtension(url, contentType);
+  return ext ? SEGMENT_EXTENSIONS.has(ext) : false;
+}
+
 const MIME_TYPES = [
   ["application/vnd.apple.mpegurl", "m3u8"],
   ["application/x-mpegurl", "m3u8"],
@@ -72,6 +102,9 @@ export function detectExtension(url = "", contentType = "") {
     const parsed = new URL(url);
     const match = parsed.pathname.toLowerCase().match(/\.([a-z0-9]{2,5})$/);
     if (match?.[1]) return match[1];
+    const decoded = decodeURIComponent(parsed.href).toLowerCase();
+    const embeddedMatch = decoded.match(/\.(m3u8|mpd|mp4|webm|mov|m4v)(?:[?#&]|$)/);
+    if (embeddedMatch?.[1]) return embeddedMatch[1];
   } catch {
     const match = String(url).toLowerCase().split("?")[0].match(/\.([a-z0-9]{2,5})$/);
     if (match?.[1]) return match[1];
@@ -161,7 +194,7 @@ export function parseHlsManifest(text = "", manifestUrl = "") {
 
   for (const line of lines) {
     if (line.startsWith("#EXT-X-KEY")) {
-      hasDrm = isProtectedHlsKey(line);
+      hasDrm = hasDrm || isProtectedHlsKey(line);
       continue;
     }
     if (line.startsWith("#EXT-X-STREAM-INF")) {
@@ -189,13 +222,13 @@ export function parseHlsManifest(text = "", manifestUrl = "") {
 
 export function inferQualityLabel(value = "") {
   const text = decodeURIComponent(String(value)).toLowerCase();
-  const direct = text.match(/(?:^|[^0-9])((?:2160|1440|1080|720|576|540|480|360|240|144))p(?:[^0-9]|$)/);
+  const direct = text.match(/(?:^|[^0-9])((?:2160|1440|1080|720|576|540|480|360|240|180|144))p(?:[^0-9]|$)/);
   if (direct?.[1]) return `${direct[1]}p`;
 
-  const resolution = text.match(/(?:^|[^0-9])(\d{3,5})x((?:2160|1440|1080|720|576|540|480|360|240|144))(?:[^0-9]|$)/);
+  const resolution = text.match(/(?:^|[^0-9])(\d{3,5})x((?:2160|1440|1080|720|576|540|480|360|240|180|144))(?:[^0-9]|$)/);
   if (resolution?.[2]) return `${resolution[2]}p`;
 
-  const folder = text.match(/(?:\/|_|-)((?:2160|1440|1080|720|576|540|480|360|240|144))(?:\/|_|-|$)/);
+  const folder = text.match(/(?:\/|_|-)((?:2160|1440|1080|720|576|540|480|360|240|180|144))(?:\/|_|-|$)/);
   if (folder?.[1]) return `${folder[1]}p`;
 
   return "";

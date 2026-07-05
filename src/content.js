@@ -4,26 +4,9 @@
 // or DIRECT_EXTENSIONS in shared.js, you MUST manually sync here.
 const MESSAGE_MEDIA_ADD_DETECTED = "media:addDetected";
 const DIRECT_EXTENSIONS = new Set([
-  "mp4",
-  "webm",
-  "mov",
-  "m4v",
-  "mkv",
-  "avi",
-  "flv",
-  "wmv",
-  "mpg",
-  "mpeg",
-  "3gp",
-  "m2ts",
-  "mts",
-  "ts",
-  "mp3",
-  "m4a",
-  "aac",
-  "flac",
-  "ogg",
-  "wav"
+  "mp4", "webm", "mov", "m4v", "mkv", "avi", "flv", "wmv",
+  "mpg", "mpeg", "3gp", "m2ts", "mts", "ts",
+  "mp3", "m4a", "aac", "flac", "ogg", "wav"
 ]);
 
 const seenUrls = new Set();
@@ -33,19 +16,305 @@ let currentUrl = location.href;
 scanDocument();
 observePageChanges();
 
+// Listen for stream URLs found by inject-main.js (MAIN world)
+document.addEventListener("ds-video-downloader-found", (event) => {
+  try {
+    const { findings } = event.detail || {};
+    if (!findings?.length) return;
+    const items = [];
+    for (const f of findings) {
+      const urls = extractM3u8Urls(f.text || "");
+      for (const rawUrl of urls) {
+        const url = absoluteUrl(rawUrl);
+        if (!url || seenUrls.has(url)) continue;
+        const classified = classifyMedia(url, "");
+        if (!classified) continue;
+        seenUrls.add(url);
+        const item = normalizeMediaItem({
+          url, sourcePageUrl: location.href, title: document.title || "video",
+          extension: classified.extension, kind: classified.kind
+        });
+        if (item) items.push(item);
+      }
+    }
+    if (items.length) {
+      chrome.runtime.sendMessage({
+        type: MESSAGE_MEDIA_ADD_DETECTED,
+        sourcePageUrl: location.href,
+        title: document.title || "video",
+        items
+      }).catch(() => {});
+    }
+  } catch (_) {}
+});
+
+function extractM3u8Urls(text) {
+  if (!text) return [];
+  const urls = new Set();
+  const re = /https?:\/\/[^\s"'<>\\]+?\.(?:m3u8|mpd)(?:[^\s"'<>\\]*)/gi;
+  for (const m of String(text).matchAll(re)) urls.add(m[0]);
+  return Array.from(urls);
+}
+
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  // Rescan page
   if (message?.type === "page:rescan") {
+    seenUrls.clear();
     scanDocument();
     sendResponse({ ok: true });
+    return;
+  }
+
+  // Fetch a URL from content script context (has page's Referer/TLS/cookies)
+  // The background and helper CANNOT access Cloudflare-protected CDNs.
+  if (message?.type === "page:fetchText") {
+    fetchTextFromPage(message.url || "")
+      .then((text) => sendResponse({ ok: true, text }))
+      .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
+    return true; // async response
+  }
+
+  // Full HLS download: fetch manifest → parse segments → fetch + upload
+  if (message?.type === "page:downloadStream") {
+    console.warn("[ds-content] page:downloadStream received url=", (message.payload?.manifestUrl || "").slice(0, 80));
+    handleStreamDownload(message.payload || {})
+      .then((result) => {
+        console.warn("[ds-content] page:downloadStream result ok=", result?.ok, "error=", result?.error);
+        sendResponse(result);
+      })
+      .catch((err) => {
+        console.warn("[ds-content] page:downloadStream error=", err.message);
+        sendResponse({ ok: false, error: err.message || String(err) });
+      });
+    return true;
   }
 });
+
+// --- Simple fetch from page context ---
+async function fetchTextFromPage(url) {
+  console.warn("[ds-content] fetchTextFromPage url=", url.slice(0, 100));
+  // Minimal fetch: no custom headers, no credentials flag.
+  // Custom headers + credentials:include triggers CORS preflight
+  // which can cause "Failed to fetch" on protected CDNs.
+  // The browser sends cookies for the target domain automatically.
+  const response = await fetch(url, { cache: "no-store" });
+  console.warn("[ds-content] fetchTextFromPage status=", response.status);
+  if (!response.ok) {
+    throw new Error(response.status === 403 ? "SERVER_PROTECTED_UNSUPPORTED" : `FETCH_${response.status}`);
+  }
+  return response.text();
+}
+
+// --- Full stream download from page context ---
+async function handleStreamDownload(payload) {
+  const { helperUrl, manifestUrl, quality, title } = payload;
+  console.warn("[ds-content] handleStreamDownload start manifestUrl=", manifestUrl?.slice(0, 80));
+  if (!helperUrl || !manifestUrl) throw new Error("INVALID_DOWNLOAD_REQUEST");
+
+  // Step 1: Fetch master playlist
+  const masterText = await fetchTextFromPage(manifestUrl);
+  console.warn("[ds-content] master playlist fetched, length=", masterText.length);
+
+  // Step 2: Parse with simple inline parser
+  const master = parseHlsMaster(masterText, manifestUrl);
+  if (master.hasDrm) throw new Error("DRM_PROTECTED_UNSUPPORTED");
+
+  // Step 3: Pick variant
+  let variantUrl = manifestUrl;
+  if (master.variants.length) {
+    const picked = pickVariant(master.variants, quality);
+    variantUrl = picked.url;
+  }
+
+  // Step 4: Fetch media playlist
+  const mediaText = await fetchTextFromPage(variantUrl);
+
+  // Step 5: Extract segment URLs
+  const segments = parseSegments(mediaText, variantUrl);
+  if (!segments.length) throw new Error("HLS_NO_SEGMENTS");
+
+  // Step 6: Create helper job
+  const startRes = await fetch(`${helperUrl}/browser-downloads/start`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      url: variantUrl,
+      title: title || "video",
+      totalSegments: segments.length
+    })
+  });
+  const startPayload = await startRes.json().catch(() => ({}));
+  if (!startRes.ok) throw new Error(startPayload.error || `HELPER_${startRes.status}`);
+  const job = startPayload.job;
+
+  // Step 7: Fetch and upload segments in parallel (8 at a time)
+  const concurrency = 8;
+  const assets = segments.map((seg, i) => ({
+    url: seg,
+    name: `seg-${String(i).padStart(6, "0")}.ts`
+  }));
+
+  let completed = 0;
+  const total = assets.length;
+
+  // Parallel fetch + upload with concurrency control
+  const running = new Set();
+  let idx = 0;
+
+  async function processOne(asset) {
+    // Check cancelled
+    try {
+      const checkRes = await fetch(`${helperUrl}/jobs/${encodeURIComponent(job.id)}`);
+      if (checkRes.ok) {
+        const j = await checkRes.json().catch(() => ({}));
+        if (j.status === "cancelled") return;
+      }
+    } catch (_) {}
+
+    // Fetch segment (from page context = Cloudflare passes)
+    const segRes = await fetch(asset.url, { cache: "no-store" });
+    if (!segRes.ok) throw new Error(`SEGMENT_${segRes.status}`);
+
+    const data = await segRes.arrayBuffer();
+
+    // Upload to helper
+    const upRes = await fetch(
+      `${helperUrl}/browser-downloads/${encodeURIComponent(job.id)}/files/${encodeURIComponent(asset.name)}`,
+      { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: data }
+    );
+    if (!upRes.ok) throw new Error(`UPLOAD_${upRes.status}`);
+
+    completed += 1;
+  }
+
+  // Simple concurrency loop
+  const workers = [];
+  for (let i = 0; i < Math.min(concurrency, total); i++) {
+    workers.push((async () => {
+      while (idx < total) {
+        const currentIdx = idx++;
+        try {
+          await processOne(assets[currentIdx]);
+        } catch (e) {
+          // Log error but continue with remaining segments
+          console.warn("[ds-video-downloader] segment failed", currentIdx, e.message);
+        }
+      }
+    })());
+  }
+  await Promise.all(workers);
+
+  // Step 8: Build local playlist and complete
+  const localPlaylist = buildLocalPlaylist(mediaText, assets);
+  const completeRes = await fetch(
+    `${helperUrl}/browser-downloads/${encodeURIComponent(job.id)}/complete`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ playlistText: localPlaylist })
+    }
+  );
+  if (!completeRes.ok) throw new Error(`HELPER_COMPLETE_${completeRes.status}`);
+
+  return { ok: true, helperJob: job, completed, total };
+}
+
+// --- Inline HLS parsing (no ES module imports in content scripts) ---
+
+function parseHlsMaster(text, baseUrl) {
+  const lines = String(text).split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const variants = [];
+  let hasDrm = false;
+  let pending = null;
+
+  for (const line of lines) {
+    if (line.startsWith("#EXT-X-KEY")) {
+      if (/METHOD=SAMPLE-AES/i.test(line) || /KEYFORMAT=/i.test(line) || /URI=["']?skd:\/\//i.test(line)) {
+        hasDrm = true;
+      }
+      continue;
+    }
+    if (line.startsWith("#EXT-X-STREAM-INF")) {
+      const bandwidth = readAttr(line, "BANDWIDTH");
+      const resolution = readAttr(line, "RESOLUTION");
+      pending = { bandwidth: Number(bandwidth) || null, resolution };
+      continue;
+    }
+    if (!line.startsWith("#") && pending) {
+      const quality = qualityFromResolution(pending.resolution);
+      variants.push({
+        url: resolveUrl(line, baseUrl),
+        quality,
+        bandwidth: pending.bandwidth
+      });
+      pending = null;
+    }
+  }
+
+  return { hasDrm, variants };
+}
+
+function parseSegments(text, baseUrl) {
+  return String(text).split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l && !l.startsWith("#"))
+    .map((l) => resolveUrl(l, baseUrl));
+}
+
+function buildLocalPlaylist(text, assets) {
+  const lines = String(text).split(/\r?\n/);
+  const result = [];
+  let ai = 0;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) {
+      result.push(line);
+    } else if (ai < assets.length) {
+      result.push(assets[ai].name);
+      ai++;
+    } else {
+      result.push(line);
+    }
+  }
+  return result.join("\n");
+}
+
+function pickVariant(variants, targetQuality) {
+  if (targetQuality) {
+    const found = variants.find((v) => v.quality === targetQuality);
+    if (found) return found;
+  }
+  // Pick highest quality
+  return [...variants].sort((a, b) => variantScore(b) - variantScore(a))[0];
+}
+
+function variantScore(v) {
+  const h = Number((v.quality || "").match(/(\d+)p/)?.[1] || 0);
+  return h + (v.bandwidth || 0) / 10000000;
+}
+
+function qualityFromResolution(resolution) {
+  if (!resolution) return "";
+  const m = String(resolution).match(/(\d{2,5})x(\d{2,5})/i);
+  return m?.[2] ? `${m[2]}p` : "";
+}
+
+function readAttr(line, key) {
+  const m = line.match(new RegExp(`${key}=([^,]+)`, "i"));
+  return m?.[1]?.replace(/^"|"$/g, "") || "";
+}
+
+function resolveUrl(url, base) {
+  try { return new URL(url, base).href; } catch { return url; }
+}
+
+// --- DOM scanning (original logic, unchanged) ---
 
 function observePageChanges() {
   const observer = new MutationObserver(() => scheduleScan());
   if (document.documentElement) {
     observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ["src", "href"] });
   }
-
   window.addEventListener("popstate", handlePotentialNavigation);
   window.addEventListener("hashchange", handlePotentialNavigation);
   window.setInterval(handlePotentialNavigation, 1000);
@@ -55,6 +324,11 @@ function handlePotentialNavigation() {
   if (currentUrl === location.href) return;
   currentUrl = location.href;
   seenUrls.clear();
+  // Tell background to clear stale media for this tab
+  chrome.runtime.sendMessage({
+    type: "page:clearMedia",
+    sourcePageUrl: location.href
+  }).catch(() => {});
   scheduleScan();
 }
 
@@ -66,7 +340,8 @@ function scheduleScan() {
 function scanDocument() {
   const items = [];
   scanAttribute(document.querySelectorAll("video[src], audio[src], source[src]"), "src", items);
-  scanAttribute(document.querySelectorAll("a[href]"), "href", items);
+  // Intentionally NOT scanning <a href> — too many false positives on listing pages
+  scanScriptText(document.querySelectorAll("script"), items);
 
   if (!items.length) return;
   chrome.runtime.sendMessage({
@@ -81,34 +356,22 @@ function scanAttribute(nodes, attribute, items) {
   for (const node of nodes) {
     const rawUrl = node.getAttribute(attribute);
     if (!rawUrl) continue;
-
     const url = absoluteUrl(rawUrl);
     if (!url || seenUrls.has(url)) continue;
-
     const classified = classifyMedia(url, node.getAttribute("type") || "");
     if (!classified) continue;
-
     seenUrls.add(url);
     const item = normalizeMediaItem({
-      url,
-      sourcePageUrl: location.href,
-      title: readableTitle(node),
-      extension: classified.extension,
-      kind: classified.kind
+      url, sourcePageUrl: location.href, title: readableTitle(node),
+      extension: classified.extension, kind: classified.kind
     });
     if (item) items.push(item);
   }
 }
 
 function readableTitle(node) {
-  return (
-    node.getAttribute("download") ||
-    node.getAttribute("title") ||
-    node.getAttribute("aria-label") ||
-    closestText(node) ||
-    document.title ||
-    "video"
-  );
+  return node.getAttribute("download") || node.getAttribute("title") ||
+    node.getAttribute("aria-label") || closestText(node) || document.title || "video";
 }
 
 function closestText(node) {
@@ -118,48 +381,45 @@ function closestText(node) {
 }
 
 function absoluteUrl(rawUrl) {
-  try {
-    return new URL(rawUrl, location.href).href;
-  } catch {
-    return "";
-  }
+  try { return new URL(rawUrl, location.href).href; } catch { return ""; }
 }
 
 function classifyMedia(url = "", contentType = "") {
-  const extension = detectExtension(url, contentType);
-  if (!extension) return null;
-  if (extension === "m3u8") return { extension, kind: "hls" };
-  if (extension === "mpd") return { extension, kind: "dash" };
-  if (DIRECT_EXTENSIONS.has(extension)) return { extension, kind: "direct" };
+  const ext = detectExtension(url, contentType);
+  if (!ext) return null;
+  if (ext === "m3u8") return { extension: ext, kind: "hls" };
+  if (ext === "mpd") return { extension: ext, kind: "dash" };
+  // .ts files are HLS segments — never useful standalone from DOM scan
+  if (ext === "ts") return null;
+  if (DIRECT_EXTENSIONS.has(ext)) return { extension: ext, kind: "direct" };
   return null;
 }
 
 function detectExtension(url = "", contentType = "") {
-  const cleanContentType = contentType.toLowerCase().split(";")[0].trim();
-  if (["application/vnd.apple.mpegurl", "application/x-mpegurl", "audio/mpegurl"].includes(cleanContentType)) return "m3u8";
-  if (cleanContentType === "application/dash+xml") return "mpd";
-  if (cleanContentType === "video/mp4") return "mp4";
-  if (cleanContentType === "video/webm") return "webm";
-  if (cleanContentType === "video/quicktime") return "mov";
-  if (cleanContentType === "audio/mpeg") return "mp3";
-
+  const ct = contentType.toLowerCase().split(";")[0].trim();
+  if (["application/vnd.apple.mpegurl", "application/x-mpegurl", "audio/mpegurl"].includes(ct)) return "m3u8";
+  if (ct === "application/dash+xml") return "mpd";
+  if (ct === "video/mp4") return "mp4";
+  if (ct === "video/webm") return "webm";
+  if (ct === "video/quicktime") return "mov";
+  if (ct === "audio/mpeg") return "mp3";
   try {
     const parsed = new URL(url);
-    const match = parsed.pathname.toLowerCase().match(/\.([a-z0-9]{2,5})$/);
-    return match?.[1] || null;
-  } catch {
-    return null;
-  }
+    const m = parsed.pathname.toLowerCase().match(/\.([a-z0-9]{2,5})$/);
+    if (m?.[1]) return m[1];
+    const decoded = decodeURIComponent(parsed.href).toLowerCase();
+    const em = decoded.match(/\.(m3u8|mpd|mp4|webm|mov|m4v)(?:[?#&]|$)/);
+    return em?.[1] || null;
+  } catch { return null; }
 }
 
 function normalizeMediaItem(input) {
   const classified = classifyMedia(input.url, "");
   if (!classified) return null;
-  const sourcePageUrl = input.sourcePageUrl || "";
   return {
-    id: `${sourcePageUrl || "unknown"}::${input.url}`,
+    id: `${input.sourcePageUrl || "unknown"}::${input.url}`,
     url: input.url,
-    sourcePageUrl,
+    sourcePageUrl: input.sourcePageUrl || "",
     title: input.title || "video",
     extension: input.extension || classified.extension,
     kind: input.kind || classified.kind,
@@ -174,14 +434,48 @@ function normalizeMediaItem(input) {
 
 function inferQualityLabel(value = "") {
   const text = decodeURIComponent(String(value)).toLowerCase();
-  const direct = text.match(/(?:^|[^0-9])((?:2160|1440|1080|720|576|540|480|360|240|144))p(?:[^0-9]|$)/);
+  const direct = text.match(/(?:^|[^0-9])((?:2160|1440|1080|720|576|540|480|360|240|180|144))p(?:[^0-9]|$)/);
   if (direct?.[1]) return `${direct[1]}p`;
-
-  const resolution = text.match(/(?:^|[^0-9])(\d{3,5})x((?:2160|1440|1080|720|576|540|480|360|240|144))(?:[^0-9]|$)/);
+  const resolution = text.match(/(?:^|[^0-9])(\d{3,5})x((?:2160|1440|1080|720|576|540|480|360|240|180|144))(?:[^0-9]|$)/);
   if (resolution?.[2]) return `${resolution[2]}p`;
-
-  const folder = text.match(/(?:\/|_|-)((?:2160|1440|1080|720|576|540|480|360|240|144))(?:\/|_|-|$)/);
+  const folder = text.match(/(?:\/|_|-)((?:2160|1440|1080|720|576|540|480|360|240|180|144))(?:\/|_|-|$)/);
   if (folder?.[1]) return `${folder[1]}p`;
-
   return "";
+}
+
+function scanScriptText(nodes, items) {
+  for (const node of nodes) {
+    const text = node.textContent || "";
+    if (!text || text.length > 2000000) continue;
+    for (const rawUrl of extractMediaUrls(text)) {
+      const url = absoluteUrl(rawUrl);
+      if (!url || seenUrls.has(url)) continue;
+      const classified = classifyMedia(url, "");
+      if (!classified) continue;
+      seenUrls.add(url);
+      const item = normalizeMediaItem({
+        url, sourcePageUrl: location.href, title: document.title || "video",
+        extension: classified.extension, kind: classified.kind
+      });
+      if (item) items.push(item);
+    }
+  }
+}
+
+function extractMediaUrls(text) {
+  const normalized = decodeScriptText(text);
+  const urls = new Set();
+  const absPat = /(?:https?:)?\/\/[^\s"'<>\\]+?\.(?:m3u8|mpd|mp4|webm|mov|m4v)(?:[?#][^\s"'<>\\]*)?/gi;
+  const relPat = /(?:^|[\s"'(])((?:\/|\.\.?\/)[^\s"'<>\\]+?\.(?:m3u8|mpd|mp4|webm|mov|m4v)(?:[?#][^\s"'<>\\]*)?)/gi;
+  for (const m of normalized.matchAll(absPat)) {
+    urls.add(m[0].startsWith("//") ? `${location.protocol}${m[0]}` : m[0]);
+  }
+  for (const m of normalized.matchAll(relPat)) {
+    if (m[1]) urls.add(m[1]);
+  }
+  return Array.from(urls).filter(Boolean).map((v) => String(v).replace(/[),.;\]]+$/g, "").replace(/^["']|["']$/g, ""));
+}
+
+function decodeScriptText(text) {
+  return String(text).replace(/\\u002f/gi, "/").replace(/\\\//g, "/").replace(/&amp;/g, "&");
 }

@@ -2,7 +2,7 @@ import http from "node:http";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -129,6 +129,38 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === "POST" && req.url === "/browser-downloads/start") {
+      const payload = await readJson(req);
+      const result = await startBrowserDownload(payload);
+      writeJson(res, result.ok ? 202 : result.status || 400, result);
+      return;
+    }
+
+    if (req.method === "POST" && /^\/browser-downloads\/[^/]+\/files\/[^/]+$/.test(req.url || "")) {
+      const parts = req.url.split("/");
+      const id = decodeURIComponent(parts[2] || "");
+      const fileName = decodeURIComponent(parts[4] || "");
+      const result = await uploadBrowserDownloadFile(id, fileName, req);
+      writeJson(res, result.ok ? 200 : result.status || 400, result);
+      return;
+    }
+
+    if (req.method === "POST" && /^\/browser-downloads\/[^/]+\/complete$/.test(req.url || "")) {
+      const id = decodeURIComponent(req.url.split("/")[2] || "");
+      const payload = await readJson(req);
+      const result = await completeBrowserDownload(id, payload);
+      writeJson(res, result.ok ? 202 : result.status || 400, result);
+      return;
+    }
+
+    if (req.method === "POST" && /^\/browser-downloads\/[^/]+\/fail$/.test(req.url || "")) {
+      const id = decodeURIComponent(req.url.split("/")[2] || "");
+      const payload = await readJson(req);
+      const result = await failBrowserDownload(id, payload);
+      writeJson(res, result.ok ? 200 : result.status || 400, result);
+      return;
+    }
+
     if (req.method === "POST" && req.url === "/inspect") {
       const payload = await readJson(req);
       const result = await inspectForUi(payload);
@@ -191,6 +223,108 @@ async function startDownload(payload) {
   persistJobsToDisk();
 
   runFfmpeg(job, headers);
+  return { ok: true, job };
+}
+
+async function startBrowserDownload(payload) {
+  const url = validateUrl(payload?.url);
+  if (!url) return { ok: false, status: 400, error: "INVALID_URL" };
+
+  const id = randomUUID();
+  const filename = buildFilename(payload.title || "video", url);
+  const outputPath = path.join(downloadDir, filename);
+  const tempDir = path.join(tmpdir(), `ds-video-browser-${id}`);
+  await mkdir(tempDir, { recursive: true });
+
+  const totalBytes = Number(payload.totalBytes);
+  const totalSegments = Number(payload.totalSegments);
+  const durationSeconds = Number(payload.durationSeconds);
+  const job = {
+    id,
+    ok: true,
+    inputMode: "browser",
+    status: "running",
+    url,
+    outputPath,
+    downloadDir,
+    tempDir,
+    localPlaylistPath: null,
+    startedAt: new Date().toISOString(),
+    finishedAt: null,
+    error: null,
+    exitCode: null,
+    progressText: "Waiting for browser segments",
+    downloadedBytes: 0,
+    totalBytes: Number.isFinite(totalBytes) && totalBytes > 0 ? totalBytes : null,
+    totalSizeSource: payload.totalSizeSource || "unknown",
+    totalSegments: Number.isFinite(totalSegments) && totalSegments > 0 ? totalSegments : null,
+    receivedSegments: 0,
+    durationSeconds: Number.isFinite(durationSeconds) && durationSeconds > 0 ? durationSeconds : null,
+    downloadedSeconds: 0,
+    transferRateBytesPerSecond: 0,
+    etaSeconds: null,
+    lastProgressAt: null,
+    lastProgressBytes: 0,
+    ffmpegArgs: [],
+    log: []
+  };
+  jobs.set(id, job);
+  await persistJobsToDisk();
+  return { ok: true, job };
+}
+
+async function uploadBrowserDownloadFile(id, fileName, req) {
+  const job = jobs.get(id);
+  if (!job || job.inputMode !== "browser") return { ok: false, status: 404, error: "JOB_NOT_FOUND" };
+  if (job.status !== "running" && job.status !== "queued") return { ok: false, status: 409, error: "JOB_NOT_RUNNING" };
+
+  const safeName = safeBrowserFileName(fileName);
+  if (!safeName) return { ok: false, status: 400, error: "INVALID_FILE_NAME" };
+
+  const targetPath = path.join(job.tempDir, safeName);
+  if (!isSafeDownloadPath(targetPath, job.tempDir)) return { ok: false, status: 403, error: "OUTPUT_PATH_UNSAFE" };
+
+  const data = await readRaw(req, 256 * 1024 * 1024);
+  await writeFile(targetPath, data);
+  job.receivedSegments += /^seg-/i.test(safeName) ? 1 : 0;
+  updateDownloadedBytes(job, job.downloadedBytes + data.length);
+  job.progressText = formatBrowserReceiveProgress(job);
+  await persistJobsToDisk();
+  return { ok: true, job };
+}
+
+async function completeBrowserDownload(id, payload) {
+  const job = jobs.get(id);
+  if (!job || job.inputMode !== "browser") return { ok: false, status: 404, error: "JOB_NOT_FOUND" };
+  if (job.status !== "running" && job.status !== "queued") return { ok: false, status: 409, error: "JOB_NOT_RUNNING" };
+
+  const playlistText = String(payload?.playlistText || "");
+  if (!playlistText.trimStart().startsWith("#EXTM3U")) return { ok: false, status: 400, error: "INVALID_PLAYLIST" };
+  if (playlistText.length > 20 * 1024 * 1024) return { ok: false, status: 413, error: "PLAYLIST_TOO_LARGE" };
+
+  const playlistPath = path.join(job.tempDir, "input.m3u8");
+  await writeFile(playlistPath, playlistText, "utf8");
+  job.localPlaylistPath = playlistPath;
+  job.url = playlistPath;
+  job.status = "queued";
+  job.progressText = "Muxing local segments";
+  await persistJobsToDisk();
+  runFfmpeg(job, []);
+  return { ok: true, job };
+}
+
+async function failBrowserDownload(id, payload) {
+  const job = jobs.get(id);
+  if (!job || job.inputMode !== "browser") return { ok: false, status: 404, error: "JOB_NOT_FOUND" };
+  if (job.status === "completed" || job.status === "cancelled") return { ok: true, job };
+
+  job.status = "failed";
+  job.error = String(payload?.error || "BROWSER_HLS_FAILED").slice(0, 500);
+  job.progressText = job.error;
+  job.finishedAt = new Date().toISOString();
+  job.etaSeconds = null;
+  await cleanupBrowserTemp(job);
+  await persistJobsToDisk();
   return { ok: true, job };
 }
 
@@ -263,6 +397,7 @@ async function inspectManifest(url, kind, headers) {
 }
 
 function runFfmpeg(job, headers) {
+  const isLocal = job.inputMode === "browser";
   const args = [
     "-hide_banner",
     "-loglevel",
@@ -270,30 +405,33 @@ function runFfmpeg(job, headers) {
     "-progress",
     "pipe:2",
     "-nostats",
-    "-y",
-    "-reconnect",
-    "1",
-    "-reconnect_streamed",
-    "1",
-    "-reconnect_delay_max",
-    "5",
-    "-protocol_whitelist",
-    "file,http,https,tcp,tls,crypto",
-    "-allowed_extensions",
-    "ALL",
-    "-allowed_segment_extensions",
-    "ALL",
-    "-extension_picky",
-    "0"
+    "-y"
   ];
+
+  // Network flags only for remote URLs (not browser-fed local playlists)
+  if (!isLocal) {
+    args.push(
+      "-reconnect", "1",
+      "-reconnect_streamed", "1",
+      "-reconnect_delay_max", "5",
+      "-protocol_whitelist", "file,http,https,tcp,tls,crypto"
+    );
+  }
+
+  args.push(
+    "-allowed_extensions", "ALL",
+    "-allowed_segment_extensions", "ALL",
+    "-extension_picky", "0"
+  );
+
   const userAgent = headers.find((header) => header.name.toLowerCase() === "user-agent")?.value;
   const headerText = headers
     .filter((header) => header.name.toLowerCase() !== "user-agent")
     .map((header) => `${header.name}: ${header.value}`)
     .join("\r\n");
 
-  if (userAgent) args.push("-user_agent", userAgent);
-  if (headerText) args.push("-headers", `${headerText}\r\n`);
+  if (!isLocal && userAgent) args.push("-user_agent", userAgent);
+  if (!isLocal && headerText) args.push("-headers", `${headerText}\r\n`);
   args.push("-i", job.url, "-map", "0:v:0?", "-map", "0:a:0?", "-c", "copy", "-bsf:a", "aac_adtstoasc", "-movflags", "+faststart", job.outputPath);
   job.ffmpegArgs = redactArgs(args);
 
@@ -315,6 +453,7 @@ function runFfmpeg(job, headers) {
     job.error = error.code === "ENOENT" ? "FFMPEG_NOT_FOUND" : error.message;
     job.exitCode = error.code || null;
     job.finishedAt = new Date().toISOString();
+    cleanupBrowserTemp(job);
     persistJobsToDisk();
   });
 
@@ -331,6 +470,7 @@ function runFfmpeg(job, headers) {
     job.error = code === 0 ? null : describeFfmpegExit(code, job.log);
     job.progressText = code === 0 ? `Completed ${formatBytes(job.downloadedBytes)}` : job.progressText;
     job.finishedAt = new Date().toISOString();
+    cleanupBrowserTemp(job);
     persistJobsToDisk();
   });
 }
@@ -379,6 +519,18 @@ function formatProgress(job) {
   else pieces[0] += " / total unknown";
   if (job.transferRateBytesPerSecond > 0) pieces.push(`${formatBytes(job.transferRateBytesPerSecond)}/s`);
   if (job.durationSeconds) pieces.push(`${formatDuration(job.downloadedSeconds)} / ${formatDuration(job.durationSeconds)}`);
+  if (job.etaSeconds != null) pieces.push(`ETA ${formatDuration(job.etaSeconds)}`);
+  return pieces.join(" - ");
+}
+
+function formatBrowserReceiveProgress(job) {
+  const pieces = ["Fetching browser segments"];
+  if (job.totalSegments) pieces.push(`${job.receivedSegments}/${job.totalSegments}`);
+  else pieces.push(String(job.receivedSegments));
+  let sizeText = formatBytes(job.downloadedBytes);
+  if (job.totalBytes) sizeText += ` / ${job.totalSizeSource === "estimated" ? "~" : ""}${formatBytes(job.totalBytes)}`;
+  pieces.push(sizeText);
+  if (job.transferRateBytesPerSecond > 0) pieces.push(`${formatBytes(job.transferRateBytesPerSecond)}/s`);
   if (job.etaSeconds != null) pieces.push(`ETA ${formatDuration(job.etaSeconds)}`);
   return pieces.join(" - ");
 }
@@ -506,6 +658,7 @@ function cancelJob(id) {
   job.error = null;
   job.progressText = "Stopped by user";
   job.finishedAt = new Date().toISOString();
+  cleanupBrowserTemp(job);
   persistJobsToDisk();
   job.etaSeconds = null;
 
@@ -685,9 +838,9 @@ function fallbackBandwidthForQuality(quality = "") {
 
 function inferQualityLabel(value = "") {
   const text = decodeURIComponent(String(value)).toLowerCase();
-  const direct = text.match(/(?:^|[^0-9])((?:2160|1440|1080|720|576|540|480|360|240|144))p(?:[^0-9]|$)/);
+  const direct = text.match(/(?:^|[^0-9])((?:2160|1440|1080|720|576|540|480|360|240|180|144))p(?:[^0-9]|$)/);
   if (direct?.[1]) return `${direct[1]}p`;
-  const resolution = text.match(/(?:^|[^0-9])(\d{3,5})x((?:2160|1440|1080|720|576|540|480|360|240|144))(?:[^0-9]|$)/);
+  const resolution = text.match(/(?:^|[^0-9])(\d{3,5})x((?:2160|1440|1080|720|576|540|480|360|240|180|144))(?:[^0-9]|$)/);
   if (resolution?.[2]) return `${resolution[2]}p`;
   return "";
 }
@@ -845,6 +998,37 @@ function buildFilename(title, url) {
     .slice(0, 90) || "video";
   const hash = createHash("sha1").update(url).digest("hex").slice(0, 8);
   return `${cleanTitle}-${hash}.mp4`;
+}
+
+function safeBrowserFileName(value) {
+  const name = String(value || "").trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,180}$/.test(name)) return "";
+  if (name !== path.basename(name)) return "";
+  return name;
+}
+
+async function cleanupBrowserTemp(job) {
+  if (!job?.tempDir) return;
+  if (!path.basename(job.tempDir).startsWith("ds-video-browser-")) return;
+  await rm(job.tempDir, { recursive: true, force: true }).catch(() => {});
+}
+
+function readRaw(req, maxBytes) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let total = 0;
+    req.on("data", (chunk) => {
+      total += chunk.length;
+      if (total > maxBytes) {
+        reject(new Error("REQUEST_TOO_LARGE"));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("error", reject);
+  });
 }
 
 function readJson(req) {

@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "__MSG_brandName__",
   "short_name": "__MSG_brandShortName__",
-  "version": "1.1.1",
+  "version": "1.2.9",
   "description": "__MSG_brandDescription__",
   "action": {
     "default_icon": {
@@ -24,6 +24,13 @@
       "js": ["src/content.js"],
       "run_at": "document_end",
       "all_frames": true
+    },
+    {
+      "matches": ["<all_urls>"],
+      "js": ["src/inject-main.js"],
+      "run_at": "document_end",
+      "all_frames": true,
+      "world": "MAIN"
     }
   ],
   "host_permissions": ["<all_urls>", "http://127.0.0.1:8765/*", "http://localhost:8765/*"],
@@ -38,6 +45,6 @@
     "open_in_tab": true
   },
   "default_locale": "en",
-  "permissions": ["tabs", "storage", "webRequest"],
+  "permissions": ["tabs", "storage", "webRequest", "offscreen"],
   "optional_permissions": ["downloads"]
 }

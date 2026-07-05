@@ -1,21 +1,30 @@
 import {
-  MESSAGE,
-  addUniqueMedia,
-  classifyMedia,
-  estimateBytes,
-  fallbackBandwidthForQuality,
-  mergeSettings,
-  normalizeMediaItem,
-  parseDashManifest,
-  parseHlsManifest,
-  sanitizeFilename
+  MESSAGE, addUniqueMedia, classifyMedia, DIRECT_EXTENSIONS,
+  estimateBytes, fallbackBandwidthForQuality, isSegmentFile, mergeSettings,
+  normalizeMediaItem, parseDashManifest, parseHlsManifest, sanitizeFilename
 } from "./shared.js";
+
+console.log("[ds] Service worker started v1.2.8");
 
 const SETTINGS_KEY = "settings";
 const TAB_MEDIA_PREFIX = "tabMedia:";
 const HELPER_URL = "http://127.0.0.1:8765";
+const DEBUG = true;
+
+// Clear all stale tab media on startup (old data from previous versions)
+chrome.storage.local.get(null).then((all) => {
+  const keys = Object.keys(all).filter((k) => k.startsWith(TAB_MEDIA_PREFIX));
+  if (keys.length) {
+    chrome.storage.local.remove(keys);
+    console.log("[ds] Cleared", keys.length, "stale tab caches");
+  }
+});
+
 const requestHeadersById = new Map();
+const requestHeadersByUrl = new Map();
 const MAX_CAPTURED_HEADERS = 500;
+
+// --- Message routing ---
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   handleMessage(message, sender)
@@ -24,17 +33,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true;
 });
 
+// --- webRequest: capture headers ---
+
 chrome.webRequest.onBeforeSendHeaders.addListener(
-  (details) => {
-    requestHeadersById.set(details.requestId, sanitizeHeaders(details.requestHeaders || []));
-    if (requestHeadersById.size > MAX_CAPTURED_HEADERS) {
-      const firstKey = requestHeadersById.keys().next().value;
-      requestHeadersById.delete(firstKey);
-    }
-  },
+  (details) => { rememberRequestHeaders(details); },
   { urls: ["<all_urls>"], types: ["media", "xmlhttprequest", "other"] },
   ["requestHeaders", "extraHeaders"]
 );
+
+// --- webRequest: detect media from network requests ---
 
 chrome.webRequest.onHeadersReceived.addListener(
   (details) => {
@@ -42,16 +49,29 @@ chrome.webRequest.onHeadersReceived.addListener(
       console.warn("[ds-video-downloader] network detection failed", error);
     });
   },
-  { urls: ["<all_urls>"], types: ["media", "xmlhttprequest", "other"] },
+  { urls: ["<all_urls>"], types: ["media", "xmlhttprequest", "other", "object", "sub_frame"] },
   ["responseHeaders", "extraHeaders"]
 );
 
+// Cleanup stale tab data
 chrome.tabs.onRemoved.addListener((tabId) => {
   chrome.storage.local.remove(tabKey(tabId));
 });
 
+// --- Message handler ---
+
 async function handleMessage(message, sender) {
+  if (DEBUG) console.warn("[ds] handleMessage type=", message?.type);
   if (!message || typeof message !== "object") return { ok: false, error: "INVALID_MESSAGE" };
+
+  // Content script navigation — clear stale data
+  if (message.type === "page:clearMedia") {
+    const tabId = message.tabId ?? sender.tab?.id;
+    if (typeof tabId === "number") {
+      await chrome.storage.local.remove(tabKey(tabId));
+    }
+    return { ok: true };
+  }
 
   if (message.type === MESSAGE.MEDIA_ADD_DETECTED) {
     const tabId = message.tabId ?? sender.tab?.id;
@@ -75,41 +95,15 @@ async function handleMessage(message, sender) {
     return startDownload(message.item, message.variant);
   }
 
-  if (message.type === MESSAGE.DOWNLOADS_JOB_GET) {
-    return getHelperJob(message.jobId);
-  }
-
-  if (message.type === MESSAGE.DOWNLOADS_JOB_SHOW) {
-    return showHelperJob(message.jobId);
-  }
-
-  if (message.type === MESSAGE.DOWNLOADS_JOB_DELETE) {
-    return deleteHelperJob(message.jobId);
-  }
-
-  if (message.type === MESSAGE.DOWNLOADS_JOB_CANCEL) {
-    return cancelHelperJob(message.jobId);
-  }
-
-  if (message.type === MESSAGE.HELPER_STATUS_GET) {
-    return getHelperStatus();
-  }
-
-  if (message.type === MESSAGE.HELPER_SETTINGS_UPDATE) {
-    return updateHelperSettings(message.settings || {});
-  }
-
-  if (message.type === MESSAGE.HELPER_FOLDER_PICK) {
-    return pickHelperFolder();
-  }
-
-  if (message.type === MESSAGE.STREAM_VARIANTS_GET) {
-    return getStreamVariants(message.item);
-  }
-
-  if (message.type === MESSAGE.SETTINGS_GET) {
-    return { ok: true, settings: await getSettings() };
-  }
+  if (message.type === MESSAGE.DOWNLOADS_JOB_GET) return getHelperJob(message.jobId);
+  if (message.type === MESSAGE.DOWNLOADS_JOB_SHOW) return showHelperJob(message.jobId);
+  if (message.type === MESSAGE.DOWNLOADS_JOB_DELETE) return deleteHelperJob(message.jobId);
+  if (message.type === MESSAGE.DOWNLOADS_JOB_CANCEL) return cancelHelperJob(message.jobId);
+  if (message.type === MESSAGE.HELPER_STATUS_GET) return getHelperStatus();
+  if (message.type === MESSAGE.HELPER_SETTINGS_UPDATE) return updateHelperSettings(message.settings || {});
+  if (message.type === MESSAGE.HELPER_FOLDER_PICK) return pickHelperFolder();
+  if (message.type === MESSAGE.STREAM_VARIANTS_GET) return getStreamVariants(message.item);
+  if (message.type === MESSAGE.SETTINGS_GET) return { ok: true, settings: await getSettings() };
 
   if (message.type === MESSAGE.SETTINGS_UPDATE) {
     const settings = mergeSettings({ ...(await getSettings()), ...(message.settings || {}) });
@@ -120,40 +114,74 @@ async function handleMessage(message, sender) {
   return { ok: false, error: "UNKNOWN_MESSAGE" };
 }
 
+// --- Network detection ---
+
 async function detectFromNetwork(details) {
   if (details.tabId < 0) return;
+
+  const url = details.url;
+
+  // Skip internal helper traffic
+  if (url.startsWith("http://127.0.0.1:") || url.startsWith("http://localhost:")) return;
+
+  // Skip analytics, telemetry, logging, CDN assets
+  if (/\/log\/|analytics|telemetry|tracker|pixel|beacon|cdn\.plyr|\.svg|\.png|\.jpg|\.jpeg|\.gif|\.webp|\.css|\.js(?:\?|$)/i.test(url)) return;
+
   const contentType = headerValue(details.responseHeaders, "content-type");
-  const classified = classifyMedia(details.url, contentType);
+
+  // Skip HLS/DASH segment files aggressively
+  if (isSegmentFile(url, contentType)) return;
+
+  // .ts files from webRequest are ALWAYS HLS segments — never useful standalone
+  if (/\.ts(?:[?#]|$)/i.test(url.split("?")[0])) return;
+
+  if (DEBUG) console.warn("[ds] detectFromNetwork url=", url.slice(0, 120), "type=", details.type);
+
+  let classified = classifyMedia(url, contentType);
+
+  // URL-pattern fallback for cases where content-type is missing
+  if (!classified) {
+    const lower = url.toLowerCase().split("?")[0];
+    if (/\.m3u8$/.test(lower)) classified = { extension: "m3u8", kind: "hls" };
+    else if (/\.mpd$/.test(lower)) classified = { extension: "mpd", kind: "dash" };
+  }
+
   if (!classified) return;
 
   const tab = await chrome.tabs.get(details.tabId).catch(() => null);
+  if (!tab) return;
+
   const item = normalizeMediaItem({
-    url: details.url,
-    sourcePageUrl: tab?.url || details.initiator || "",
-    title: tab?.title || "video",
+    url,
+    sourcePageUrl: tab.url || details.initiator || "",
+    title: tab.title || "video",
     extension: classified.extension,
     kind: classified.kind,
     size: numberHeader(details.responseHeaders, "content-length"),
-    headers: requestHeadersById.get(details.requestId) || []
+    headers: requestHeadersById.get(details.requestId) || cachedHeadersForUrl(url)
   });
   requestHeadersById.delete(details.requestId);
 
   if (item) await addMedia(details.tabId, [item]);
 }
 
+// --- Media management ---
+
 async function addMedia(tabId, additions, fallback = {}) {
   const settings = await getSettings();
   const current = await getMedia(tabId);
   const next = addUniqueMedia(current, additions
-    .map((item) => normalizeMediaItem(item, fallback))
+    .map((item) => withCachedHeaders(normalizeMediaItem(item, fallback)))
     .filter((item) => shouldKeepMedia(item, settings)));
-  await chrome.storage.local.set({ [tabKey(tabId)]: next.slice(0, 100) });
+  await chrome.storage.local.set({ [tabKey(tabId)]: next.slice(0, 30) });
   await updateBadge(tabId, next);
 }
 
 function shouldKeepMedia(item, settings) {
   if (!item) return false;
   if (!settings.showUnsupported && item.isProtected) return false;
+  // Only filter by size when we actually know the size.
+  // Items with unknown size (null) are kept — better to show too many than hide a real video.
   if (item.kind === "direct" && item.size && item.size < settings.minSizeBytes) return false;
   return true;
 }
@@ -162,6 +190,10 @@ async function getMedia(tabId) {
   const data = await chrome.storage.local.get(tabKey(tabId));
   return Array.isArray(data[tabKey(tabId)]) ? data[tabKey(tabId)] : [];
 }
+
+// --- Manifest inspection via CONTENT SCRIPT ---
+// We CANNOT fetch from background (Cloudflare blocks non-page contexts).
+// ALL external fetches go through the content script.
 
 async function enrichMediaForTab(tabId) {
   const items = await getMedia(tabId);
@@ -175,107 +207,142 @@ async function enrichMediaItem(item) {
   if (item.kind !== "hls" && item.kind !== "dash") return item;
   if ((item.variants?.length || 0) && (item.estimatedSize || item.size)) return item;
 
-  const inspection = await inspectManifest(item);
-  const helperInspection = inspection.ok && hasUsefulInspection(inspection)
-    ? { ok: false }
-    : await inspectWithHelper(item);
-  const fallbackInspection = mergeInspections(inspection.ok ? inspection : null, helperInspection.ok ? helperInspection : null);
-  if (!fallbackInspection) return item;
-  return {
-    ...item,
-    variants: fallbackInspection.variants || item.variants || [],
-    durationSeconds: fallbackInspection.durationSeconds || item.durationSeconds || null,
-    estimatedSize: fallbackInspection.estimatedSize || fallbackInspection.totalBytes || item.estimatedSize || null,
-    sizeSource: fallbackInspection.sizeSource || fallbackInspection.totalSizeSource || (fallbackInspection.estimatedSize || fallbackInspection.totalBytes ? "estimated" : item.sizeSource || ""),
-    isProtected: Boolean(fallbackInspection.hasDrm),
-    unsupportedReason: fallbackInspection.hasDrm ? "DRM-protected, unsupported" : item.unsupportedReason
-  };
-}
+  // Use content script to fetch manifest text
+  const tabId = await findTabForUrl(item.sourcePageUrl);
+  if (typeof tabId !== "number") return item;
 
-function hasUsefulInspection(inspection) {
-  return Boolean(inspection.estimatedSize || inspection.totalBytes || inspection.variants?.length);
-}
+  try {
+    const response = await chrome.tabs.sendMessage(tabId, {
+      type: "page:fetchText",
+      url: item.url
+    });
+    if (!response?.ok || !response.text) return item;
 
-function mergeInspections(primary, helper) {
-  if (!primary && !helper) return null;
-  if (!primary) return helper;
-  if (!helper) return primary;
+    const parsed = item.kind === "hls"
+      ? parseHlsManifest(response.text, item.url)
+      : parseDashManifest(response.text, item.url);
 
-  const variants = mergeVariants(primary.variants || [], helper.variants || []);
-  return {
-    ...primary,
-    ...helper,
-    hasDrm: Boolean(primary.hasDrm || helper.hasDrm),
-    durationSeconds: helper.durationSeconds || primary.durationSeconds || null,
-    estimatedSize: helper.estimatedSize || helper.totalBytes || primary.estimatedSize || primary.totalBytes || null,
-    sizeSource: helper.sizeSource || helper.totalSizeSource || primary.sizeSource || "",
-    variants: variants.length ? variants : primary.variants || helper.variants || []
-  };
-}
+    // For HLS, also try to fetch each variant's child playlist for size estimates
+    let variants = parsed.variants || [];
+    if (item.kind === "hls" && variants.length) {
+      variants = await enrichVariantsFromContent(tabId, variants);
+    }
 
-function mergeVariants(primaryVariants, helperVariants) {
-  const byKey = new Map();
-  for (const variant of primaryVariants) {
-    byKey.set(variant.url || variant.quality || String(byKey.size), variant);
+    const bandwidth = item.bandwidth || fallbackBandwidthForQuality(item.quality);
+    const estimatedSize = estimateBytes(parsed.durationSeconds, bandwidth);
+
+    return {
+      ...item,
+      variants,
+      durationSeconds: parsed.durationSeconds || item.durationSeconds || null,
+      estimatedSize: estimatedSize || null,
+      sizeSource: estimatedSize ? "estimated" : "",
+      isProtected: Boolean(parsed.hasDrm),
+      unsupportedReason: parsed.hasDrm ? "DRM-protected, unsupported" : item.unsupportedReason
+    };
+  } catch {
+    // Content script might not respond — keep original item
+    return item;
   }
-  for (const variant of helperVariants) {
-    const key = variant.url || variant.quality || String(byKey.size);
-    byKey.set(key, { ...(byKey.get(key) || {}), ...variant });
-  }
-  return Array.from(byKey.values());
 }
+
+async function enrichVariantsFromContent(tabId, variants) {
+  return Promise.all(variants.map(async (variant) => {
+    if (variant.estimatedSize) return variant;
+    try {
+      const response = await chrome.tabs.sendMessage(tabId, {
+        type: "page:fetchText",
+        url: variant.url
+      });
+      if (!response?.ok || !response.text) return variant;
+      const child = parseHlsManifest(response.text, variant.url);
+      const bandwidth = variant.bandwidth || fallbackBandwidthForQuality(variant.quality);
+      const estimatedSize = estimateBytes(child.durationSeconds, bandwidth);
+      return {
+        ...variant,
+        durationSeconds: child.durationSeconds || null,
+        estimatedSize,
+        sizeSource: estimatedSize ? "estimated" : ""
+      };
+    } catch {
+      return variant;
+    }
+  }));
+}
+
+// --- Download ---
 
 async function startDownload(item, variant = null) {
   const media = normalizeMediaItem(item);
+  console.warn("[ds] startDownload kind=", media?.kind, "url=", (media?.url || "").slice(0, 100), "variant=", variant?.quality || "none");
   if (!media) return { ok: false, error: "INVALID_MEDIA" };
   if (media.isProtected) return { ok: false, error: media.unsupportedReason || "UNSUPPORTED_PROTECTED_MEDIA" };
 
   if (media.kind === "hls" || media.kind === "dash") {
-    const helperResponse = await startHelperDownload(media, variant);
-    if (helperResponse.ok || helperResponse.error !== "HELPER_OFFLINE") return helperResponse;
-
-    const inspection = await inspectManifest(media);
-    if (!inspection.ok) return inspection;
-    await saveInspection(media, inspection);
-    return {
-      ok: false,
-      error: inspection.hasDrm ? "DRM_PROTECTED_UNSUPPORTED" : "HELPER_OFFLINE",
-      variants: inspection.variants
-    };
+    return startStreamDownload(media, variant);
   }
 
+  // Direct download
   const hasDownloads = await chrome.permissions.contains({ permissions: ["downloads"] });
   if (!hasDownloads) return { ok: false, error: "DOWNLOAD_PERMISSION_REQUIRED" };
-
   const filename = sanitizeFilename(media.title, media.extension);
   const downloadId = await chrome.downloads.download({
-    url: media.url,
-    filename,
-    conflictAction: "uniquify",
-    saveAs: true
+    url: media.url, filename, conflictAction: "uniquify", saveAs: true
   });
   return { ok: true, downloadId };
 }
 
-async function getStreamVariants(item) {
-  const media = normalizeMediaItem(item);
-  if (!media) return { ok: false, error: "INVALID_MEDIA" };
-  const inspection = await inspectManifest(media);
-  if (!inspection.ok) return inspection;
-  await saveInspection(media, inspection);
-  return { ok: true, variants: inspection.variants, hasDrm: inspection.hasDrm };
+async function startStreamDownload(media, variant) {
+  console.warn("[ds] startStreamDownload tabSearch url=", (media.sourcePageUrl || "").slice(0, 60));
+  const tabId = await findTabForUrl(media.sourcePageUrl);
+  console.warn("[ds] startStreamDownload tabId=", tabId);
+
+  if (typeof tabId !== "number") {
+    console.warn("[ds] startStreamDownload FALLBACK=helper (tab not found)");
+    return startHelperDownload(media, variant);
+  }
+
+  try {
+    const downloadUrl = variant?.url || media.url;
+    console.warn("[ds] startStreamDownload → content script url=", downloadUrl.slice(0, 100));
+    const response = await chrome.tabs.sendMessage(tabId, {
+      type: "page:downloadStream",
+      payload: {
+        helperUrl: HELPER_URL,
+        manifestUrl: downloadUrl,
+        quality: variant?.quality || media.quality || "",
+        title: media.title
+      }
+    });
+
+    console.warn("[ds] startStreamDownload contentScriptResult ok=", response?.ok, "error=", response?.error);
+
+    if (response?.ok) {
+      return { ok: true, helperJob: response.helperJob };
+    }
+    if (response?.error === "SERVER_PROTECTED_UNSUPPORTED") {
+      return response;
+    }
+    console.warn("[ds] startStreamDownload FALLBACK=helper (content script returned error)");
+    return startHelperDownload(media, variant);
+  } catch (err) {
+    console.warn("[ds] startStreamDownload FALLBACK=helper (exception:", err.message, ")");
+    return startHelperDownload(media, variant);
+  }
 }
 
 async function startHelperDownload(media, variant) {
+  const downloadUrl = variant?.url || media.url;
+  console.warn("[ds] startHelperDownload url=", downloadUrl.slice(0, 100));
   try {
     const response = await fetch(`${HELPER_URL}/download`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        url: variant?.url || media.url,
+        url: downloadUrl,
         title: media.title,
         kind: media.kind,
-        headers: media.headers || []
+        headers: helperHeadersForMedia({ ...media, url: downloadUrl })
       })
     });
     const payload = await response.json().catch(() => ({}));
@@ -286,30 +353,18 @@ async function startHelperDownload(media, variant) {
   }
 }
 
-async function inspectWithHelper(media) {
-  try {
-    const response = await fetch(`${HELPER_URL}/inspect`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        url: media.url,
-        kind: media.kind,
-        headers: media.headers || []
-      })
-    });
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) return { ok: false, error: payload.error || `HELPER_${response.status}` };
-    return {
-      ok: true,
-      hasDrm: payload.hasDrm,
-      variants: payload.variants || [],
-      durationSeconds: payload.durationSeconds || null,
-      estimatedSize: payload.totalBytes || null
-    };
-  } catch {
-    return { ok: false, error: "HELPER_OFFLINE" };
-  }
+async function getStreamVariants(item) {
+  const media = normalizeMediaItem(item);
+  if (!media) return { ok: false, error: "INVALID_MEDIA" };
+  const enriched = await enrichMediaItem(media);
+  return {
+    ok: true,
+    variants: enriched.variants || [],
+    hasDrm: enriched.isProtected
+  };
 }
+
+// --- Helper API calls (localhost, no external fetching) ---
 
 async function getHelperJob(jobId) {
   if (!jobId) return { ok: false, error: "JOB_ID_MISSING" };
@@ -325,16 +380,15 @@ async function getHelperJob(jobId) {
 
 async function getHelperStatus() {
   try {
-    const [healthResponse, jobsResponse] = await Promise.all([
+    const [healthRes, jobsRes] = await Promise.all([
       fetch(`${HELPER_URL}/health`),
       fetch(`${HELPER_URL}/jobs`)
     ]);
-    const health = await healthResponse.json().catch(() => ({}));
-    const jobs = await jobsResponse.json().catch(() => ({}));
+    const health = await healthRes.json().catch(() => ({}));
+    const jobs = await jobsRes.json().catch(() => ({}));
     const jobsList = Array.isArray(jobs.jobs) ? jobs.jobs : [];
 
-    // Cache recent jobs in chrome.storage for offline display
-    if (healthResponse.ok) {
+    if (healthRes.ok) {
       const recent = jobsList
         .sort((a, b) => (b.startedAt || "").localeCompare(a.startedAt || ""))
         .slice(0, 20);
@@ -342,19 +396,15 @@ async function getHelperStatus() {
     }
 
     return {
-      ok: healthResponse.ok && jobsResponse.ok,
-      online: healthResponse.ok,
+      ok: healthRes.ok && jobsRes.ok,
+      online: healthRes.ok,
       health,
       jobs: jobsList
     };
   } catch {
-    // Return cached jobs when helper is offline
     const cached = await chrome.storage.local.get("recentJobs").catch(() => ({}));
     return {
-      ok: true,
-      online: false,
-      health: null,
-      jobs: [],
+      ok: true, online: false, health: null, jobs: [],
       cachedJobs: cached.recentJobs || []
     };
   }
@@ -368,7 +418,9 @@ async function updateHelperSettings(settings) {
       body: JSON.stringify(settings)
     });
     const payload = await response.json().catch(() => ({}));
-    return response.ok ? { ok: true, settings: payload.settings || {} } : { ok: false, error: payload.error || `HELPER_${response.status}` };
+    return response.ok
+      ? { ok: true, settings: payload.settings || {} }
+      : { ok: false, error: payload.error || `HELPER_${response.status}` };
   } catch {
     return { ok: false, error: "HELPER_OFFLINE" };
   }
@@ -378,7 +430,9 @@ async function pickHelperFolder() {
   try {
     const response = await fetch(`${HELPER_URL}/pick-folder`, { method: "POST" });
     const payload = await response.json().catch(() => ({}));
-    return response.ok ? { ok: true, settings: payload.settings || {} } : { ok: false, error: payload.error || `HELPER_${response.status}` };
+    return response.ok
+      ? { ok: true, settings: payload.settings || {} }
+      : { ok: false, error: payload.error || `HELPER_${response.status}` };
   } catch {
     return { ok: false, error: "HELPER_OFFLINE" };
   }
@@ -417,114 +471,90 @@ async function cancelHelperJob(jobId) {
   }
 }
 
-async function inspectManifest(media) {
-  try {
-    const response = await fetch(media.url, {
-      credentials: "include",
-      headers: {
-        ...headersToObject(media.headers || []),
-        Accept: media.kind === "hls" ? "application/vnd.apple.mpegurl,*/*" : "application/dash+xml,*/*"
-      }
-    });
-    if (!response.ok) {
-      return { ok: false, error: response.status === 403 ? "SERVER_PROTECTED_UNSUPPORTED" : `MANIFEST_FETCH_${response.status}` };
-    }
-    const text = await response.text();
-    const parsed = media.kind === "hls" ? parseHlsManifest(text, media.url) : parseDashManifest(text, media.url);
-    const enrichedVariants = media.kind === "hls"
-      ? await enrichHlsVariants(parsed.variants || [], media.headers || [])
-      : parsed.variants || [];
-    const ownBandwidth = media.bandwidth || fallbackBandwidthForQuality(media.quality);
-    const ownEstimate = estimateBytes(parsed.durationSeconds, ownBandwidth);
-    return {
-      ok: true,
-      ...parsed,
-      variants: enrichedVariants,
-      estimatedSize: ownEstimate || largestVariantEstimate(enrichedVariants)
-    };
-  } catch {
-    return { ok: false, error: "SERVER_PROTECTED_UNSUPPORTED" };
-  }
-}
-
-async function enrichHlsVariants(variants, headers) {
-  return Promise.all(variants.map(async (variant) => {
-    if (variant.estimatedSize) return variant;
-    const response = await fetch(variant.url, {
-      credentials: "include",
-      headers: {
-        ...headersToObject(headers),
-        Accept: "application/vnd.apple.mpegurl,*/*"
-      }
-    }).catch(() => null);
-    if (!response?.ok) return variant;
-
-    const text = await response.text().catch(() => "");
-    const child = parseHlsManifest(text, variant.url);
-    const bandwidth = variant.bandwidth || fallbackBandwidthForQuality(variant.quality);
-    const estimatedSize = estimateBytes(child.durationSeconds, bandwidth);
-    return {
-      ...variant,
-      durationSeconds: child.durationSeconds || null,
-      estimatedSize,
-      sizeSource: estimatedSize ? "estimated" : ""
-    };
-  }));
-}
-
-function largestVariantEstimate(variants) {
-  const sizes = variants.map((variant) => variant.estimatedSize).filter((size) => Number.isFinite(size));
-  return sizes.length ? Math.max(...sizes) : null;
-}
-
-async function saveInspection(media, inspection) {
-  const tabs = await chrome.tabs.query({}).catch(() => []);
-  const matchingTab = tabs.find((tab) => tab.id != null && (tab.url === media.sourcePageUrl || media.sourcePageUrl?.startsWith(tab.url || "")));
-  if (matchingTab?.id == null) return;
-
-  const current = await getMedia(matchingTab.id);
-  const next = current.map((item) => item.id === media.id
-    ? {
-        ...item,
-        variants: inspection.variants || [],
-        durationSeconds: inspection.durationSeconds || item.durationSeconds || null,
-        estimatedSize: inspection.estimatedSize || item.estimatedSize || null,
-        sizeSource: inspection.estimatedSize ? "estimated" : item.sizeSource || "",
-        isProtected: Boolean(inspection.hasDrm),
-        unsupportedReason: inspection.hasDrm ? "DRM-protected, unsupported" : item.unsupportedReason
-      }
-    : item);
-  await chrome.storage.local.set({ [tabKey(matchingTab.id)]: next });
-}
+// --- Utilities ---
 
 async function getSettings() {
   const data = await chrome.storage.local.get(SETTINGS_KEY);
   return mergeSettings(data[SETTINGS_KEY] || {});
 }
 
-async function updateBadge(tabId, items) {
-  const count = items.filter((item) => !item.isProtected).length;
-  await chrome.action.setBadgeText({ tabId, text: count ? String(count) : "" }).catch(() => {});
-  await chrome.action.setBadgeBackgroundColor({ tabId, color: "#2f6f5e" }).catch(() => {});
+async function findTabForUrl(sourcePageUrl) {
+  if (!sourcePageUrl) return null;
+  const tabs = await chrome.tabs.query({}).catch(() => []);
+  const found = tabs.find((tab) => tab.id != null && (
+    tab.url === sourcePageUrl || sourcePageUrl.startsWith(tab.url || "") ||
+    (tab.url && tab.url.startsWith(sourcePageUrl))
+  ));
+  return found?.id ?? null;
 }
 
-function tabKey(tabId) {
-  return `${TAB_MEDIA_PREFIX}${tabId}`;
-}
+function tabKey(tabId) { return `${TAB_MEDIA_PREFIX}${tabId}`; }
 
 function headerValue(headers = [], name) {
-  const found = headers.find((header) => header.name?.toLowerCase() === name);
+  const found = headers.find((h) => h.name?.toLowerCase() === name);
   return found?.value || "";
 }
 
 function numberHeader(headers, name) {
-  const value = Number(headerValue(headers, name));
-  return Number.isFinite(value) && value > 0 ? value : null;
+  const v = Number(headerValue(headers, name));
+  return Number.isFinite(v) && v > 0 ? v : null;
 }
 
 function sanitizeHeaders(headers) {
-  const allowed = new Set(["accept", "origin", "referer", "user-agent", "accept-language", "cookie"]);
+  const allowed = new Set(["accept", "origin", "referer", "user-agent", "accept-language", "cookie", "range"]);
   return headers
-    .filter((header) => allowed.has(header.name?.toLowerCase()))
-    .map((header) => ({ name: header.name, value: header.value || "" }));
+    .filter((h) => allowed.has(h.name?.toLowerCase()))
+    .map((h) => ({ name: h.name, value: h.value || "" }));
+}
+
+function rememberRequestHeaders(details) {
+  const headers = sanitizeHeaders(details.requestHeaders || []);
+  requestHeadersById.set(details.requestId, headers);
+  requestHeadersByUrl.set(details.url, headers);
+  while (requestHeadersById.size > MAX_CAPTURED_HEADERS) requestHeadersById.delete(requestHeadersById.keys().next().value);
+  while (requestHeadersByUrl.size > MAX_CAPTURED_HEADERS) requestHeadersByUrl.delete(requestHeadersByUrl.keys().next().value);
+}
+
+function cachedHeadersForUrl(url) {
+  return requestHeadersByUrl.get(url) || [];
+}
+
+function withCachedHeaders(item) {
+  if (!item) return null;
+  if (item.headers?.length) return item;
+  return { ...item, headers: cachedHeadersForUrl(item.url) };
+}
+
+function helperHeadersForMedia(media) {
+  const headers = sanitizeHeaders(media.headers?.length ? media.headers : cachedHeadersForUrl(media.url));
+  const byName = new Map(headers.map((h) => [h.name.toLowerCase(), h]));
+  const add = (name, value) => {
+    if (!value || byName.has(name.toLowerCase())) return;
+    byName.set(name.toLowerCase(), { name, value });
+  };
+  add("Accept", media.kind === "dash" ? "application/dash+xml,*/*" : "application/vnd.apple.mpegurl,*/*");
+  add("Referer", media.sourcePageUrl || "");
+  add("Origin", originForUrl(media.sourcePageUrl));
+  add("User-Agent", typeof navigator !== "undefined" ? navigator.userAgent : "");
+  add("Accept-Language", typeof navigator !== "undefined" ? navigator.language : "");
+  return Array.from(byName.values());
+}
+
+function originForUrl(value) {
+  try { return new URL(value).origin; } catch { return ""; }
+}
+
+function headersToObject(headers = []) {
+  const obj = {};
+  for (const h of headers) {
+    if (!h?.name || /[\r\n]/.test(h.name) || /[\r\n]/.test(h.value || "")) continue;
+    obj[h.name] = h.value || "";
+  }
+  return obj;
+}
+
+async function updateBadge(tabId, items) {
+  const count = items.filter((item) => !item.isProtected).length;
+  await chrome.action.setBadgeText({ tabId, text: count ? String(count) : "" }).catch(() => {});
+  await chrome.action.setBadgeBackgroundColor({ tabId, color: "#2f6f5e" }).catch(() => {});
 }

@@ -16,3 +16,4 @@ docs/RETROSPECTIVE.md
 Thumbs.db
 helper/helper-jobs.json
 helper/helper-jobs.json.tmp
+helper/test-downloads/

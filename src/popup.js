@@ -12,6 +12,7 @@ const helperSummary = document.querySelector("#helperSummary");
 const helperStatus = document.querySelector("#helperStatus");
 const helperJobs = document.querySelector("#helperJobs");
 const refreshHelperButton = document.querySelector("#refreshHelperButton");
+const openDashboardButton = document.querySelector("#openDashboardButton");
 const minSizeSelect = document.querySelector("#minSizeSelect");
 const showUnsupportedInput = document.querySelector("#showUnsupportedInput");
 const downloadDirInput = document.querySelector("#downloadDirInput");
@@ -33,6 +34,9 @@ rescanButton.addEventListener("click", async () => {
 });
 
 refreshHelperButton.addEventListener("click", loadHelperStatus);
+openDashboardButton.addEventListener("click", () => {
+  chrome.tabs.create({ url: "http://127.0.0.1:8765" });
+});
 
 document.querySelectorAll(".tab-button").forEach((button) => {
   button.addEventListener("click", () => activatePanel(button.dataset.panel));

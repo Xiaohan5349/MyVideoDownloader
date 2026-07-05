@@ -148,6 +148,81 @@ it("POST /download with http URL returns 202 (ffmpeg spawn attempt)", async () =
     `Expected 202 or 4xx/5xx, got ${res.status}`);
 });
 
+it("POST /browser-downloads/start creates a browser-fed helper job", async () => {
+  const res = await fetchJson("/browser-downloads/start", {
+    method: "POST",
+    body: {
+      url: "https://cdn.example.com/video.m3u8",
+      title: "Browser Fed Video",
+      durationSeconds: 10,
+      totalSegments: 2,
+      totalBytes: 2048,
+      totalSizeSource: "estimated"
+    },
+  });
+
+  assert.equal(res.status, 202);
+  assert.equal(res.body.ok, true);
+  assert.equal(res.body.job.status, "running");
+  assert.equal(res.body.job.inputMode, "browser");
+  assert.equal(res.body.job.totalSegments, 2);
+});
+
+it("POST /browser-downloads/:id/files/:name stores segment bytes", async () => {
+  const start = await fetchJson("/browser-downloads/start", {
+    method: "POST",
+    body: {
+      url: "https://cdn.example.com/video.m3u8",
+      title: "Segment Upload",
+      totalSegments: 1,
+      totalBytes: 4,
+      totalSizeSource: "exact"
+    },
+  });
+  const jobId = start.body.job.id;
+
+  const upload = await new Promise((resolve, reject) => {
+    const url = new URL(`/browser-downloads/${encodeURIComponent(jobId)}/files/seg-000000.ts`, baseUrl);
+    const req = http.request(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream" },
+    }, (res) => {
+      let body = "";
+      res.on("data", (chunk) => { body += chunk; });
+      res.on("end", () => {
+        resolve({ status: res.statusCode, body: JSON.parse(body) });
+      });
+    });
+    req.on("error", reject);
+    req.write(Buffer.from([1, 2, 3, 4]));
+    req.end();
+  });
+
+  assert.equal(upload.status, 200);
+  assert.equal(upload.body.ok, true);
+  assert.equal(upload.body.job.downloadedBytes, 4);
+  assert.equal(upload.body.job.receivedSegments, 1);
+});
+
+it("POST /browser-downloads/:id/files rejects unsafe filenames", async () => {
+  const start = await fetchJson("/browser-downloads/start", {
+    method: "POST",
+    body: {
+      url: "https://cdn.example.com/video.m3u8",
+      title: "Unsafe Segment Upload",
+      totalSegments: 1
+    },
+  });
+  const jobId = start.body.job.id;
+  const res = await fetchJson(`/browser-downloads/${encodeURIComponent(jobId)}/files/..%2Fevil.ts`, {
+    method: "POST",
+    body: { ignored: true },
+  });
+
+  assert.equal(res.status, 400);
+  assert.equal(res.body.error, "INVALID_FILE_NAME");
+});
+
 // ─── Settings ───
 
 it("POST /settings with invalid dir returns 400", async () => {

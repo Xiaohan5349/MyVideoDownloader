@@ -10,6 +10,7 @@
   "btnRescan": { "message": "重新扫描" },
   "btnRescanTitle": { "message": "重新扫描当前页面" },
   "btnRefresh": { "message": "刷新" },
+  "btnOpenDashboard": { "message": "控制台" },
   "btnDownload": { "message": "下载" },
   "btnSave": { "message": "保存" },
   "btnStop": { "message": "终止" },
