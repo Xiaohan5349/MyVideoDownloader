@@ -229,20 +229,24 @@ function renderHelperJobs(jobs) {
       const state = existing.querySelector(".helper-job-state");
       const meta = existing.querySelector(".helper-job-meta");
       const pathEl = existing.querySelector(".helper-job-path");
+      const sourceBtn = existing.querySelector(".source-button");
       const cancelBtn = existing.querySelector(".cancel-button");
       const showBtn = existing.querySelector(".show-button");
-      const deleteBtn = existing.querySelector(".delete-button");
+      const removeBtn = existing.querySelector(".remove-button");
 
       state.textContent = humanStatus(job.status);
-      state.className = `helper-job-state ${job.status === "completed" ? "is-complete" : ""} ${job.status === "failed" ? "is-error" : ""} ${job.status === "cancelled" ? "is-cancelled" : ""}`;
-      meta.textContent = job.error || job.progressText || sizeLabel(job);
+      state.className = `helper-job-state ${job.status === "completed" ? "is-complete" : ""} ${job.status === "failed" ? "is-error" : ""} ${job.status === "cancelled" ? "is-cancelled" : ""} ${job.status === "missing" ? "is-missing" : ""}`;
+      meta.textContent = humanJobMessage(job);
       pathEl.textContent = job.outputPath || job.url;
 
       const isActive = job.status === "queued" || job.status === "running";
-      const isFinished = job.status === "completed" || job.status === "failed" || job.status === "cancelled";
+      const fileExists = job.fileExists !== false && Boolean(job.outputPath);
+      sourceBtn.disabled = !job.sourcePageUrl;
+      sourceBtn.dataset.sourceUrl = job.sourcePageUrl || "";
       cancelBtn.disabled = !isActive;
-      showBtn.disabled = !job.outputPath;
-      deleteBtn.disabled = !isFinished;
+      showBtn.disabled = !fileExists;
+      removeBtn.disabled = isActive;
+      removeBtn.dataset.fileExists = String(fileExists);
     } else {
       // Create new node
       const node = helperJobTemplate.content.firstElementChild.cloneNode(true);
@@ -253,20 +257,26 @@ function renderHelperJobs(jobs) {
       state.classList.toggle("is-complete", job.status === "completed");
       state.classList.toggle("is-error", job.status === "failed");
       state.classList.toggle("is-cancelled", job.status === "cancelled");
-      node.querySelector(".helper-job-meta").textContent = job.error || job.progressText || sizeLabel(job);
+      state.classList.toggle("is-missing", job.status === "missing");
+      node.querySelector(".helper-job-meta").textContent = humanJobMessage(job);
       node.querySelector(".helper-job-path").textContent = job.outputPath || job.url;
 
+      const sourceButton = node.querySelector(".source-button");
       const cancelButton = node.querySelector(".cancel-button");
       const showButton = node.querySelector(".show-button");
-      const deleteButton = node.querySelector(".delete-button");
+      const removeButton = node.querySelector(".remove-button");
       const isActive = job.status === "queued" || job.status === "running";
-      const isFinished = job.status === "completed" || job.status === "failed" || job.status === "cancelled";
+      const fileExists = job.fileExists !== false && Boolean(job.outputPath);
+      sourceButton.disabled = !job.sourcePageUrl;
+      sourceButton.dataset.sourceUrl = job.sourcePageUrl || "";
       cancelButton.disabled = !isActive;
-      showButton.disabled = !job.outputPath;
-      deleteButton.disabled = !isFinished;
+      showButton.disabled = !fileExists;
+      removeButton.disabled = isActive;
+      removeButton.dataset.fileExists = String(fileExists);
+      sourceButton.addEventListener("click", () => openSourcePage(sourceButton.dataset.sourceUrl));
       cancelButton.addEventListener("click", () => cancelJob(job.id));
       showButton.addEventListener("click", () => showJobInFolder(job.id));
-      deleteButton.addEventListener("click", () => deleteJob(job.id));
+      removeButton.addEventListener("click", () => openRemoveDialog(job.id, removeButton.dataset.fileExists === "true", jobTitle(job)));
 
       helperJobs.appendChild(node);
       helperJobNodes.set(job.id, node);
@@ -536,13 +546,60 @@ async function showJobInFolder(jobId) {
   if (!response?.ok) showNotice(response?.error || getMessage("msgCouldNotShowFile"), true);
 }
 
-async function deleteJob(jobId) {
-  const response = await chrome.runtime.sendMessage({ type: MESSAGE.DOWNLOADS_JOB_DELETE, jobId });
-  if (!response?.ok) {
-    showNotice(response?.error || getMessage("msgCouldNotDeleteFile"), true);
+function openRemoveDialog(jobId, fileExists, title) {
+  if (!fileExists) {
+    removeJob(jobId, "record");
     return;
   }
-  showNotice(getMessage("msgDeletedOutput"));
+
+  document.querySelector(".confirm-overlay")?.remove();
+  const overlay = document.createElement("div");
+  overlay.className = "confirm-overlay";
+  overlay.innerHTML = `
+    <div class="confirm-dialog">
+      <h3>${getMessage("removeDialogTitle")}</h3>
+      <p></p>
+      <div class="confirm-actions remove-actions">
+        <button type="button" data-remove-mode="file">${getMessage("btnRemoveFile")}</button>
+        <button type="button" data-remove-mode="record">${getMessage("btnRemoveRecord")}</button>
+        <button class="btn-primary" type="button" data-remove-mode="both">${getMessage("btnRemoveBoth")}</button>
+        <button type="button" data-remove-mode="cancel">${getMessage("btnCancel")}</button>
+      </div>
+    </div>`;
+  overlay.querySelector("p").textContent = title;
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay || event.target.dataset.removeMode === "cancel") {
+      overlay.remove();
+      return;
+    }
+    const mode = event.target.dataset.removeMode;
+    if (!mode) return;
+    overlay.remove();
+    removeJob(jobId, mode);
+  });
+  document.body.appendChild(overlay);
+}
+
+async function removeJob(jobId, mode) {
+  if (mode === "file" || mode === "both") {
+    const response = await chrome.runtime.sendMessage({ type: MESSAGE.DOWNLOADS_JOB_DELETE, jobId });
+    if (!response?.ok) {
+      showNotice(response?.error || getMessage("msgCouldNotDeleteFile"), true);
+      return;
+    }
+  }
+
+  if (mode === "record" || mode === "both") {
+    const response = await chrome.runtime.sendMessage({ type: MESSAGE.DOWNLOADS_JOB_FORGET, jobId });
+    if (!response?.ok) {
+      showNotice(response?.error || getMessage("msgCouldNotRemoveRecord"), true);
+      await loadHelperStatus();
+      return;
+    }
+  }
+
+  const messageKey = mode === "both" ? "msgRemovedBoth" : mode === "file" ? "msgDeletedOutput" : "msgRemovedRecord";
+  showNotice(getMessage(messageKey));
   await loadHelperStatus();
 }
 
@@ -554,6 +611,11 @@ async function cancelJob(jobId) {
   }
   showNotice(getMessage("msgStoppedJob"));
   await loadHelperStatus();
+}
+
+function openSourcePage(url) {
+  if (!/^https?:\/\//i.test(url || "")) return;
+  chrome.tabs.create({ url });
 }
 
 async function updateHelperDownloadDir() {
@@ -659,9 +721,16 @@ function humanStatus(value) {
     running: getMessage("statusDownloading"),
     completed: getMessage("statusCompleted"),
     failed: getMessage("statusFailed"),
-    cancelled: getMessage("statusStopped")
+    cancelled: getMessage("statusStopped"),
+    missing: getMessage("statusMissing")
   };
   return statusMap[value] || value || getMessage("statusDownloading");
+}
+
+function humanJobMessage(job) {
+  if (job.error === "DOWNLOAD_STALLED") return getMessage("msgDownloadStalled");
+  if (job.error === "HELPER_RESTARTED") return getMessage("msgHelperRestarted");
+  return job.error || job.progressText || sizeLabel(job);
 }
 
 function sizeLabel(job) {

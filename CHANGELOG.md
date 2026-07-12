@@ -1,5 +1,92 @@
 # Changelog
 
+## v1.4.5 - 2026-07-12
+
+### Changed
+- Consolidated `Remove file` and `Remove record` into one `Remove` action in the helper dashboard and extension popup.
+- Jobs with an existing output now offer `Remove file`, `Remove record`, or `Remove both`.
+- Jobs without an output remove their history record directly; active jobs must still be stopped first.
+- `Open folder` is now available for any non-active job whose output file exists, including stopped partial downloads.
+
+## v1.4.4 - 2026-07-12
+
+### Changed
+- Enabled `Remove record` for completed, failed, stopped, and missing jobs in both the helper dashboard and extension popup.
+- Active queued or downloading jobs must still be stopped before their history can be removed.
+- Removing a completed record continues to preserve its downloaded media file.
+
+## v1.4.3 - 2026-07-12
+
+### Changed
+- Updated the dashboard and popup typography to Bahnschrift with matched Windows UI CJK fallbacks for a cleaner, more architectural flat-transparent interface.
+- Kept Cascadia Code for paths, sizes, speeds, and other instrument-style metadata.
+
+## v1.4.2 - 2026-07-12
+
+### Changed
+- Made the dashboard queue, rows, summary metrics, service bar, and controls flat transparent so the background remains continuous across the page.
+- Applied the same border-led transparent treatment to popup media cards, job rows, tabs, settings, notices, and buttons.
+- Reduced the global background tint and panel blur while preserving text contrast and clear hover states.
+
+## v1.4.1 - 2026-07-12
+
+### Changed
+- Reworked completed-job actions to show `Source`, `Open folder`, and `Remove file`.
+- Failed and missing jobs now show `Source` and `Remove record`; unavailable file actions are hidden.
+- Removing a completed file keeps its source history, changes the job to `File missing`, and makes `Remove record` available.
+- Redesigned the popup and dashboard around a flat transparent visual system with thin light borders and a muted original landscape background.
+
+### Added
+- Added an optimized 44 KB WebP background asset generated specifically for the downloader UI.
+- Added a cached helper route for the dashboard background asset.
+
+## v1.4.0 - 2026-07-12
+
+### Added
+- Added a separate `Remove record` action for failed and missing jobs in the helper dashboard and extension popup.
+- Added `DELETE /jobs/:id/history`; it removes only failed or missing history and never deletes a media file.
+
+### Changed
+- Redesigned the extension popup as a compact, neutral download manager with clearer typography, simpler tabs, stable dimensions, and contextual actions.
+- Redesigned the helper dashboard with a compact service bar, restrained summary strip, scan-friendly job rows, and responsive action toolbars.
+- Removed remote popup fonts, decorative gradients, clipped corners, glow effects, oversized display type, and nonfunctional thumbnail decoration.
+
+## v1.3.2 - 2026-07-12
+
+### Fixed
+- Browser-fed HLS downloads now fetch and locally rewrite accessible AES-128 key URIs, including keys whose remote filenames misleadingly end in `.ts`.
+- The active content-script path now preserves HLS initialization maps and real segment extensions through the shared tested asset planner.
+- Jable-style AES-128 playlists no longer reach ffmpeg with a missing local key file.
+
+### Changed
+- The content script and offscreen downloader now share the same HLS asset-planning implementation instead of maintaining divergent key/map/segment logic.
+
+## v1.3.1 - 2026-07-12
+
+### Added
+- Added `npm run helper:start` to start the helper as a hidden background process.
+- Added per-user Windows auto-start install, status, and removal commands using Task Scheduler.
+
+### Changed
+- Background start is idempotent and will not create a duplicate helper process when port 8765 is already active.
+
+## v1.3.0 - 2026-07-12
+
+### Added
+- Added bounded retries and 30-second timeouts for browser-fed HLS segment requests.
+- Added a helper watchdog that stops jobs after two minutes without real byte or media-time progress.
+- Added source-page links to new helper jobs in both the dashboard and extension popup.
+
+### Changed
+- Completed job history is reconciled with files on disk whenever jobs are read.
+- Deleting an output now retains its history and source link with a clear `File missing` state.
+- Helper tests now use isolated settings and history files instead of the user's live helper data.
+
+### Fixed
+- Failed HLS segments can no longer be silently ignored and passed to ffmpeg as an incomplete playlist.
+- Interrupted jobs loaded after a helper restart are marked failed instead of remaining stuck as downloading.
+- File actions now reject sibling paths that merely share the download directory's name prefix.
+
 ## v1.2.9 - 2026-07-05
 
 ### Added

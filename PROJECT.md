@@ -7,8 +7,11 @@ A Chrome MV3 browser extension + local Node.js helper for downloading HLS/DASH s
 ## Quick Start
 
 ```powershell
-# Start the local helper (required for HLS/DASH downloads)
-npm run helper
+# Start the local helper in the background (required for HLS/DASH downloads)
+npm run helper:start
+
+# Start automatically after Windows sign-in
+npm run helper:autostart:install
 
 # Check if it's running
 npm run helper:status

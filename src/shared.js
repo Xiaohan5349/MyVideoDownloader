@@ -5,6 +5,7 @@ export const MESSAGE = Object.freeze({
   DOWNLOADS_JOB_GET: "downloads:jobGet",
   DOWNLOADS_JOB_SHOW: "downloads:jobShow",
   DOWNLOADS_JOB_DELETE: "downloads:jobDelete",
+  DOWNLOADS_JOB_FORGET: "downloads:jobForget",
   DOWNLOADS_JOB_CANCEL: "downloads:jobCancel",
   HELPER_STATUS_GET: "helper:statusGet",
   HELPER_SETTINGS_UPDATE: "helper:settingsUpdate",

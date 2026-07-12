@@ -1,4 +1,5 @@
 import {
+  buildHlsAssetPlan,
   buildLocalHlsPlaylist,
   parseHlsMediaPlaylist
 } from "./hls-browser.js";
@@ -34,7 +35,8 @@ async function startBrowserHlsDownload(payload) {
       durationSeconds: plan.durationSeconds,
       totalSegments: plan.segmentAssetCount,
       totalBytes: plan.estimatedSize,
-      totalSizeSource: plan.estimatedSize ? "estimated" : "unknown"
+      totalSizeSource: plan.estimatedSize ? "estimated" : "unknown",
+      sourcePageUrl: media.sourcePageUrl || ""
     })
   });
   const startPayload = await startResponse.json().catch(() => ({}));
@@ -67,7 +69,7 @@ async function buildDownloadPlan(media, variant, headers) {
   if (mediaPlaylist.hasDrm) throw codedError("DRM_PROTECTED_UNSUPPORTED");
   if (!mediaPlaylist.segments.length) throw codedError("HLS_NO_SEGMENTS");
 
-  const { assets, assetNameByUrl, segmentAssetCount } = buildAssetList(mediaPlaylist);
+  const { assets, assetNameByUrl, segmentAssetCount } = buildHlsAssetPlan(mediaPlaylist);
   const localPlaylistText = buildLocalHlsPlaylist(playlistText, playlistUrl, assetNameByUrl);
   const quality = variant?.quality || media.quality || "";
   const bandwidth = variant?.bandwidth || media.bandwidth || fallbackBandwidthForQuality(quality);
@@ -85,6 +87,7 @@ async function buildDownloadPlan(media, variant, headers) {
 
 const PARALLEL_FETCHES = 8;
 const MAX_RETRIES = 3;
+const FETCH_TIMEOUT_MS = 30_000;
 
 async function runBrowserJob(helperUrl, jobId, plan, headers) {
   try {
@@ -172,56 +175,47 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function buildAssetList(mediaPlaylist) {
-  const assets = [];
-  const assetNameByUrl = new Map();
-
-  for (const [index, item] of mediaPlaylist.keys.entries()) {
-    addAsset(assets, assetNameByUrl, item.url, `key-${pad(index)}.key`, "key");
-  }
-
-  for (const [index, item] of mediaPlaylist.maps.entries()) {
-    addAsset(assets, assetNameByUrl, item.url, `init-${pad(index)}.${extensionFromUrl(item.url, "mp4")}`, "map");
-  }
-
-  let segmentIndex = 0;
-  for (const item of mediaPlaylist.segments) {
-    if (assetNameByUrl.has(item.url)) continue;
-    const name = `seg-${pad(segmentIndex)}.${segmentExtension(item.url)}`;
-    addAsset(assets, assetNameByUrl, item.url, name, "segment");
-    segmentIndex += 1;
-  }
-
-  return { assets, assetNameByUrl, segmentAssetCount: segmentIndex };
-}
-
-function addAsset(assets, assetNameByUrl, url, name, role) {
-  if (assetNameByUrl.has(url)) return;
-  assetNameByUrl.set(url, name);
-  assets.push({ url, name, role });
-}
-
 async function fetchText(url, headers) {
-  const response = await fetch(url, {
-    credentials: "include",
-    cache: "no-store",
-    headers: {
-      ...headersToObject(headers),
-      Accept: "application/vnd.apple.mpegurl,*/*"
-    }
-  });
-  if (!response.ok) throw codedError(response.status === 403 ? "SERVER_PROTECTED_UNSUPPORTED" : `FETCH_${response.status}`);
-  return response.text();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    const response = await fetch(url, {
+      credentials: "include",
+      cache: "no-store",
+      signal: controller.signal,
+      headers: {
+        ...headersToObject(headers),
+        Accept: "application/vnd.apple.mpegurl,*/*"
+      }
+    });
+    if (!response.ok) throw codedError(response.status === 403 ? "SERVER_PROTECTED_UNSUPPORTED" : `FETCH_${response.status}`);
+    return await response.text();
+  } catch (error) {
+    if (error?.name === "AbortError") throw codedError("FETCH_TIMEOUT");
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function fetchBinary(url, headers) {
-  const response = await fetch(url, {
-    credentials: "include",
-    cache: "no-store",
-    headers: headersToObject(headers)
-  });
-  if (!response.ok) throw codedError(response.status === 403 ? "SERVER_PROTECTED_UNSUPPORTED" : `SEGMENT_FETCH_${response.status}`);
-  return response.arrayBuffer();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    const response = await fetch(url, {
+      credentials: "include",
+      cache: "no-store",
+      signal: controller.signal,
+      headers: headersToObject(headers)
+    });
+    if (!response.ok) throw codedError(response.status === 403 ? "SERVER_PROTECTED_UNSUPPORTED" : `SEGMENT_FETCH_${response.status}`);
+    return await response.arrayBuffer();
+  } catch (error) {
+    if (error?.name === "AbortError") throw codedError("SEGMENT_TIMEOUT");
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function isHelperJobCancelled(helperUrl, jobId) {
@@ -256,25 +250,6 @@ function headersToObject(headers = []) {
     object[header.name] = header.value || "";
   }
   return object;
-}
-
-function segmentExtension(url) {
-  const extension = extensionFromUrl(url, "ts");
-  if (["m4s", "mp4", "ts", "aac", "mp3"].includes(extension)) return extension;
-  return "ts";
-}
-
-function extensionFromUrl(url, fallback) {
-  try {
-    const extension = new URL(url).pathname.toLowerCase().match(/\.([a-z0-9]{2,5})$/)?.[1];
-    return extension || fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-function pad(index) {
-  return String(index).padStart(6, "0");
 }
 
 function codedError(code) {

@@ -11,12 +11,14 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 8765);
 const HOST = process.env.HOST || "127.0.0.1";
 const DEFAULT_DOWNLOAD_DIR = process.env.DOWNLOAD_DIR || path.join(__dirname, "downloads");
-const CONFIG_PATH = path.join(__dirname, "helper-settings.json");
+const CONFIG_PATH = process.env.CONFIG_PATH || path.join(__dirname, "helper-settings.json");
 const PICKER_SCRIPT_PATH = path.join(__dirname, "pick-folder.ps1");
-const JOBS_PATH = path.join(__dirname, "helper-jobs.json");
+const JOBS_PATH = process.env.JOBS_PATH || path.join(__dirname, "helper-jobs.json");
+const BACKGROUND_ASSET_PATH = path.join(__dirname, "..", "assets", "app-background.webp");
 const SIZE_PROBE_LIMIT = Number(process.env.SIZE_PROBE_LIMIT || 1500);
 const SIZE_PROBE_CONCURRENCY = Number(process.env.SIZE_PROBE_CONCURRENCY || 8);
 const SIZE_PROBE_TIMEOUT_MS = Number(process.env.SIZE_PROBE_TIMEOUT_MS || 5000);
+const JOB_STALL_TIMEOUT_MS = Number(process.env.JOB_STALL_TIMEOUT_MS || 120_000);
 const jobs = new Map();
 const jobProcesses = new Map();
 
@@ -26,7 +28,16 @@ async function loadJobsFromDisk() {
     const data = JSON.parse(raw);
     if (Array.isArray(data)) {
       for (const job of data) {
-        if (job.id) jobs.set(job.id, job);
+        if (!job.id) continue;
+        if (job.status === "running" || job.status === "queued") {
+          job.status = "failed";
+          job.error = "HELPER_RESTARTED";
+          job.progressText = "Download interrupted when the helper stopped";
+          job.finishedAt = new Date().toISOString();
+          job.etaSeconds = null;
+        }
+        reconcileJobFileState(job);
+        jobs.set(job.id, job);
       }
     }
     console.log(`Loaded ${jobs.size} jobs from history`);
@@ -66,6 +77,16 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === "GET" && req.url === "/assets/app-background.webp") {
+      const image = await readFile(BACKGROUND_ASSET_PATH);
+      res.writeHead(200, {
+        "Content-Type": "image/webp",
+        "Cache-Control": "public, max-age=86400"
+      });
+      res.end(image);
+      return;
+    }
+
     if (req.method === "GET" && req.url === "/health") {
       writeJson(res, 200, { ok: true, ffmpeg: "required", downloadDir });
       return;
@@ -90,6 +111,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === "GET" && req.url === "/jobs") {
+      await reconcileAllJobFiles();
       writeJson(res, 200, { ok: true, jobs: Array.from(jobs.values()).reverse() });
       return;
     }
@@ -97,6 +119,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "GET" && req.url?.startsWith("/jobs/")) {
       const id = decodeURIComponent(req.url.split("/").pop() || "");
       const job = jobs.get(id);
+      if (job && reconcileJobFileState(job)) await persistJobsToDisk();
       writeJson(res, job ? 200 : 404, job || { ok: false, error: "JOB_NOT_FOUND" });
       return;
     }
@@ -111,6 +134,13 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && /^\/jobs\/[^/]+\/cancel$/.test(req.url || "")) {
       const id = decodeURIComponent(req.url.split("/")[2] || "");
       const result = cancelJob(id);
+      writeJson(res, result.ok ? 200 : result.status || 400, result);
+      return;
+    }
+
+    if (req.method === "DELETE" && /^\/jobs\/[^/]+\/history$/.test(req.url || "")) {
+      const id = decodeURIComponent(req.url.split("/")[2] || "");
+      const result = await forgetJobRecord(id);
       writeJson(res, result.ok ? 200 : result.status || 400, result);
       return;
     }
@@ -175,13 +205,15 @@ const server = http.createServer(async (req, res) => {
 });
 
 if (process.env.NODE_ENV !== "test") {
+  const stallTimer = setInterval(() => sweepStalledJobs().catch(() => {}), 5000);
+  stallTimer.unref();
   server.listen(PORT, HOST, () => {
     console.log(`DS Video Downloader helper listening on http://${HOST}:${PORT}`);
     console.log(`Downloads folder: ${downloadDir}`);
   });
 }
 
-export { server, jobs, isSafeDownloadPath, persistJobsToDisk };
+export { server, jobs, isSafeDownloadPath, persistJobsToDisk, sweepStalledJobs };
 
 async function startDownload(payload) {
   const url = validateUrl(payload?.url);
@@ -195,11 +227,13 @@ async function startDownload(payload) {
   const id = randomUUID();
   const filename = buildFilename(payload.title || "video", url);
   const outputPath = path.join(downloadDir, filename);
+  const now = Date.now();
   const job = {
     id,
     ok: true,
     status: "queued",
     url,
+    sourcePageUrl: validateUrl(payload?.sourcePageUrl) || "",
     outputPath,
     downloadDir,
     startedAt: new Date().toISOString(),
@@ -216,6 +250,7 @@ async function startDownload(payload) {
     etaSeconds: null,
     lastProgressAt: null,
     lastProgressBytes: 0,
+    lastActivityAt: now,
     ffmpegArgs: [],
     log: []
   };
@@ -245,6 +280,7 @@ async function startBrowserDownload(payload) {
     inputMode: "browser",
     status: "running",
     url,
+    sourcePageUrl: validateUrl(payload?.sourcePageUrl) || "",
     outputPath,
     downloadDir,
     tempDir,
@@ -265,6 +301,7 @@ async function startBrowserDownload(payload) {
     etaSeconds: null,
     lastProgressAt: null,
     lastProgressBytes: 0,
+    lastActivityAt: Date.now(),
     ffmpegArgs: [],
     log: []
   };
@@ -308,6 +345,7 @@ async function completeBrowserDownload(id, payload) {
   job.url = playlistPath;
   job.status = "queued";
   job.progressText = "Muxing local segments";
+  job.lastActivityAt = Date.now();
   await persistJobsToDisk();
   runFfmpeg(job, []);
   return { ok: true, job };
@@ -436,6 +474,7 @@ function runFfmpeg(job, headers) {
   job.ffmpegArgs = redactArgs(args);
 
   job.status = "running";
+  job.lastActivityAt = Date.now();
   const child = spawn("ffmpeg", args, { windowsHide: true });
   jobProcesses.set(job.id, child);
 
@@ -480,8 +519,8 @@ function updateProgress(job, text) {
     const [key, value] = line.split("=");
     if (!key || value == null) continue;
     if (key === "total_size") updateDownloadedBytes(job, Number(value));
-    if (key === "out_time") job.downloadedSeconds = parseTimeToSeconds(value);
-    if (key === "out_time_ms" && !job.downloadedSeconds) job.downloadedSeconds = Number(value) / 1_000_000;
+    if (key === "out_time") updateDownloadedSeconds(job, parseTimeToSeconds(value));
+    if (key === "out_time_ms" && !job.downloadedSeconds) updateDownloadedSeconds(job, Number(value) / 1_000_000);
     if (key === "speed") updateEta(job, value);
     if (key === "progress" && value === "end") job.progressText = "finalizing";
     if (key === "progress") job.progressText = formatProgress(job);
@@ -490,13 +529,23 @@ function updateProgress(job, text) {
 
 function updateDownloadedBytes(job, bytes) {
   if (!Number.isFinite(bytes) || bytes < 0) return;
+  if (bytes < job.downloadedBytes) return;
   const now = Date.now();
-  if (job.lastProgressAt && now > job.lastProgressAt && bytes >= job.lastProgressBytes) {
+  if (bytes > job.lastProgressBytes && job.lastProgressAt && now > job.lastProgressAt) {
     job.transferRateBytesPerSecond = (bytes - job.lastProgressBytes) / ((now - job.lastProgressAt) / 1000);
   }
   job.downloadedBytes = bytes;
-  job.lastProgressBytes = bytes;
-  job.lastProgressAt = now;
+  if (bytes > job.lastProgressBytes) {
+    job.lastProgressBytes = bytes;
+    job.lastProgressAt = now;
+    job.lastActivityAt = now;
+  }
+}
+
+function updateDownloadedSeconds(job, seconds) {
+  if (!Number.isFinite(seconds) || seconds < 0) return;
+  if (seconds > (job.downloadedSeconds || 0)) job.lastActivityAt = Date.now();
+  job.downloadedSeconds = Math.max(job.downloadedSeconds || 0, seconds);
 }
 
 function updateEta(job, speedText) {
@@ -644,9 +693,78 @@ async function deleteJobOutput(id) {
   await unlink(job.outputPath).catch((error) => {
     if (error?.code !== "ENOENT") throw error;
   });
+  job.status = "missing";
+  job.fileExists = false;
+  job.progressText = "File removed from disk";
+  job.etaSeconds = null;
+  await persistJobsToDisk();
+  return { ok: true, job };
+}
+
+async function forgetJobRecord(id) {
+  const job = jobs.get(id);
+  if (!job) return { ok: false, status: 404, error: "JOB_NOT_FOUND" };
+  if (job.status === "queued" || job.status === "running") {
+    return { ok: false, status: 409, error: "JOB_HISTORY_NOT_REMOVABLE" };
+  }
+
   jobs.delete(id);
-  persistJobsToDisk();
+  await persistJobsToDisk();
   return { ok: true };
+}
+
+async function reconcileAllJobFiles() {
+  let changed = false;
+  for (const job of jobs.values()) changed = reconcileJobFileState(job) || changed;
+  if (changed) await persistJobsToDisk();
+}
+
+function reconcileJobFileState(job) {
+  if (!job?.outputPath) return false;
+  const fileExists = existsSync(job.outputPath);
+  let changed = job.fileExists !== fileExists;
+  job.fileExists = fileExists;
+
+  if (job.status === "completed" && !fileExists) {
+    job.status = "missing";
+    job.progressText = "File removed from disk";
+    changed = true;
+  } else if (job.status === "missing" && fileExists) {
+    job.status = "completed";
+    job.progressText = `Completed ${formatBytes(job.downloadedBytes)}`;
+    changed = true;
+  }
+  return changed;
+}
+
+async function sweepStalledJobs(now = Date.now(), timeoutMs = JOB_STALL_TIMEOUT_MS) {
+  let changed = false;
+  for (const job of jobs.values()) {
+    if (job.status !== "running") continue;
+    const lastActivityAt = Number(job.lastActivityAt || job.lastByteProgressAt || Date.parse(job.startedAt) || now);
+    if (now - lastActivityAt < timeoutMs) continue;
+
+    job.status = "failed";
+    job.error = "DOWNLOAD_STALLED";
+    job.progressText = "No download progress for 2 minutes; task stopped";
+    job.finishedAt = new Date(now).toISOString();
+    job.etaSeconds = null;
+    await cleanupBrowserTemp(job);
+    terminateJobProcess(job.id);
+    changed = true;
+  }
+  if (changed) await persistJobsToDisk();
+}
+
+function terminateJobProcess(id) {
+  const child = jobProcesses.get(id);
+  if (!child || child.killed) return;
+  child.kill("SIGTERM");
+  if (process.platform === "win32") {
+    setTimeout(() => {
+      if (jobProcesses.has(id)) spawn("taskkill.exe", ["/pid", String(child.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" }).unref();
+    }, 1500).unref();
+  }
 }
 
 function cancelJob(id) {
@@ -662,15 +780,7 @@ function cancelJob(id) {
   persistJobsToDisk();
   job.etaSeconds = null;
 
-  const child = jobProcesses.get(id);
-  if (child && !child.killed) {
-    child.kill("SIGTERM");
-    if (process.platform === "win32") {
-      setTimeout(() => {
-        if (jobProcesses.has(id)) spawn("taskkill.exe", ["/pid", String(child.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" }).unref();
-      }, 1500).unref();
-    }
-  }
+  terminateJobProcess(id);
 
   return { ok: true, job };
 }
@@ -679,7 +789,8 @@ function isSafeDownloadPath(value, baseDir = downloadDir) {
   if (!value) return false;
   const resolved = path.resolve(value);
   const base = path.resolve(baseDir);
-  return resolved.toLowerCase().startsWith(base.toLowerCase());
+  const relative = path.relative(base.toLowerCase(), resolved.toLowerCase());
+  return Boolean(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
 }
 
 async function getManifestSizeInfo(text, kind, url, headers) {
@@ -1597,6 +1708,7 @@ function renderHomePage() {
     }
     .status.completed { color: var(--emerald); background: var(--emerald-soft); }
     .status.failed { color: var(--rose); background: var(--rose-soft); }
+    .status.missing { color: var(--amber); background: var(--amber-soft); }
     .status.running, .status.queued { color: var(--amber); background: var(--amber-soft); animation: pulseRunning 2.4s ease-in-out infinite; }
     .status.cancelled { color: var(--faint); background: rgba(255,255,255,0.03); }
 
@@ -1847,6 +1959,7 @@ function renderHomePage() {
       clip-path: polygon(0 0, calc(100% - 6px) 0, 100% 6px, 100% 100%, 0 100%);
     }
     .status.completed { color: var(--emerald); background: var(--emerald-soft); }
+    .status.missing { color: var(--amber); background: var(--amber-soft); }
     .status.running,
     .status.queued {
       color: var(--amber);
@@ -1892,6 +2005,543 @@ function renderHomePage() {
         animation-duration: 0.01ms !important;
         animation-iteration-count: 1 !important;
         transition-duration: 0.01ms !important;
+      }
+    }
+    /* Clean download-manager theme */
+    :root {
+      --bg: #171613;
+      --surface: transparent;
+      --surface-2: rgba(255, 255, 255, 0.04);
+      --line: rgba(255, 255, 255, 0.3);
+      --line-strong: rgba(255, 255, 255, 0.58);
+      --ink: #fffdf7;
+      --muted: rgba(255, 253, 247, 0.72);
+      --faint: rgba(255, 253, 247, 0.48);
+      --cyan: #f0dfb8;
+      --cyan-soft: rgba(240, 223, 184, 0.12);
+      --emerald: #79bd91;
+      --emerald-soft: #18251c;
+      --amber: #d4a65d;
+      --amber-soft: #2a2318;
+      --rose: #d17b78;
+      --rose-soft: #2b1c1b;
+      --sans: "Bahnschrift", "Microsoft JhengHei UI", "Microsoft YaHei UI", sans-serif;
+      --mono: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+    }
+
+    body {
+      min-width: 320px;
+      position: relative;
+      isolation: isolate;
+      background: var(--bg) url('/assets/app-background.webp') center / cover fixed no-repeat !important;
+      color: var(--ink);
+      font-family: var(--sans);
+      letter-spacing: 0;
+    }
+
+    body::before,
+    body::after,
+    .shell::before,
+    .shell::after,
+    .rail::before,
+    .rail::after,
+    .brand-mark::before,
+    .brand-mark::after,
+    .thumb::before,
+    .thumb::after,
+    .row::before,
+    .row::after,
+    .stat::before,
+    .stat::after,
+    .panel::before,
+    .panel::after {
+      display: none !important;
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      z-index: -1;
+      inset: 0;
+      display: block !important;
+      background: rgba(14, 13, 11, 0.32);
+      pointer-events: none;
+    }
+
+    .shell {
+      position: relative;
+      z-index: 1;
+      display: grid;
+      grid-template-columns: 1fr;
+      min-height: 100vh;
+    }
+
+    .rail {
+      position: relative;
+      top: auto;
+      z-index: 2;
+      display: flex;
+      align-items: center;
+      gap: 20px;
+      min-height: 64px;
+      height: auto;
+      padding: 10px 24px;
+      overflow: visible;
+      border: 0;
+      border-bottom: 1px solid var(--line);
+      background: rgba(0, 0, 0, 0.04) !important;
+      backdrop-filter: none;
+      box-shadow: none;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 220px;
+      margin: 0;
+      padding: 0;
+      border: 0;
+    }
+
+    .brand-mark {
+      width: 28px;
+      height: 28px;
+      margin: 0;
+      border: 1px solid #595348;
+      border-radius: 7px;
+      background: transparent !important;
+      box-shadow: none;
+      clip-path: none;
+    }
+
+    .brand h1 {
+      margin: 0;
+      font-family: var(--sans);
+      font-size: 15px;
+      font-weight: 650;
+      line-height: 1.2;
+      letter-spacing: 0;
+      text-transform: none;
+    }
+
+    .brand p {
+      display: none;
+    }
+
+    .rail-stack {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-width: 0;
+      margin: 0 0 0 auto;
+    }
+
+    .rail-section {
+      min-width: 0;
+      padding: 0;
+      border: 0;
+      background: transparent !important;
+      box-shadow: none;
+      clip-path: none;
+    }
+
+    .rail-section:first-child {
+      display: none;
+    }
+
+    .rail-label {
+      margin-bottom: 2px;
+      color: var(--faint);
+      font: 11px/1.2 var(--sans);
+      letter-spacing: 0;
+      text-transform: none;
+    }
+
+    .rail-row {
+      gap: 6px;
+    }
+
+    .rail-value {
+      max-width: min(42vw, 480px);
+      color: var(--muted);
+      font: 11px/1.3 var(--mono);
+      letter-spacing: 0;
+    }
+
+    .icon-button {
+      width: 30px;
+      height: 30px;
+      min-height: 30px;
+      padding: 0;
+      border-radius: 6px;
+    }
+
+    .runtime-banner {
+      margin: 0;
+      padding: 6px 9px;
+      border: 1px solid #4a402e;
+      border-radius: 6px;
+      background: var(--amber-soft) !important;
+      color: var(--amber);
+      font: 11px/1.2 var(--sans);
+      letter-spacing: 0;
+      text-transform: none;
+      animation: none;
+    }
+
+    .main {
+      width: 100%;
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+
+    header {
+      min-height: 40px;
+      margin-bottom: 16px;
+      padding: 0;
+      border: 0;
+    }
+
+    header h2 {
+      margin: 0;
+      font-family: var(--sans);
+      font-size: 20px;
+      font-weight: 650;
+      line-height: 1.3;
+      letter-spacing: 0;
+      text-transform: none;
+    }
+
+    .summary {
+      margin-top: 3px;
+      color: var(--muted);
+      font: 12px/1.3 var(--sans);
+      letter-spacing: 0;
+      text-transform: none;
+    }
+
+    button {
+      min-height: 32px;
+      padding: 0 11px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.05) !important;
+      color: var(--ink);
+      font: 12px/1 var(--sans);
+      letter-spacing: 0;
+      text-transform: none;
+      clip-path: none;
+      box-shadow: none;
+      transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease;
+    }
+
+    button:hover:not(:disabled) {
+      border-color: var(--line-strong);
+      background: rgba(255, 255, 255, 0.10) !important;
+      color: var(--ink);
+      transform: none;
+    }
+
+    button:disabled {
+      opacity: 0.34;
+    }
+
+    .toolbar {
+      gap: 8px;
+    }
+
+    .stats {
+      display: flex;
+      align-items: stretch;
+      gap: 0;
+      margin-bottom: 14px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: transparent;
+      backdrop-filter: none;
+    }
+
+    .stat {
+      flex: 1;
+      min-height: 72px;
+      padding: 12px 14px;
+      border: 0;
+      border-right: 1px solid var(--line);
+      border-radius: 0;
+      background: transparent !important;
+      box-shadow: none;
+      clip-path: none;
+      backdrop-filter: none !important;
+    }
+
+    .stat:last-child {
+      border-right: 0;
+    }
+
+    .stat.is-empty {
+      opacity: 0.6;
+    }
+
+    .stat-label {
+      color: var(--muted);
+      font: 11px/1.2 var(--sans);
+      letter-spacing: 0;
+      text-transform: none;
+    }
+
+    .stat-value {
+      margin-top: 6px;
+      color: var(--ink);
+      font-family: var(--sans);
+      font-size: 22px;
+      font-weight: 650;
+      line-height: 1;
+      letter-spacing: 0;
+    }
+
+    .panel {
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: transparent !important;
+      box-shadow: none;
+      clip-path: none;
+      backdrop-filter: none !important;
+    }
+
+    .panel-head {
+      min-height: 44px;
+      padding: 0 14px;
+      border-bottom: 1px solid var(--line);
+      color: var(--ink);
+      font: 600 13px/1 var(--sans);
+      letter-spacing: 0;
+      text-transform: none;
+      background: transparent;
+    }
+
+    .panel-count {
+      color: var(--muted);
+      font-weight: 400;
+    }
+
+    .row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(240px, auto);
+      gap: 18px;
+      align-items: start;
+      padding: 14px;
+      border: 0;
+      border-bottom: 1px solid var(--line);
+      border-radius: 0;
+      background: transparent !important;
+      box-shadow: none;
+      clip-path: none;
+      transition: background-color 140ms ease;
+    }
+
+    .row:last-child {
+      border-bottom: 0;
+    }
+
+    .row:hover {
+      border-color: var(--line);
+      background: rgba(255, 255, 255, 0.05) !important;
+      transform: none;
+      box-shadow: none;
+    }
+
+    .thumb {
+      display: none;
+    }
+
+    .title-row {
+      align-items: center;
+      gap: 8px;
+    }
+
+    .job-title {
+      color: var(--ink);
+      font-family: var(--sans);
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: 0;
+    }
+
+    .job-title::after {
+      display: none;
+    }
+
+    .status,
+    .chip {
+      padding: 2px 6px;
+      border-radius: 5px;
+      background: rgba(255, 255, 255, 0.08);
+      color: var(--muted);
+      font: 600 10px/1.5 var(--mono);
+      letter-spacing: 0;
+      text-transform: none;
+      clip-path: none;
+    }
+
+    .progress {
+      margin-top: 7px;
+      color: var(--muted);
+      font: 11px/1.45 var(--mono);
+      letter-spacing: 0;
+    }
+
+    .path {
+      margin-top: 5px;
+      color: var(--faint);
+      font: 11px/1.4 var(--mono);
+      letter-spacing: 0;
+    }
+
+    .meta {
+      gap: 5px;
+      margin-top: 8px;
+    }
+
+    .actions {
+      display: flex;
+      justify-content: flex-end;
+      align-items: flex-start;
+      flex-wrap: wrap;
+      gap: 6px;
+      max-width: 360px;
+      padding: 0;
+      border: 0;
+      background: transparent;
+    }
+
+    .actions button:disabled {
+      display: none;
+    }
+
+    button.danger,
+    .actions button[data-action="remove"] {
+      color: var(--rose);
+    }
+
+    .remove-overlay {
+      position: fixed;
+      z-index: 20;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      padding: 20px;
+      background: rgba(0, 0, 0, 0.38);
+    }
+
+    .remove-dialog {
+      width: min(420px, 100%);
+      padding: 16px;
+      border: 1px solid var(--line-strong);
+      border-radius: 8px;
+      background: rgba(14, 13, 11, 0.62);
+    }
+
+    .remove-dialog h3 {
+      margin: 0 0 8px;
+      font-size: 15px;
+    }
+
+    .remove-dialog p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+      overflow-wrap: anywhere;
+    }
+
+    .remove-dialog-actions {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      margin-top: 16px;
+    }
+
+    details {
+      margin-top: 8px;
+    }
+
+    summary {
+      color: var(--faint);
+      font: 11px/1.3 var(--sans);
+      letter-spacing: 0;
+    }
+
+    code {
+      display: block;
+      margin-top: 7px;
+      padding: 9px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: rgba(0, 0, 0, 0.28);
+      color: var(--muted);
+      font: 10px/1.5 var(--mono);
+      overflow-wrap: anywhere;
+    }
+
+    .empty {
+      min-height: 240px;
+    }
+
+    .empty-title {
+      font-size: 15px;
+      letter-spacing: 0;
+    }
+
+    .empty-text {
+      font-size: 13px;
+    }
+
+    @media (max-width: 820px) {
+      .rail {
+        align-items: flex-start;
+        flex-wrap: wrap;
+        padding: 12px 16px;
+      }
+      .rail-stack {
+        width: 100%;
+        margin-left: 38px;
+      }
+      .runtime-banner {
+        margin-left: auto;
+      }
+      .main {
+        padding: 16px;
+      }
+      .row {
+        grid-template-columns: 1fr;
+      }
+      .actions {
+        justify-content: flex-start;
+        max-width: none;
+      }
+    }
+
+    @media (max-width: 520px) {
+      .stats {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+      }
+      .stat {
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+      }
+      .stat:nth-child(odd) {
+        border-right: 1px solid var(--line);
+      }
+      .stat:nth-last-child(-n + 2) {
+        border-bottom: 0;
+      }
+      .rail-value {
+        max-width: 66vw;
       }
     }
   </style>
@@ -1979,36 +2629,73 @@ function renderHomePage() {
     }
     function renderJob(job) {
       const isActive = job.status === 'running' || job.status === 'queued';
+      const fileExists = job.fileExists !== false && Boolean(job.outputPath);
+      const canForget = !isActive;
       const title = fileName(job.outputPath || job.url);
       const output = job.outputPath || job.url || '';
+      const sourceUrl = job.sourcePageUrl || '';
       return '<article class="row">'
         + '<div class="thumb" aria-hidden="true"></div>'
         + '<div class="job-main">'
         + '<div class="title-row"><div class="job-title" title="' + escapeHtml(title) + '">' + escapeHtml(title) + '</div><span class="status ' + escapeHtml(job.status) + '">' + humanStatus(job.status) + '</span></div>'
-        + '<div class="progress">' + escapeHtml(job.error || job.progressText || 'Waiting') + '</div>'
+        + '<div class="progress">' + escapeHtml(humanJobMessage(job)) + '</div>'
         + '<div class="path" title="' + escapeHtml(output) + '">' + escapeHtml(middleTruncate(output, 72)) + '</div>'
         + '<div class="meta"><span class="chip">TOTAL ' + escapeHtml(sizeLabel(job)) + '</span><span class="chip">DOWN ' + escapeHtml(formatBytes(job.downloadedBytes || 0)) + '</span><span class="chip">START ' + escapeHtml(timeLabel(job.startedAt)) + '</span></div>'
         + '<details><summary>ffmpeg args</summary><code>' + escapeHtml((job.ffmpegArgs || []).join(' ')) + '</code></details>'
         + '</div>'
-        + '<div class="actions"><button class="warning" type="button" data-action="cancel" data-job-id="' + escapeHtml(job.id) + '" ' + (isActive ? '' : 'disabled') + '>Stop</button><button type="button" data-action="show" data-job-id="' + escapeHtml(job.id) + '">Folder</button><button class="danger" type="button" data-action="delete" data-job-id="' + escapeHtml(job.id) + '" ' + (isActive ? 'disabled' : '') + '>Delete</button></div>'
+        + '<div class="actions"><button type="button" data-action="source" data-source-url="' + escapeHtml(sourceUrl) + '" ' + (sourceUrl ? '' : 'disabled') + '>Source</button><button class="warning" type="button" data-action="cancel" data-job-id="' + escapeHtml(job.id) + '" ' + (isActive ? '' : 'disabled') + '>Stop</button><button type="button" data-action="show" data-job-id="' + escapeHtml(job.id) + '" ' + (fileExists ? '' : 'disabled') + '>Open folder</button><button class="danger" type="button" data-action="remove" data-job-id="' + escapeHtml(job.id) + '" data-file-exists="' + fileExists + '" data-title="' + escapeHtml(title) + '" ' + (canForget ? '' : 'disabled') + '>Remove</button></div>'
         + '</article>';
     }
     async function showJob(id) {
       await fetch('/jobs/' + encodeURIComponent(id) + '/show', { method: 'POST' });
     }
-    async function deleteJob(id) {
-      const response = await fetch('/jobs/' + encodeURIComponent(id), { method: 'DELETE' });
-      if (response.ok) loadJobs();
-    }
     async function cancelJob(id) {
       const response = await fetch('/jobs/' + encodeURIComponent(id) + '/cancel', { method: 'POST' });
       if (response.ok) loadJobs();
+    }
+    function openRemoveDialog(id, fileExists, title) {
+      if (!fileExists) {
+        removeJob(id, 'record');
+        return;
+      }
+      document.querySelector('.remove-overlay')?.remove();
+      const overlay = document.createElement('div');
+      overlay.className = 'remove-overlay';
+      overlay.innerHTML = '<div class="remove-dialog"><h3>What would you like to remove?</h3><p class="remove-name"></p><div class="remove-dialog-actions"><button type="button" data-remove-mode="file">Remove file</button><button type="button" data-remove-mode="record">Remove record</button><button class="danger" type="button" data-remove-mode="both">Remove both</button><button type="button" data-remove-mode="cancel">Cancel</button></div></div>';
+      overlay.querySelector('.remove-name').textContent = title;
+      overlay.addEventListener('click', event => {
+        if (event.target === overlay || event.target.dataset.removeMode === 'cancel') {
+          overlay.remove();
+          return;
+        }
+        const mode = event.target.dataset.removeMode;
+        if (!mode) return;
+        overlay.remove();
+        removeJob(id, mode);
+      });
+      document.body.appendChild(overlay);
+    }
+    async function removeJob(id, mode) {
+      if (mode === 'file' || mode === 'both') {
+        const response = await fetch('/jobs/' + encodeURIComponent(id), { method: 'DELETE' });
+        if (!response.ok) return;
+      }
+      if (mode === 'record' || mode === 'both') {
+        const response = await fetch('/jobs/' + encodeURIComponent(id) + '/history', { method: 'DELETE' });
+        if (!response.ok) return;
+      }
+      loadJobs();
     }
     function escapeHtml(value) {
       return String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
     }
     function humanStatus(value) {
-      return ({ queued: 'Queued', running: 'Downloading', completed: 'Completed', failed: 'Failed', cancelled: 'Stopped' })[value] || value;
+      return ({ queued: 'Queued', running: 'Downloading', completed: 'Completed', failed: 'Failed', cancelled: 'Stopped', missing: 'File missing' })[value] || value;
+    }
+    function humanJobMessage(job) {
+      if (job.error === 'DOWNLOAD_STALLED') return 'No data received for 2 minutes. The task was stopped.';
+      if (job.error === 'HELPER_RESTARTED') return 'Download was interrupted when the helper stopped.';
+      return job.error || job.progressText || 'Waiting';
     }
     function fileName(value) {
       return String(value || '').split(/[\\\\/]/).pop() || value || '';
@@ -2043,7 +2730,8 @@ function renderHomePage() {
       if (!button) return;
       if (button.dataset.action === "cancel") cancelJob(button.dataset.jobId);
       if (button.dataset.action === "show") showJob(button.dataset.jobId);
-      if (button.dataset.action === "delete") deleteJob(button.dataset.jobId);
+      if (button.dataset.action === "remove") openRemoveDialog(button.dataset.jobId, button.dataset.fileExists === 'true', button.dataset.title || 'Download');
+      if (button.dataset.action === "source" && button.dataset.sourceUrl) window.open(button.dataset.sourceUrl, '_blank', 'noopener');
     });
     document.querySelector("#copyPathButton").addEventListener("click", async () => {
       await navigator.clipboard.writeText(${JSON.stringify(downloadDir)}).catch(() => {});

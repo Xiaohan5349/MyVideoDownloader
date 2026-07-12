@@ -72,6 +72,28 @@ export function parseHlsMediaPlaylist(text = "", manifestUrl = "") {
   };
 }
 
+export function buildHlsAssetPlan(mediaPlaylist = {}) {
+  const assets = [];
+  const assetNameByUrl = new Map();
+
+  for (const [index, item] of (mediaPlaylist.keys || []).entries()) {
+    addAsset(assets, assetNameByUrl, item.url, `key-${pad(index)}.key`, "key");
+  }
+
+  for (const [index, item] of (mediaPlaylist.maps || []).entries()) {
+    addAsset(assets, assetNameByUrl, item.url, `init-${pad(index)}.${extensionFromUrl(item.url, "mp4")}`, "map");
+  }
+
+  let segmentAssetCount = 0;
+  for (const item of mediaPlaylist.segments || []) {
+    if (assetNameByUrl.has(item.url)) continue;
+    addAsset(assets, assetNameByUrl, item.url, `seg-${pad(segmentAssetCount)}.${segmentExtension(item.url)}`, "segment");
+    segmentAssetCount += 1;
+  }
+
+  return { assets, assetNameByUrl, segmentAssetCount };
+}
+
 export function buildLocalHlsPlaylist(text = "", manifestUrl = "", assetNameByUrl = new Map()) {
   const lines = String(text).split(/\r?\n/);
   return lines.map((rawLine) => {
@@ -115,4 +137,27 @@ function resolveUrl(url, baseUrl) {
   } catch {
     return url;
   }
+}
+
+function addAsset(assets, assetNameByUrl, url, name, role) {
+  if (assetNameByUrl.has(url)) return;
+  assetNameByUrl.set(url, name);
+  assets.push({ url, name, role });
+}
+
+function segmentExtension(url) {
+  const extension = extensionFromUrl(url, "ts");
+  return ["m4s", "mp4", "ts", "aac", "mp3"].includes(extension) ? extension : "ts";
+}
+
+function extensionFromUrl(url, fallback) {
+  try {
+    return new URL(url).pathname.toLowerCase().match(/\.([a-z0-9]{2,5})$/)?.[1] || fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function pad(index) {
+  return String(index).padStart(6, "0");
 }

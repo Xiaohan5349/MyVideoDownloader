@@ -98,6 +98,7 @@ async function handleMessage(message, sender) {
   if (message.type === MESSAGE.DOWNLOADS_JOB_GET) return getHelperJob(message.jobId);
   if (message.type === MESSAGE.DOWNLOADS_JOB_SHOW) return showHelperJob(message.jobId);
   if (message.type === MESSAGE.DOWNLOADS_JOB_DELETE) return deleteHelperJob(message.jobId);
+  if (message.type === MESSAGE.DOWNLOADS_JOB_FORGET) return forgetHelperJob(message.jobId);
   if (message.type === MESSAGE.DOWNLOADS_JOB_CANCEL) return cancelHelperJob(message.jobId);
   if (message.type === MESSAGE.HELPER_STATUS_GET) return getHelperStatus();
   if (message.type === MESSAGE.HELPER_SETTINGS_UPDATE) return updateHelperSettings(message.settings || {});
@@ -311,7 +312,8 @@ async function startStreamDownload(media, variant) {
         helperUrl: HELPER_URL,
         manifestUrl: downloadUrl,
         quality: variant?.quality || media.quality || "",
-        title: media.title
+        title: media.title,
+        sourcePageUrl: media.sourcePageUrl
       }
     });
 
@@ -320,7 +322,7 @@ async function startStreamDownload(media, variant) {
     if (response?.ok) {
       return { ok: true, helperJob: response.helperJob };
     }
-    if (response?.error === "SERVER_PROTECTED_UNSUPPORTED") {
+    if (["SERVER_PROTECTED_UNSUPPORTED", "JOB_CANCELLED", "SEGMENT_DOWNLOAD_FAILED"].includes(response?.error)) {
       return response;
     }
     console.warn("[ds] startStreamDownload FALLBACK=helper (content script returned error)");
@@ -342,6 +344,7 @@ async function startHelperDownload(media, variant) {
         url: downloadUrl,
         title: media.title,
         kind: media.kind,
+        sourcePageUrl: media.sourcePageUrl,
         headers: helperHeadersForMedia({ ...media, url: downloadUrl })
       })
     });
@@ -453,6 +456,17 @@ async function deleteHelperJob(jobId) {
   if (!jobId) return { ok: false, error: "JOB_ID_MISSING" };
   try {
     const response = await fetch(`${HELPER_URL}/jobs/${encodeURIComponent(jobId)}`, { method: "DELETE" });
+    const payload = await response.json().catch(() => ({}));
+    return response.ok ? { ok: true } : { ok: false, error: payload.error || `HELPER_${response.status}` };
+  } catch {
+    return { ok: false, error: "HELPER_OFFLINE" };
+  }
+}
+
+async function forgetHelperJob(jobId) {
+  if (!jobId) return { ok: false, error: "JOB_ID_MISSING" };
+  try {
+    const response = await fetch(`${HELPER_URL}/jobs/${encodeURIComponent(jobId)}/history`, { method: "DELETE" });
     const payload = await response.json().catch(() => ({}));
     return response.ok ? { ok: true } : { ok: false, error: payload.error || `HELPER_${response.status}` };
   } catch {

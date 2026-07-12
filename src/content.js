@@ -12,6 +12,9 @@ const DIRECT_EXTENSIONS = new Set([
 const seenUrls = new Set();
 let scanTimer = null;
 let currentUrl = location.href;
+const SEGMENT_FETCH_TIMEOUT_MS = 30_000;
+const SEGMENT_FETCH_RETRIES = 3;
+let hlsBrowserModulePromise = null;
 
 scanDocument();
 observePageChanges();
@@ -97,17 +100,26 @@ async function fetchTextFromPage(url) {
   // Custom headers + credentials:include triggers CORS preflight
   // which can cause "Failed to fetch" on protected CDNs.
   // The browser sends cookies for the target domain automatically.
-  const response = await fetch(url, { cache: "no-store" });
-  console.warn("[ds-content] fetchTextFromPage status=", response.status);
-  if (!response.ok) {
-    throw new Error(response.status === 403 ? "SERVER_PROTECTED_UNSUPPORTED" : `FETCH_${response.status}`);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), SEGMENT_FETCH_TIMEOUT_MS);
+  try {
+    const response = await fetch(url, { cache: "no-store", signal: controller.signal });
+    console.warn("[ds-content] fetchTextFromPage status=", response.status);
+    if (!response.ok) {
+      throw new Error(response.status === 403 ? "SERVER_PROTECTED_UNSUPPORTED" : `FETCH_${response.status}`);
+    }
+    return await response.text();
+  } catch (error) {
+    if (error?.name === "AbortError") throw new Error("FETCH_TIMEOUT");
+    throw error;
+  } finally {
+    clearTimeout(timer);
   }
-  return response.text();
 }
 
 // --- Full stream download from page context ---
 async function handleStreamDownload(payload) {
-  const { helperUrl, manifestUrl, quality, title } = payload;
+  const { helperUrl, manifestUrl, quality, title, sourcePageUrl } = payload;
   console.warn("[ds-content] handleStreamDownload start manifestUrl=", manifestUrl?.slice(0, 80));
   if (!helperUrl || !manifestUrl) throw new Error("INVALID_DOWNLOAD_REQUEST");
 
@@ -129,9 +141,16 @@ async function handleStreamDownload(payload) {
   // Step 4: Fetch media playlist
   const mediaText = await fetchTextFromPage(variantUrl);
 
-  // Step 5: Extract segment URLs
-  const segments = parseSegments(mediaText, variantUrl);
-  if (!segments.length) throw new Error("HLS_NO_SEGMENTS");
+  // Step 5: Build a complete local asset plan, including accessible AES-128 keys and init maps.
+  const {
+    buildHlsAssetPlan,
+    buildLocalHlsPlaylist,
+    parseHlsMediaPlaylist
+  } = await getHlsBrowserModule();
+  const mediaPlaylist = parseHlsMediaPlaylist(mediaText, variantUrl);
+  if (mediaPlaylist.hasDrm) throw new Error("DRM_PROTECTED_UNSUPPORTED");
+  if (!mediaPlaylist.segments.length) throw new Error("HLS_NO_SEGMENTS");
+  const plan = buildHlsAssetPlan(mediaPlaylist);
 
   // Step 6: Create helper job
   const startRes = await fetch(`${helperUrl}/browser-downloads/start`, {
@@ -140,7 +159,9 @@ async function handleStreamDownload(payload) {
     body: JSON.stringify({
       url: variantUrl,
       title: title || "video",
-      totalSegments: segments.length
+      totalSegments: plan.segmentAssetCount,
+      durationSeconds: mediaPlaylist.durationSeconds,
+      sourcePageUrl: sourcePageUrl || location.href
     })
   });
   const startPayload = await startRes.json().catch(() => ({}));
@@ -149,13 +170,12 @@ async function handleStreamDownload(payload) {
 
   // Step 7: Fetch and upload segments in parallel (8 at a time)
   const concurrency = 8;
-  const assets = segments.map((seg, i) => ({
-    url: seg,
-    name: `seg-${String(i).padStart(6, "0")}.ts`
-  }));
+  const assets = plan.assets;
 
   let completed = 0;
   const total = assets.length;
+  const failed = [];
+  let cancelled = false;
 
   // Parallel fetch + upload with concurrency control
   const running = new Set();
@@ -167,20 +187,20 @@ async function handleStreamDownload(payload) {
       const checkRes = await fetch(`${helperUrl}/jobs/${encodeURIComponent(job.id)}`);
       if (checkRes.ok) {
         const j = await checkRes.json().catch(() => ({}));
-        if (j.status === "cancelled") return;
+        if (j.status === "cancelled" || j.status === "failed") {
+          cancelled = true;
+          return;
+        }
       }
     } catch (_) {}
 
-    // Fetch segment (from page context = Cloudflare passes)
-    const segRes = await fetch(asset.url, { cache: "no-store" });
-    if (!segRes.ok) throw new Error(`SEGMENT_${segRes.status}`);
-
-    const data = await segRes.arrayBuffer();
+    const data = await fetchSegmentWithRetry(asset.url);
 
     // Upload to helper
-    const upRes = await fetch(
+    const upRes = await fetchWithTimeout(
       `${helperUrl}/browser-downloads/${encodeURIComponent(job.id)}/files/${encodeURIComponent(asset.name)}`,
-      { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: data }
+      { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: data },
+      SEGMENT_FETCH_TIMEOUT_MS
     );
     if (!upRes.ok) throw new Error(`UPLOAD_${upRes.status}`);
 
@@ -191,21 +211,31 @@ async function handleStreamDownload(payload) {
   const workers = [];
   for (let i = 0; i < Math.min(concurrency, total); i++) {
     workers.push((async () => {
-      while (idx < total) {
+      while (idx < total && !cancelled) {
         const currentIdx = idx++;
         try {
           await processOne(assets[currentIdx]);
         } catch (e) {
-          // Log error but continue with remaining segments
           console.warn("[ds-video-downloader] segment failed", currentIdx, e.message);
+          failed.push({ index: currentIdx, error: e.message });
         }
       }
     })());
   }
   await Promise.all(workers);
 
+  if (cancelled) return { ok: false, error: "JOB_CANCELLED" };
+  if (failed.length) {
+    await fetch(`${helperUrl}/browser-downloads/${encodeURIComponent(job.id)}/fail`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ error: `SEGMENT_DOWNLOAD_FAILED: ${failed.length}/${total}` })
+    }).catch(() => {});
+    return { ok: false, error: "SEGMENT_DOWNLOAD_FAILED" };
+  }
+
   // Step 8: Build local playlist and complete
-  const localPlaylist = buildLocalPlaylist(mediaText, assets);
+  const localPlaylist = buildLocalHlsPlaylist(mediaText, variantUrl, plan.assetNameByUrl);
   const completeRes = await fetch(
     `${helperUrl}/browser-downloads/${encodeURIComponent(job.id)}/complete`,
     {
@@ -217,6 +247,45 @@ async function handleStreamDownload(payload) {
   if (!completeRes.ok) throw new Error(`HELPER_COMPLETE_${completeRes.status}`);
 
   return { ok: true, helperJob: job, completed, total };
+}
+
+function getHlsBrowserModule() {
+  if (!hlsBrowserModulePromise) {
+    hlsBrowserModulePromise = import(chrome.runtime.getURL("src/hls-browser.js"));
+  }
+  return hlsBrowserModulePromise;
+}
+
+async function fetchSegmentWithRetry(url) {
+  let lastError;
+  for (let attempt = 1; attempt <= SEGMENT_FETCH_RETRIES; attempt += 1) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), SEGMENT_FETCH_TIMEOUT_MS);
+    try {
+      const response = await fetch(url, { cache: "no-store", signal: controller.signal });
+      if (!response.ok) throw new Error(`SEGMENT_${response.status}`);
+      return await response.arrayBuffer();
+    } catch (error) {
+      lastError = error?.name === "AbortError" ? new Error("SEGMENT_TIMEOUT") : error;
+      if (attempt < SEGMENT_FETCH_RETRIES) await new Promise((resolve) => setTimeout(resolve, attempt * 1000));
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  throw lastError || new Error("SEGMENT_DOWNLOAD_FAILED");
+}
+
+async function fetchWithTimeout(url, options, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (error) {
+    if (error?.name === "AbortError") throw new Error("HELPER_TIMEOUT");
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // --- Inline HLS parsing (no ES module imports in content scripts) ---
@@ -252,31 +321,6 @@ function parseHlsMaster(text, baseUrl) {
   }
 
   return { hasDrm, variants };
-}
-
-function parseSegments(text, baseUrl) {
-  return String(text).split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter((l) => l && !l.startsWith("#"))
-    .map((l) => resolveUrl(l, baseUrl));
-}
-
-function buildLocalPlaylist(text, assets) {
-  const lines = String(text).split(/\r?\n/);
-  const result = [];
-  let ai = 0;
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) {
-      result.push(line);
-    } else if (ai < assets.length) {
-      result.push(assets[ai].name);
-      ai++;
-    } else {
-      result.push(line);
-    }
-  }
-  return result.join("\n");
 }
 
 function pickVariant(variants, targetQuality) {

@@ -29,17 +29,23 @@
 ### 2. 启动助手
 
 ```powershell
-npm run helper
+npm run helper:start
 ```
+
+该命令会在后台启动助手，启动后可以关闭终端窗口。
 
 助手控制台地址：[http://127.0.0.1:8765](http://127.0.0.1:8765)。可在此查看下载进度、ffmpeg 运行状态及修改下载目录。
 
 ### 助手管理
 
 ```powershell
+npm run helper:start     # 在后台启动助手
 npm run helper:status    # 查看助手运行状态
 npm run helper:stop      # 停止助手
 npm run helper:restart   # 重启助手
+npm run helper:autostart:install  # Windows 登录后自动启动
+npm run helper:autostart:status   # 查看自动启动状态
+npm run helper:autostart:remove   # 关闭自动启动
 ```
 
 ## 使用方法

@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  buildHlsAssetPlan,
   buildLocalHlsPlaylist,
   parseHlsMediaPlaylist
 } from "../src/hls-browser.js";
@@ -72,4 +73,28 @@ test("buildLocalHlsPlaylist rewrites remote URIs to local helper files", () => {
   assert.match(playlist, /#EXT-X-KEY:METHOD=AES-128,URI="key-000000\.key"/);
   assert.match(playlist, /\nseg-000000\.ts\n/);
   assert.match(playlist, /\nseg-000001\.ts$/);
+});
+
+test("Jable-style AES-128 key with a .ts name is downloaded and rewritten as a key asset", () => {
+  const manifestUrl = "https://cdn.example.com/hls/60502/60502.m3u8";
+  const text = [
+    "#EXTM3U",
+    "#EXT-X-KEY:METHOD=AES-128,URI=\"a84c3dee1788d22c.ts\",IV=0x22e85870185b0973fd1e88f0fec7a735",
+    "#EXTINF:6.0,",
+    "605020.ts",
+    "#EXTINF:6.0,",
+    "605021.ts"
+  ].join("\n");
+  const parsed = parseHlsMediaPlaylist(text, manifestUrl);
+  const plan = buildHlsAssetPlan(parsed);
+  const playlist = buildLocalHlsPlaylist(text, manifestUrl, plan.assetNameByUrl);
+
+  assert.equal(parsed.hasDrm, false);
+  assert.equal(plan.segmentAssetCount, 2);
+  assert.deepEqual(plan.assets.map((asset) => [asset.role, asset.name]), [
+    ["key", "key-000000.key"],
+    ["segment", "seg-000000.ts"],
+    ["segment", "seg-000001.ts"]
+  ]);
+  assert.match(playlist, /#EXT-X-KEY:METHOD=AES-128,URI="key-000000\.key",IV=/);
 });

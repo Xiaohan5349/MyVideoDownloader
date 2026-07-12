@@ -29,17 +29,23 @@ The extension detects media on pages you visit and sends download requests to a 
 ### 2. Start the Helper
 
 ```powershell
-npm run helper
+npm run helper:start
 ```
+
+This starts the helper in the background, so the terminal can be closed.
 
 The helper dashboard opens at [http://127.0.0.1:8765](http://127.0.0.1:8765). You can monitor downloads, check ffmpeg status, and change the download directory from there.
 
 ### Helper Management
 
 ```powershell
+npm run helper:start     # Start in the background
 npm run helper:status    # Check if helper is running
 npm run helper:stop      # Stop the helper
 npm run helper:restart   # Restart the helper
+npm run helper:autostart:install  # Start automatically after Windows sign-in
+npm run helper:autostart:status   # Check auto-start registration
+npm run helper:autostart:remove   # Disable auto-start
 ```
 
 ## Usage

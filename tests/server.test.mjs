@@ -1,6 +1,7 @@
 import { describe, before, after, it } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -10,16 +11,19 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 process.env.NODE_ENV = "test";
 process.env.PORT = "0"; // Random port
 process.env.DOWNLOAD_DIR = path.join(__dirname, "..", "helper", "test-downloads");
+process.env.CONFIG_PATH = path.join(process.env.DOWNLOAD_DIR, "helper-settings.json");
+process.env.JOBS_PATH = path.join(process.env.DOWNLOAD_DIR, "helper-jobs.json");
 
 // Dynamic import to get server reference
 const serverPath = pathToFileURL(path.join(__dirname, "..", "helper", "server.js")).href;
 const serverModule = await import(serverPath);
-const { server, isSafeDownloadPath } = serverModule;
+const { server, jobs, isSafeDownloadPath, sweepStalledJobs } = serverModule;
 
 let baseUrl;
 
 describe("server.js HTTP API", () => {
   before(async () => {
+    await mkdir(process.env.DOWNLOAD_DIR, { recursive: true });
     await new Promise((resolve) => {
       server.listen(0, "127.0.0.1", () => {
         const addr = server.address();
@@ -29,8 +33,9 @@ describe("server.js HTTP API", () => {
     });
   });
 
-  after(() => {
-    server.close();
+  after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    await rm(process.env.DOWNLOAD_DIR, { recursive: true, force: true });
   });
 
 // Helper to make HTTP requests
@@ -85,6 +90,20 @@ it("GET / returns HTML dashboard", async () => {
   const res = await fetchJson("/");
   assert.equal(res.status, 200);
   assert.ok(typeof res.body === "string" && res.body.includes("<!doctype html>"));
+  assert.match(res.body, /app-background\.webp/);
+  assert.match(res.body, /Open folder/);
+  assert.match(res.body, /Remove file/);
+  assert.match(res.body, /Remove record/);
+  assert.match(res.body, /data-action="remove"/);
+  assert.doesNotMatch(res.body, /data-action="delete"/);
+  assert.doesNotMatch(res.body, /data-action="forget"/);
+});
+
+it("GET /assets/app-background.webp returns the dashboard background", async () => {
+  const res = await fetchJson("/assets/app-background.webp");
+  assert.equal(res.status, 200);
+  assert.equal(res.headers["content-type"], "image/webp");
+  assert.ok(typeof res.body === "string" && res.body.length > 100);
 });
 
 // ─── Error Handling ───
@@ -157,7 +176,8 @@ it("POST /browser-downloads/start creates a browser-fed helper job", async () =>
       durationSeconds: 10,
       totalSegments: 2,
       totalBytes: 2048,
-      totalSizeSource: "estimated"
+      totalSizeSource: "estimated",
+      sourcePageUrl: "https://site.example/watch/video"
     },
   });
 
@@ -166,6 +186,109 @@ it("POST /browser-downloads/start creates a browser-fed helper job", async () =>
   assert.equal(res.body.job.status, "running");
   assert.equal(res.body.job.inputMode, "browser");
   assert.equal(res.body.job.totalSegments, 2);
+  assert.equal(res.body.job.sourcePageUrl, "https://site.example/watch/video");
+});
+
+it("marks a running job failed when downloaded bytes stop advancing", async () => {
+  const id = "stalled-job";
+  jobs.set(id, {
+    id,
+    status: "running",
+    outputPath: path.join(process.env.DOWNLOAD_DIR, "stalled.mp4"),
+    downloadDir: process.env.DOWNLOAD_DIR,
+    downloadedBytes: 1024,
+    lastByteProgressAt: 1,
+    progressText: "Downloading"
+  });
+
+  await sweepStalledJobs(10_001, 10_000);
+
+  assert.equal(jobs.get(id).status, "failed");
+  assert.equal(jobs.get(id).error, "DOWNLOAD_STALLED");
+});
+
+it("GET /jobs marks completed history missing after its output is removed", async () => {
+  const id = "externally-deleted-job";
+  const outputPath = path.join(process.env.DOWNLOAD_DIR, "deleted-outside-helper.mp4");
+  await writeFile(outputPath, Buffer.from([1, 2, 3]));
+  jobs.set(id, {
+    id,
+    status: "completed",
+    outputPath,
+    downloadDir: process.env.DOWNLOAD_DIR,
+    sourcePageUrl: "https://site.example/watch/again",
+    downloadedBytes: 3,
+    progressText: "Completed 3 B"
+  });
+
+  let res = await fetchJson("/jobs");
+  let job = res.body.jobs.find((item) => item.id === id);
+  assert.equal(job.status, "completed");
+  assert.equal(job.fileExists, true);
+
+  await rm(outputPath);
+  res = await fetchJson("/jobs");
+  job = res.body.jobs.find((item) => item.id === id);
+  assert.equal(job.status, "missing");
+  assert.equal(job.fileExists, false);
+  assert.equal(job.sourcePageUrl, "https://site.example/watch/again");
+});
+
+it("DELETE /jobs/:id removes output but preserves source history", async () => {
+  const id = "delete-and-keep-history";
+  const outputPath = path.join(process.env.DOWNLOAD_DIR, "delete-through-helper.mp4");
+  await writeFile(outputPath, Buffer.from([1, 2, 3]));
+  jobs.set(id, {
+    id,
+    status: "completed",
+    outputPath,
+    downloadDir: process.env.DOWNLOAD_DIR,
+    sourcePageUrl: "https://site.example/watch/later",
+    downloadedBytes: 3
+  });
+
+  const deleted = await fetchJson(`/jobs/${id}`, { method: "DELETE" });
+  assert.equal(deleted.status, 200);
+  assert.equal(deleted.body.job.status, "missing");
+  assert.equal(deleted.body.job.sourcePageUrl, "https://site.example/watch/later");
+
+  const fetched = await fetchJson(`/jobs/${id}`);
+  assert.equal(fetched.status, 200);
+  assert.equal(fetched.body.status, "missing");
+  assert.equal(fetched.body.fileExists, false);
+});
+
+it("DELETE /jobs/:id/history removes every non-active record without deleting output", async () => {
+  for (const status of ["failed", "missing", "cancelled", "completed"]) {
+    const id = `forget-${status}`;
+    const outputPath = path.join(process.env.DOWNLOAD_DIR, `${id}.mp4`);
+    if (status === "completed") await writeFile(outputPath, "completed media");
+    jobs.set(id, {
+      id,
+      status,
+      outputPath,
+      downloadDir: process.env.DOWNLOAD_DIR,
+      sourcePageUrl: "https://site.example/watch/history"
+    });
+
+    const removed = await fetchJson(`/jobs/${id}/history`, { method: "DELETE" });
+    assert.equal(removed.status, 200);
+    assert.equal(removed.body.ok, true);
+    assert.equal(jobs.has(id), false);
+    if (status === "completed") {
+      const output = await readFile(outputPath, "utf8");
+      assert.equal(output, "completed media");
+    }
+  }
+
+  for (const status of ["queued", "running"]) {
+    const id = `keep-${status}-history`;
+    jobs.set(id, { id, status });
+    const rejected = await fetchJson(`/jobs/${id}/history`, { method: "DELETE" });
+    assert.equal(rejected.status, 409);
+    assert.equal(rejected.body.error, "JOB_HISTORY_NOT_REMOVABLE");
+    assert.equal(jobs.has(id), true);
+  }
 });
 
 it("POST /browser-downloads/:id/files/:name stores segment bytes", async () => {
@@ -253,7 +376,9 @@ it("isSafeDownloadPath: valid path within download dir returns true", () => {
 it("isSafeDownloadPath: path outside download dir returns false", () => {
   const baseDir = process.platform === "win32" ? "C:\\Users\\test\\Downloads" : "/home/test/Downloads";
   const outside = process.platform === "win32" ? "C:\\Users\\test\\Documents\\video.mp4" : "/home/test/Documents/video.mp4";
+  const siblingWithSamePrefix = `${baseDir}-backup${path.sep}video.mp4`;
   assert.equal(isSafeDownloadPath(outside, baseDir), false);
+  assert.equal(isSafeDownloadPath(siblingWithSamePrefix, baseDir), false);
 });
 
 it("isSafeDownloadPath: falsy value returns false", () => {
