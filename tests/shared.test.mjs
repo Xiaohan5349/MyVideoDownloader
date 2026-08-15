@@ -7,6 +7,7 @@ import {
   fallbackBandwidthForQuality,
   mergeSettings,
   inferQualityLabel,
+  normalizeMediaItem,
   parseDashManifest,
   parseHlsManifest,
   sanitizeFilename
@@ -18,6 +19,19 @@ test("classifyMedia detects direct URLs and manifests", () => {
   assert.deepEqual(classifyMedia("https://example.com/watch?src=https%3A%2F%2Fcdn.example.com%2Fmaster.m3u8"), { extension: "m3u8", kind: "hls" });
   assert.deepEqual(classifyMedia("https://example.com/manifest", "application/dash+xml"), { extension: "mpd", kind: "dash" });
   assert.equal(classifyMedia("https://example.com/page.html"), null);
+});
+
+test("normalizeMediaItem keeps a validated type for extensionless signed media URLs", () => {
+  const item = normalizeMediaItem({
+    url: "https://example.com/media/video/111086/720p?expires=123&signature=test",
+    sourcePageUrl: "https://example.com/watch",
+    title: "Signed video",
+    extension: "mp4",
+    kind: "direct"
+  });
+  assert.equal(item.extension, "mp4");
+  assert.equal(item.kind, "direct");
+  assert.equal(item.quality, "720p");
 });
 
 test("sanitizeFilename strips invalid path characters and adds extension", () => {

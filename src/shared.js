@@ -150,11 +150,13 @@ export function mergeSettings(raw = {}) {
 
 export function normalizeMediaItem(input, fallback = {}) {
   if (!input?.url || typeof input.url !== "string") return null;
-  const classified = classifyMedia(input.url, input.contentType || "");
+  const declaredExtension = String(input.extension || "").replace(/^\./, "").toLowerCase();
+  const classified = classifyMedia(input.url, input.contentType || "") ||
+    (declaredExtension ? classifyMedia(`https://media.invalid/file.${declaredExtension}`) : null);
   if (!classified) return null;
   const sourcePageUrl = input.sourcePageUrl || fallback.sourcePageUrl || "";
   const title = input.title || fallback.title || "video";
-  const extension = input.extension?.replace(/^\./, "") || classified.extension;
+  const extension = declaredExtension || classified.extension;
 
   return {
     id: input.id || makeMediaId(input.url, sourcePageUrl),

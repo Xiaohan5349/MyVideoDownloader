@@ -458,14 +458,16 @@ function detectExtension(url = "", contentType = "") {
 }
 
 function normalizeMediaItem(input) {
-  const classified = classifyMedia(input.url, "");
+  const declaredExtension = String(input.extension || "").replace(/^\./, "").toLowerCase();
+  const classified = classifyMedia(input.url, input.contentType || "") ||
+    (declaredExtension ? classifyMedia(`https://media.invalid/file.${declaredExtension}`) : null);
   if (!classified) return null;
   return {
     id: `${input.sourcePageUrl || "unknown"}::${input.url}`,
     url: input.url,
     sourcePageUrl: input.sourcePageUrl || "",
     title: input.title || "video",
-    extension: input.extension || classified.extension,
+    extension: declaredExtension || classified.extension,
     kind: input.kind || classified.kind,
     quality: inferQualityLabel(input.url),
     size: null,

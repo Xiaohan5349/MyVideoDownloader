@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.4.6 - 2026-07-18
+
+### Fixed
+- Fixed detection of signed, extensionless media routes when the page declares a valid media type such as `video/mp4`.
+- Preserved validated media extension metadata across content-script and background normalization passes.
+
 ## v1.4.5 - 2026-07-12
 
 ### Changed
