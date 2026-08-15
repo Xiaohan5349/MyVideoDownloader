@@ -1,104 +1,299 @@
 {
-  "brandName": { "message": "DS 视频下载器" },
-  "brandShortName": { "message": "DS 视频下载器" },
-  "brandDescription": { "message": "从任意网站下载视频。支持 HLS/DASH 流媒体，需本地助手。" },
-
-  "tabsMedia": { "message": "媒体扫描" },
-  "tabsHelper": { "message": "下载队列" },
-  "tabsSettings": { "message": "系统设置" },
-
-  "btnRescan": { "message": "重新扫描" },
-  "btnRescanTitle": { "message": "重新扫描当前页面" },
-  "btnRefresh": { "message": "刷新" },
-  "btnOpenDashboard": { "message": "控制台" },
-  "btnDownload": { "message": "下载" },
-  "btnSave": { "message": "保存" },
-  "btnStop": { "message": "终止" },
-  "btnFolder": { "message": "打开目录" },
-  "btnSource": { "message": "来源" },
-  "btnDelete": { "message": "清除" },
-  "btnRemoveFile": { "message": "移除文件" },
-  "btnRemoveRecord": { "message": "移除记录" },
-  "btnRemove": { "message": "移除" },
-  "btnRemoveBoth": { "message": "全部移除" },
-  "btnCancel": { "message": "取消" },
-  "btnSelectFolder": { "message": "选择目录" },
-  "btnSaveHelperFolder": { "message": "保存目录" },
-
-  "settingsFilterLabel": { "message": "忽略小于此大小的直接媒体" },
-  "settingsNoFilter": { "message": "不过滤" },
-  "settingsShowUnsupported": { "message": "显示不受支持或受保护的媒体" },
-  "settingsDownloadDirLabel": { "message": "下载保存目录" },
-  "settingsDownloadDirPlaceholder": { "message": "C:\\Users\\你的用户名\\Videos" },
-  "settingsNote": { "message": "文件大小过滤仅在浏览器报告直接文件大小时生效。HLS/DASH 播放列表始终可见。" },
-
-  "settingsLanguageLabel": { "message": "界面语言" },
-  "settingsLanguageEn": { "message": "English" },
-  "settingsLanguageZh": { "message": "简体中文" },
-  "settingsHeading": { "message": "DS 视频下载器 · 系统设置" },
-  "settingsSaved": { "message": "语言偏好已保存。" },
-
-  "statusQueued": { "message": "队列中" },
-  "statusDownloading": { "message": "数据同步中..." },
-  "statusCompleted": { "message": "已就绪" },
-  "statusFailed": { "message": "异常中断" },
-  "statusStopped": { "message": "已终止" },
-  "statusMissing": { "message": "文件已丢失" },
-  "statusHelperOffline": { "message": "助手离线" },
-  "statusCheckingHelper": { "message": "正在检测助手..." },
-  "statusCompletedLabel": { "message": "已完成: {{path}}" },
-  "statusFailedLabel": { "message": "失败: {{error}}" },
-  "statusStoppedByUser": { "message": "已被用户终止。" },
-  "statusUnknownError": { "message": "未知错误" },
-  "statusHelperJob": { "message": "助手任务" },
-
-  "labelDefaultFolder": { "message": "默认文件夹" },
-  "labelStream": { "message": "流媒体" },
-  "labelSizeUnknown": { "message": "大小未知" },
-  "labelTotalUnknown": { "message": "总量未知" },
-  "labelUnsupported": { "message": "不支持" },
-  "labelVideo": { "message": "视频" },
-
-  "msgCountDetected": { "message": "检测到 {{count}} 个" },
-  "msgActiveJobs": { "message": "{{active}} 个活跃, 共 {{total}} 个任务" },
-  "msgHelperRunning": { "message": "本地助手运行中。下载目录: {{dir}}" },
-  "msgHelperEmpty": { "message": "启动本地助手以下载 HLS/DASH 流媒体并管理已完成文件。" },
-  "msgNoActiveTab": { "message": "未找到活动标签页。" },
-  "msgCouldNotReadMedia": { "message": "无法读取检测到的媒体。" },
-  "msgEmptyHint": { "message": "播放视频或打开直链媒体，然后重新扫描本页。" },
-  "msgNoJobs": { "message": "暂无下载任务。" },
-  "msgDownloadPermission": { "message": "需要下载权限才能进行托管下载。" },
-  "msgHelperStreamStarted": { "message": "本地助手已启动流媒体下载。" },
-  "msgDownloadStarted": { "message": "下载已启动。" },
-  "msgDrmUnsupported": { "message": "DRM 保护流媒体不受支持。" },
-  "msgServerBlocked": { "message": "此服务器阻止扩展访问，不受支持。" },
-  "msgStreamVariantsHint": { "message": "检测到流媒体，共 {{count}} 个画质变体。启动本地助手后选择画质。" },
-  "msgStartHelperHint": { "message": "启动本地助手以下载 HLS/DASH 流媒体。" },
-  "msgDownloadFailed": { "message": "下载无法启动。" },
-  "msgVariantStreamStarted": { "message": "本地助手已启动所选流媒体下载。" },
-  "msgVariantHelperOffline": { "message": "下载流媒体变体前请先启动本地助手。" },
-  "msgVariantFailed": { "message": "所选流媒体无法启动。" },
-  "msgSettingsSaveFailed": { "message": "无法保存设置。" },
-  "msgCouldNotReadHelperStatus": { "message": "无法读取助手状态。" },
-  "msgCouldNotShowFile": { "message": "无法显示文件。" },
-  "msgCouldNotDeleteFile": { "message": "无法移除已下载文件。" },
-  "msgDeletedOutput": { "message": "已移除下载文件，来源记录仍然保留。" },
-  "msgRemovedBoth": { "message": "已移除下载文件及其历史记录。" },
-  "removeDialogTitle": { "message": "请选择要移除的内容" },
-  "msgCouldNotRemoveRecord": { "message": "无法移除历史记录。" },
-  "msgRemovedRecord": { "message": "已移除历史记录。" },
-  "msgCouldNotStopJob": { "message": "无法停止助手任务。" },
-  "msgStoppedJob": { "message": "已停止助手任务。" },
-  "msgDownloadStalled": { "message": "两分钟内未收到新数据，任务已自动停止。" },
-  "msgHelperRestarted": { "message": "助手停止时下载被中断。" },
-  "msgEnterDownloadDir": { "message": "请输入下载目录路径。" },
-  "msgHelperOfflineSaveDir": { "message": "保存目录前请先启动助手。" },
-  "msgCouldNotSaveDir": { "message": "无法保存助手目录。" },
-  "msgDirSaved": { "message": "助手下载目录已保存。" },
-  "msgPickerOpening": { "message": "正在打开 Windows 文件夹选择器。如果它出现在 Chrome 后面，请检查任务栏。" },
-  "msgCouldNotOpenPicker": { "message": "无法打开文件夹选择器。" },
-  "msgHelperOfflinePickDir": { "message": "选择目录前请先启动助手。" },
-  "msgFolderSelected": { "message": "助手下载目录已选择。" },
-  "msgDirectFilesHidden": { "message": "小于 {{size}} 的直接文件已隐藏" },
-  "msgNoSizeFilter": { "message": "无大小过滤" }
+  "brandName": {
+    "message": "DS 视频下载器"
+  },
+  "brandShortName": {
+    "message": "DS 视频下载器"
+  },
+  "brandDescription": {
+    "message": "从任意网站下载视频。支持 HLS/DASH 流媒体，需本地助手。"
+  },
+  "tabsMedia": {
+    "message": "媒体扫描"
+  },
+  "tabsHelper": {
+    "message": "下载队列"
+  },
+  "tabsSettings": {
+    "message": "系统设置"
+  },
+  "btnRescan": {
+    "message": "重新扫描"
+  },
+  "btnRescanTitle": {
+    "message": "重新扫描当前页面"
+  },
+  "btnRefresh": {
+    "message": "刷新"
+  },
+  "btnOpenDashboard": {
+    "message": "控制台"
+  },
+  "btnDownload": {
+    "message": "下载"
+  },
+  "btnSave": {
+    "message": "保存"
+  },
+  "btnStop": {
+    "message": "终止"
+  },
+  "btnFolder": {
+    "message": "打开目录"
+  },
+  "btnSource": {
+    "message": "来源"
+  },
+  "btnDelete": {
+    "message": "清除"
+  },
+  "btnRemoveFile": {
+    "message": "移除文件"
+  },
+  "btnRemoveRecord": {
+    "message": "移除记录"
+  },
+  "btnRemove": {
+    "message": "移除"
+  },
+  "btnRemoveBoth": {
+    "message": "全部移除"
+  },
+  "btnCancel": {
+    "message": "取消"
+  },
+  "btnSelectFolder": {
+    "message": "选择目录"
+  },
+  "btnSaveHelperFolder": {
+    "message": "保存目录"
+  },
+  "settingsFilterLabel": {
+    "message": "忽略小于此大小的直接媒体"
+  },
+  "settingsNoFilter": {
+    "message": "不过滤"
+  },
+  "settingsShowUnsupported": {
+    "message": "显示不受支持或受保护的媒体"
+  },
+  "settingsDownloadDirLabel": {
+    "message": "下载保存目录"
+  },
+  "settingsDownloadDirPlaceholder": {
+    "message": "C:\\Users\\你的用户名\\Videos"
+  },
+  "settingsNote": {
+    "message": "文件大小过滤仅在浏览器报告直接文件大小时生效。HLS/DASH 播放列表始终可见。"
+  },
+  "settingsLanguageLabel": {
+    "message": "界面语言"
+  },
+  "settingsLanguageEn": {
+    "message": "English"
+  },
+  "settingsLanguageZh": {
+    "message": "简体中文"
+  },
+  "settingsHeading": {
+    "message": "DS 视频下载器 · 系统设置"
+  },
+  "settingsSaved": {
+    "message": "语言偏好已保存。"
+  },
+  "statusQueued": {
+    "message": "队列中"
+  },
+  "statusDownloading": {
+    "message": "数据同步中..."
+  },
+  "statusCompleted": {
+    "message": "已就绪"
+  },
+  "statusFailed": {
+    "message": "异常中断"
+  },
+  "statusStopped": {
+    "message": "已终止"
+  },
+  "statusMissing": {
+    "message": "文件已丢失"
+  },
+  "statusHelperOffline": {
+    "message": "助手离线"
+  },
+  "statusCheckingHelper": {
+    "message": "正在检测助手..."
+  },
+  "statusCompletedLabel": {
+    "message": "已完成: {{path}}"
+  },
+  "statusFailedLabel": {
+    "message": "失败: {{error}}"
+  },
+  "statusStoppedByUser": {
+    "message": "已被用户终止。"
+  },
+  "statusUnknownError": {
+    "message": "未知错误"
+  },
+  "statusHelperJob": {
+    "message": "助手任务"
+  },
+  "labelDefaultFolder": {
+    "message": "默认文件夹"
+  },
+  "labelStream": {
+    "message": "流媒体"
+  },
+  "labelSizeUnknown": {
+    "message": "大小未知"
+  },
+  "labelTotalUnknown": {
+    "message": "总量未知"
+  },
+  "labelUnsupported": {
+    "message": "不支持"
+  },
+  "labelVideo": {
+    "message": "视频"
+  },
+  "msgCountDetected": {
+    "message": "检测到 {{count}} 个"
+  },
+  "msgActiveJobs": {
+    "message": "{{active}} 个活跃, 共 {{total}} 个任务"
+  },
+  "msgHelperRunning": {
+    "message": "本地助手运行中。下载目录: {{dir}}"
+  },
+  "msgHelperEmpty": {
+    "message": "启动本地助手以下载 HLS/DASH 流媒体并管理已完成文件。"
+  },
+  "msgNoActiveTab": {
+    "message": "未找到活动标签页。"
+  },
+  "msgCouldNotReadMedia": {
+    "message": "无法读取检测到的媒体。"
+  },
+  "msgEmptyHint": {
+    "message": "播放视频或打开直链媒体，然后重新扫描本页。"
+  },
+  "msgNoJobs": {
+    "message": "暂无下载任务。"
+  },
+  "msgDownloadPermission": {
+    "message": "需要下载权限才能进行托管下载。"
+  },
+  "msgHelperStreamStarted": {
+    "message": "本地助手已启动流媒体下载。"
+  },
+  "msgDownloadStarted": {
+    "message": "下载已启动。"
+  },
+  "msgDrmUnsupported": {
+    "message": "DRM 保护流媒体不受支持。"
+  },
+  "msgServerBlocked": {
+    "message": "此服务器阻止扩展访问，不受支持。"
+  },
+  "msgStreamVariantsHint": {
+    "message": "检测到流媒体，共 {{count}} 个画质变体。启动本地助手后选择画质。"
+  },
+  "msgStartHelperHint": {
+    "message": "启动本地助手以下载 HLS/DASH 流媒体。"
+  },
+  "msgDownloadFailed": {
+    "message": "下载无法启动。"
+  },
+  "msgVariantStreamStarted": {
+    "message": "本地助手已启动所选流媒体下载。"
+  },
+  "msgVariantHelperOffline": {
+    "message": "下载流媒体变体前请先启动本地助手。"
+  },
+  "msgVariantFailed": {
+    "message": "所选流媒体无法启动。"
+  },
+  "msgSettingsSaveFailed": {
+    "message": "无法保存设置。"
+  },
+  "msgCouldNotReadHelperStatus": {
+    "message": "无法读取助手状态。"
+  },
+  "msgCouldNotShowFile": {
+    "message": "无法显示文件。"
+  },
+  "msgCouldNotDeleteFile": {
+    "message": "无法移除已下载文件。"
+  },
+  "msgDeletedOutput": {
+    "message": "已移除下载文件，来源记录仍然保留。"
+  },
+  "msgRemovedBoth": {
+    "message": "已移除下载文件及其历史记录。"
+  },
+  "removeDialogTitle": {
+    "message": "请选择要移除的内容"
+  },
+  "msgCouldNotRemoveRecord": {
+    "message": "无法移除历史记录。"
+  },
+  "msgRemovedRecord": {
+    "message": "已移除历史记录。"
+  },
+  "msgCouldNotStopJob": {
+    "message": "无法停止助手任务。"
+  },
+  "msgStoppedJob": {
+    "message": "已停止助手任务。"
+  },
+  "msgDownloadStalled": {
+    "message": "两分钟内未收到新数据，任务已自动停止。"
+  },
+  "msgHelperRestarted": {
+    "message": "助手停止时下载被中断。"
+  },
+  "msgEnterDownloadDir": {
+    "message": "请输入下载目录路径。"
+  },
+  "msgHelperOfflineSaveDir": {
+    "message": "保存目录前请先启动助手。"
+  },
+  "msgCouldNotSaveDir": {
+    "message": "无法保存助手目录。"
+  },
+  "msgDirSaved": {
+    "message": "助手下载目录已保存。"
+  },
+  "msgPickerOpening": {
+    "message": "正在打开 Windows 文件夹选择器。如果它出现在 Chrome 后面，请检查任务栏。"
+  },
+  "msgCouldNotOpenPicker": {
+    "message": "无法打开文件夹选择器。"
+  },
+  "msgHelperOfflinePickDir": {
+    "message": "选择目录前请先启动助手。"
+  },
+  "msgFolderSelected": {
+    "message": "助手下载目录已选择。"
+  },
+  "msgDirectFilesHidden": {
+    "message": "小于 {{size}} 的直接文件已隐藏"
+  },
+  "msgNoSizeFilter": {
+    "message": "无大小过滤"
+  },
+  "btnClearMissing": {
+    "message": "清除丢失记录"
+  },
+  "msgClearMissingDone": {
+    "message": "已清除 {{count}} 条文件丢失记录。"
+  },
+  "msgClearMissingFailed": {
+    "message": "无法清除丢失记录。"
+  },
+  "msgHelperOfflineClearMissing": {
+    "message": "清除丢失记录前请先启动助手。"
+  }
 }

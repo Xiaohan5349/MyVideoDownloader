@@ -40,6 +40,13 @@ test("sanitizeFilename strips invalid path characters and adds extension", () =>
   assert.equal(sanitizeFilename("", "mp4"), "video.mp4");
 });
 
+test("sanitizeFilename avoids Windows reserved device names", () => {
+  assert.equal(sanitizeFilename("CON", "mp4"), "_CON.mp4");
+  assert.equal(sanitizeFilename("nul", "mp4"), "_nul.mp4");
+  assert.equal(sanitizeFilename("COM1", "mp4"), "_COM1.mp4");
+  assert.equal(sanitizeFilename("CON.video", "mp4"), "_CON.video.mp4");
+});
+
 test("addUniqueMedia deduplicates by page and URL", () => {
   const first = addUniqueMedia([], [
     { url: "https://cdn.example.com/a.mp4", sourcePageUrl: "https://site.example", title: "A" }
@@ -135,4 +142,12 @@ test("inferQualityLabel reads common HLS quality URL patterns", () => {
   assert.equal(inferQualityLabel("https://cdn.example.com/stream_360/index.m3u8"), "360p");
   assert.equal(inferQualityLabel("https://cdn.example.com/hls/180p/video.m3u8"), "180p");
   assert.equal(inferQualityLabel("https://cdn.example.com/master.m3u8"), "");
+});
+
+test("inferQualityLabel and normalizeMediaItem tolerate malformed percent encoding", () => {
+  assert.equal(inferQualityLabel("https://cdn.example.com/a%zz/video.m3u8"), "");
+  const item = normalizeMediaItem({ url: "https://cdn.example.com/a%zz/video", contentType: "video/mp4" });
+  assert.equal(item.kind, "direct");
+  assert.equal(item.extension, "mp4");
+  assert.equal(item.quality, "");
 });

@@ -19,7 +19,7 @@
         const v = window[key];
         if (v === undefined || v === null) continue;
         const s = safeString(v);
-        if (s && /\.m3u8\b/i.test(s.slice(0, 50000))) {
+        if (s && /\.(?:m3u8|mpd)\b/i.test(s.slice(0, 50000))) {
           found.push({ source: `window.${key}`, text: s.slice(0, 50000) });
         }
       } catch (_) {}
@@ -34,7 +34,7 @@
           if (!v || typeof v !== "object" || seen.has(v)) continue;
           seen.add(v);
           const s = safeString(v);
-          if (s && /\.m3u8\b/i.test(s.slice(0, 50000))) {
+          if (s && /\.(?:m3u8|mpd)\b/i.test(s.slice(0, 50000))) {
             found.push({ source: `window.${key}`, text: s.slice(0, 50000) });
           }
         } catch (_) {}

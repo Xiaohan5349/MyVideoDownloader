@@ -51,6 +51,6 @@
     "open_in_tab": true
   },
   "default_locale": "en",
-  "permissions": ["tabs", "storage", "webRequest", "offscreen"],
+  "permissions": ["tabs", "storage", "webRequest"],
   "optional_permissions": ["downloads"]
 }

@@ -7,6 +7,7 @@ export const MESSAGE = Object.freeze({
   DOWNLOADS_JOB_DELETE: "downloads:jobDelete",
   DOWNLOADS_JOB_FORGET: "downloads:jobForget",
   DOWNLOADS_JOB_CANCEL: "downloads:jobCancel",
+  DOWNLOADS_JOBS_CLEAR_MISSING: "downloads:jobClearMissing",
   HELPER_STATUS_GET: "helper:statusGet",
   HELPER_SETTINGS_UPDATE: "helper:settingsUpdate",
   HELPER_FOLDER_PICK: "helper:folderPick",
@@ -124,11 +125,13 @@ export function classifyMedia(url = "", contentType = "") {
 }
 
 export function sanitizeFilename(name = "video", extension = "") {
-  const base = String(name || "video")
+  let base = String(name || "video")
     .replace(/[<>:"/\\|?*\u0000-\u001f]/g, " ")
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 120) || "video";
+  // Windows reserved device names are invalid even with an extension (e.g. CON.mp4).
+  if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(base)) base = `_${base}`;
   const cleanExtension = String(extension || "").replace(/^\./, "").toLowerCase();
   return cleanExtension && !base.toLowerCase().endsWith(`.${cleanExtension}`)
     ? `${base}.${cleanExtension}`
@@ -165,6 +168,8 @@ export function normalizeMediaItem(input, fallback = {}) {
     title,
     extension,
     kind: input.kind || classified.kind,
+    frameId: Number.isInteger(input.frameId) && input.frameId >= 0 ? input.frameId : null,
+    tabId: Number.isInteger(input.tabId) && input.tabId >= 0 ? input.tabId : null,
     quality: input.quality || inferQualityLabel(input.url) || "",
     size: Number.isFinite(input.size) ? input.size : null,
     estimatedSize: Number.isFinite(input.estimatedSize) ? input.estimatedSize : null,
@@ -223,8 +228,16 @@ export function parseHlsManifest(text = "", manifestUrl = "") {
   return { hasDrm, variants, durationSeconds };
 }
 
+export function safeDecodeURIComponent(value = "") {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return String(value);
+  }
+}
+
 export function inferQualityLabel(value = "") {
-  const text = decodeURIComponent(String(value)).toLowerCase();
+  const text = safeDecodeURIComponent(String(value)).toLowerCase();
   const direct = text.match(/(?:^|[^0-9])((?:2160|1440|1080|720|576|540|480|360|240|180|144))p(?:[^0-9]|$)/);
   if (direct?.[1]) return `${direct[1]}p`;
 

@@ -12,6 +12,7 @@ const helperSummary = document.querySelector("#helperSummary");
 const helperStatus = document.querySelector("#helperStatus");
 const helperJobs = document.querySelector("#helperJobs");
 const refreshHelperButton = document.querySelector("#refreshHelperButton");
+const clearMissingButton = document.querySelector("#clearMissingButton");
 const openDashboardButton = document.querySelector("#openDashboardButton");
 const minSizeSelect = document.querySelector("#minSizeSelect");
 const showUnsupportedInput = document.querySelector("#showUnsupportedInput");
@@ -24,6 +25,7 @@ let activeTab = null;
 let settings = null;
 const jobPollers = new Map();
 const pendingDownloads = new Set();
+const helperJobNodes = new Map();
 let statusLoading = false;
 let statusPending = false;
 
@@ -34,6 +36,7 @@ rescanButton.addEventListener("click", async () => {
 });
 
 refreshHelperButton.addEventListener("click", loadHelperStatus);
+clearMissingButton.addEventListener("click", clearMissingJobs);
 openDashboardButton.addEventListener("click", () => {
   chrome.tabs.create({ url: "http://127.0.0.1:8765" });
 });
@@ -207,8 +210,6 @@ function renderMedia(items) {
   }
 }
 
-const helperJobNodes = new Map();
-
 function renderHelperJobs(jobs) {
   if (!helperJobTemplate) {
     console.warn("[ds-video-downloader] helperJobTemplate not found in DOM");
@@ -365,16 +366,19 @@ async function startDownload(item, variantContainer, statusContainer) {
     }
   }
 
-  const response = await chrome.runtime.sendMessage({
-    type: MESSAGE.DOWNLOADS_START,
-    item
-  });
+  let response;
+  try {
+    response = await chrome.runtime.sendMessage({
+      type: MESSAGE.DOWNLOADS_START,
+      item
+    });
+  } finally {
+    pendingDownloads.delete(item.url);
+    if (statusContainer) statusContainer.classList.remove("is-pending");
+  }
 
   console.log("[ds-video-downloader] startDownload response ok=%s helperJob=%s error=%s",
     response?.ok, Boolean(response?.helperJob), response?.error);
-
-  pendingDownloads.delete(item.url);
-  if (statusContainer) statusContainer.classList.remove("is-pending");
 
   if (response?.ok) {
     if (response.helperJob) {
@@ -417,15 +421,6 @@ async function startDownload(item, variantContainer, statusContainer) {
     showNotice(count
       ? getMessage("msgStreamVariantsHint", { count: String(count), plural: count === 1 ? "" : "s" })
       : getMessage("msgStartHelperHint"), true);
-    return;
-  }
-
-  if (response?.error === "STREAM_VARIANTS_ONLY") {
-    if (downloadButton) {
-      downloadButton.disabled = false;
-      downloadButton.textContent = item.kind === "direct" ? getMessage("btnSave") : getMessage("btnDownload");
-    }
-    renderVariants(variantContainer, response.variants || [], item);
     return;
   }
 
@@ -601,6 +596,25 @@ async function removeJob(jobId, mode) {
   const messageKey = mode === "both" ? "msgRemovedBoth" : mode === "file" ? "msgDeletedOutput" : "msgRemovedRecord";
   showNotice(getMessage(messageKey));
   await loadHelperStatus();
+}
+
+async function clearMissingJobs() {
+  clearMissingButton.disabled = true;
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: MESSAGE.DOWNLOADS_JOBS_CLEAR_MISSING
+    });
+    if (!response?.ok) {
+      showNotice(response?.error === "HELPER_OFFLINE"
+        ? getMessage("msgHelperOfflineClearMissing")
+        : response?.error || getMessage("msgClearMissingFailed"), true);
+      return;
+    }
+    showNotice(getMessage("msgClearMissingDone", { count: String(response.removedCount || 0) }));
+    await loadHelperStatus();
+  } finally {
+    clearMissingButton.disabled = false;
+  }
 }
 
 async function cancelJob(jobId) {

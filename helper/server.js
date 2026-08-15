@@ -15,6 +15,7 @@ const CONFIG_PATH = process.env.CONFIG_PATH || path.join(__dirname, "helper-sett
 const PICKER_SCRIPT_PATH = path.join(__dirname, "pick-folder.ps1");
 const JOBS_PATH = process.env.JOBS_PATH || path.join(__dirname, "helper-jobs.json");
 const BACKGROUND_ASSET_PATH = path.join(__dirname, "..", "assets", "app-background.webp");
+const AUTH_TOKEN = process.env.DS_HELPER_TOKEN || randomUUID();
 const SIZE_PROBE_LIMIT = Number(process.env.SIZE_PROBE_LIMIT || 1500);
 const SIZE_PROBE_CONCURRENCY = Number(process.env.SIZE_PROBE_CONCURRENCY || 8);
 const SIZE_PROBE_TIMEOUT_MS = Number(process.env.SIZE_PROBE_TIMEOUT_MS || 5000);
@@ -35,6 +36,7 @@ async function loadJobsFromDisk() {
           job.progressText = "Download interrupted when the helper stopped";
           job.finishedAt = new Date().toISOString();
           job.etaSeconds = null;
+          await cleanupBrowserTemp(job).catch(() => {});
         }
         reconcileJobFileState(job);
         jobs.set(job.id, job);
@@ -46,15 +48,20 @@ async function loadJobsFromDisk() {
   }
 }
 
-async function persistJobsToDisk() {
-  try {
-    const data = Array.from(jobs.values());
-    const tmpPath = JOBS_PATH + ".tmp";
-    await writeFile(tmpPath, JSON.stringify(data, null, 2), "utf8");
-    await rename(tmpPath, JOBS_PATH);
-  } catch {
-    // Silently fail — persistence is best-effort
-  }
+let persistJobsChain = Promise.resolve();
+
+function persistJobsToDisk() {
+  const data = JSON.stringify(Array.from(jobs.values()), null, 2);
+  persistJobsChain = persistJobsChain
+    .then(async () => {
+      const tmpPath = JOBS_PATH + ".tmp";
+      await writeFile(tmpPath, data, "utf8");
+      await rename(tmpPath, JOBS_PATH);
+    })
+    .catch(() => {
+      // Silently fail — persistence is best-effort
+    });
+  return persistJobsChain;
 }
 
 let downloadDir = await loadDownloadDir();
@@ -71,7 +78,17 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (requiresHelperToken(req) && !hasValidHelperToken(req)) {
+    writeJson(res, 403, { ok: false, error: "ORIGIN_NOT_ALLOWED" });
+    return;
+  }
+
   try {
+    if (req.method === "GET" && req.url === "/auth") {
+      writeJson(res, 200, { ok: true, token: AUTH_TOKEN });
+      return;
+    }
+
     if (req.method === "GET" && (req.url === "/" || req.url === "/index.html")) {
       writeHtml(res, renderHomePage());
       return;
@@ -100,6 +117,12 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && req.url === "/settings") {
       const payload = await readJson(req);
       const result = await updateHelperSettings(payload);
+      writeJson(res, result.ok ? 200 : result.status || 400, result);
+      return;
+    }
+
+    if (req.method === "POST" && req.url === "/jobs/clear-missing") {
+      const result = await clearMissingJobRecords();
       writeJson(res, result.ok ? 200 : result.status || 400, result);
       return;
     }
@@ -200,7 +223,7 @@ const server = http.createServer(async (req, res) => {
 
     writeJson(res, 404, { ok: false, error: "NOT_FOUND" });
   } catch (error) {
-    writeJson(res, 500, { ok: false, error: error.message || String(error) });
+    writeJson(res, error.status || 500, { ok: false, error: error.message || String(error) });
   }
 });
 
@@ -226,7 +249,7 @@ async function startDownload(payload) {
 
   const id = randomUUID();
   const filename = buildFilename(payload.title || "video", url);
-  const outputPath = path.join(downloadDir, filename);
+  const outputPath = await uniqueOutputPath(path.join(downloadDir, filename));
   const now = Date.now();
   const job = {
     id,
@@ -267,7 +290,7 @@ async function startBrowserDownload(payload) {
 
   const id = randomUUID();
   const filename = buildFilename(payload.title || "video", url);
-  const outputPath = path.join(downloadDir, filename);
+  const outputPath = await uniqueOutputPath(path.join(downloadDir, filename));
   const tempDir = path.join(tmpdir(), `ds-video-browser-${id}`);
   await mkdir(tempDir, { recursive: true });
 
@@ -335,7 +358,7 @@ async function completeBrowserDownload(id, payload) {
   if (!job || job.inputMode !== "browser") return { ok: false, status: 404, error: "JOB_NOT_FOUND" };
   if (job.status !== "running" && job.status !== "queued") return { ok: false, status: 409, error: "JOB_NOT_RUNNING" };
 
-  const playlistText = String(payload?.playlistText || "");
+  const playlistText = String(payload?.playlistText || "").replace(/^\uFEFF/, "");
   if (!playlistText.trimStart().startsWith("#EXTM3U")) return { ok: false, status: 400, error: "INVALID_PLAYLIST" };
   if (playlistText.length > 20 * 1024 * 1024) return { ok: false, status: 413, error: "PLAYLIST_TOO_LARGE" };
 
@@ -633,7 +656,11 @@ async function pickDownloadFolder() {
   ], { windowsHide: true });
   const selectedPath = await readFile(resultPath, "utf8").catch(() => "");
   await unlink(resultPath).catch(() => {});
-  if (result.code !== 0 && !selectedPath.trim()) return { ok: false, status: 400, error: "FOLDER_PICK_CANCELLED" };
+  if (result.code !== 0 && !selectedPath.trim()) {
+    return result.code === -1
+      ? { ok: false, status: 500, error: `FOLDER_PICK_FAILED${result.stderr ? `: ${result.stderr.trim()}` : ""}` }
+      : { ok: false, status: 400, error: "FOLDER_PICK_CANCELLED" };
+  }
   if (!selectedPath.trim()) return { ok: false, status: 500, error: `FOLDER_PICK_FAILED${result.stderr ? `: ${result.stderr.trim()}` : ""}` };
   return updateHelperSettings({ downloadDir: selectedPath });
 }
@@ -713,6 +740,16 @@ async function forgetJobRecord(id) {
   return { ok: true };
 }
 
+async function clearMissingJobRecords() {
+  const removed = [];
+  for (const [id, job] of jobs) {
+    if (job.status === "missing") removed.push(id);
+  }
+  for (const id of removed) jobs.delete(id);
+  if (removed.length) await persistJobsToDisk();
+  return { ok: true, removedCount: removed.length };
+}
+
 async function reconcileAllJobFiles() {
   let changed = false;
   for (const job of jobs.values()) changed = reconcileJobFileState(job) || changed;
@@ -741,8 +778,11 @@ async function sweepStalledJobs(now = Date.now(), timeoutMs = JOB_STALL_TIMEOUT_
   let changed = false;
   for (const job of jobs.values()) {
     if (job.status !== "running") continue;
+    // Browser-fed HLS jobs can pause between uploads while the content
+    // script fetches and retries segments, so use a more lenient timeout.
+    const stallTimeout = job.inputMode === "browser" ? timeoutMs * 3 : timeoutMs;
     const lastActivityAt = Number(job.lastActivityAt || job.lastByteProgressAt || Date.parse(job.startedAt) || now);
-    if (now - lastActivityAt < timeoutMs) continue;
+    if (now - lastActivityAt < stallTimeout) continue;
 
     job.status = "failed";
     job.error = "DOWNLOAD_STALLED";
@@ -789,7 +829,13 @@ function isSafeDownloadPath(value, baseDir = downloadDir) {
   if (!value) return false;
   const resolved = path.resolve(value);
   const base = path.resolve(baseDir);
-  const relative = path.relative(base.toLowerCase(), resolved.toLowerCase());
+
+  if (process.platform === "win32") {
+    const relative = path.relative(base.toLowerCase(), resolved.toLowerCase());
+    return Boolean(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+  }
+
+  const relative = path.relative(base, resolved);
   return Boolean(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
 }
 
@@ -947,8 +993,16 @@ function fallbackBandwidthForQuality(quality = "") {
   return 450_000;
 }
 
+function safeDecodeURIComponent(value = "") {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return String(value);
+  }
+}
+
 function inferQualityLabel(value = "") {
-  const text = decodeURIComponent(String(value)).toLowerCase();
+  const text = safeDecodeURIComponent(String(value)).toLowerCase();
   const direct = text.match(/(?:^|[^0-9])((?:2160|1440|1080|720|576|540|480|360|240|180|144))p(?:[^0-9]|$)/);
   if (direct?.[1]) return `${direct[1]}p`;
   const resolution = text.match(/(?:^|[^0-9])(\d{3,5})x((?:2160|1440|1080|720|576|540|480|360|240|180|144))(?:[^0-9]|$)/);
@@ -1111,6 +1165,17 @@ function buildFilename(title, url) {
   return `${cleanTitle}-${hash}.mp4`;
 }
 
+async function uniqueOutputPath(outputPath) {
+  if (!existsSync(outputPath)) return outputPath;
+  const ext = path.extname(outputPath);
+  const base = outputPath.slice(0, outputPath.length - ext.length);
+  for (let index = 1; index < 1000; index += 1) {
+    const candidate = `${base} (${index})${ext}`;
+    if (!existsSync(candidate)) return candidate;
+  }
+  return `${base}-${Date.now()}${ext}`;
+}
+
 function safeBrowserFileName(value) {
   const name = String(value || "").trim();
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,180}$/.test(name)) return "";
@@ -1131,7 +1196,9 @@ function readRaw(req, maxBytes) {
     req.on("data", (chunk) => {
       total += chunk.length;
       if (total > maxBytes) {
-        reject(new Error("REQUEST_TOO_LARGE"));
+        const error = new Error("REQUEST_TOO_LARGE");
+        error.status = 413;
+        reject(error);
         req.destroy();
         return;
       }
@@ -1148,7 +1215,9 @@ function readJson(req) {
     req.on("data", (chunk) => {
       body += chunk;
       if (body.length > 1024 * 1024) {
-        reject(new Error("REQUEST_TOO_LARGE"));
+        const error = new Error("REQUEST_TOO_LARGE");
+        error.status = 413;
+        reject(error);
         req.destroy();
       }
     });
@@ -1156,16 +1225,44 @@ function readJson(req) {
       try {
         resolve(body ? JSON.parse(body) : {});
       } catch {
-        reject(new Error("INVALID_JSON"));
+        const error = new Error("INVALID_JSON");
+        error.status = 400;
+        reject(error);
       }
     });
   });
 }
 
+function isWebOrigin(origin) {
+  return Boolean(origin) && /^https?:\/\//i.test(origin);
+}
+
+function isLocalHelperOrigin(origin) {
+  try {
+    const url = new URL(origin);
+    return (url.hostname === "127.0.0.1" || url.hostname === "localhost") &&
+      url.port === String(PORT);
+  } catch {
+    return false;
+  }
+}
+
+function requiresHelperToken(req) {
+  const origin = req.headers.origin;
+  if (!origin) return false;
+  if (origin.startsWith("chrome-extension://")) return false;
+  if (isLocalHelperOrigin(origin)) return false;
+  return isWebOrigin(origin);
+}
+
+function hasValidHelperToken(req) {
+  return req.headers["x-ds-token"] === AUTH_TOKEN;
+}
+
 function setCorsHeaders(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-DS-Token");
 }
 
 function writeJson(res, status, payload) {
@@ -2580,6 +2677,7 @@ function renderHomePage() {
           <div id="summary" class="summary">Checking jobs...</div>
         </div>
         <div class="toolbar">
+          <button type="button" onclick="clearMissingJobs()">Clear missing</button>
           <button type="button" onclick="loadJobs()">Refresh</button>
         </div>
       </header>
@@ -2645,6 +2743,10 @@ function renderHomePage() {
         + '</div>'
         + '<div class="actions"><button type="button" data-action="source" data-source-url="' + escapeHtml(sourceUrl) + '" ' + (sourceUrl ? '' : 'disabled') + '>Source</button><button class="warning" type="button" data-action="cancel" data-job-id="' + escapeHtml(job.id) + '" ' + (isActive ? '' : 'disabled') + '>Stop</button><button type="button" data-action="show" data-job-id="' + escapeHtml(job.id) + '" ' + (fileExists ? '' : 'disabled') + '>Open folder</button><button class="danger" type="button" data-action="remove" data-job-id="' + escapeHtml(job.id) + '" data-file-exists="' + fileExists + '" data-title="' + escapeHtml(title) + '" ' + (canForget ? '' : 'disabled') + '>Remove</button></div>'
         + '</article>';
+    }
+    async function clearMissingJobs() {
+      const response = await fetch('/jobs/clear-missing', { method: 'POST' });
+      if (response.ok) loadJobs();
     }
     async function showJob(id) {
       await fetch('/jobs/' + encodeURIComponent(id) + '/show', { method: 'POST' });

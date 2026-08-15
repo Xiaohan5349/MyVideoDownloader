@@ -10,10 +10,17 @@ const DIRECT_EXTENSIONS = new Set([
 ]);
 
 const seenUrls = new Set();
+const SEEN_URLS_MAX = 2000;
+function rememberUrl(url) {
+  seenUrls.add(url);
+  if (seenUrls.size > SEEN_URLS_MAX) {
+    seenUrls.delete(seenUrls.values().next().value);
+  }
+}
 let scanTimer = null;
 let currentUrl = location.href;
 const SEGMENT_FETCH_TIMEOUT_MS = 30_000;
-const SEGMENT_FETCH_RETRIES = 3;
+const SEGMENT_FETCH_RETRIES = 5;
 let hlsBrowserModulePromise = null;
 
 scanDocument();
@@ -32,7 +39,7 @@ document.addEventListener("ds-video-downloader-found", (event) => {
         if (!url || seenUrls.has(url)) continue;
         const classified = classifyMedia(url, "");
         if (!classified) continue;
-        seenUrls.add(url);
+        rememberUrl(url);
         const item = normalizeMediaItem({
           url, sourcePageUrl: location.href, title: document.title || "video",
           extension: classified.extension, kind: classified.kind
@@ -119,7 +126,8 @@ async function fetchTextFromPage(url) {
 
 // --- Full stream download from page context ---
 async function handleStreamDownload(payload) {
-  const { helperUrl, manifestUrl, quality, title, sourcePageUrl } = payload;
+  const { helperUrl, manifestUrl, quality, title, sourcePageUrl, authToken } = payload;
+  const authHeaders = authToken ? { "X-DS-Token": authToken } : {};
   console.warn("[ds-content] handleStreamDownload start manifestUrl=", manifestUrl?.slice(0, 80));
   if (!helperUrl || !manifestUrl) throw new Error("INVALID_DOWNLOAD_REQUEST");
 
@@ -155,7 +163,7 @@ async function handleStreamDownload(payload) {
   // Step 6: Create helper job
   const startRes = await fetch(`${helperUrl}/browser-downloads/start`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders },
     body: JSON.stringify({
       url: variantUrl,
       title: title || "video",
@@ -168,23 +176,22 @@ async function handleStreamDownload(payload) {
   if (!startRes.ok) throw new Error(startPayload.error || `HELPER_${startRes.status}`);
   const job = startPayload.job;
 
-  // Step 7: Fetch and upload segments in parallel (8 at a time)
+  // Step 7: Fetch and upload segments in parallel (8 at a time).
+  // Transient CDN/Cloudflare failures are common, so failed segments get
+  // two additional retry passes before the whole job is marked failed.
   const concurrency = 8;
   const assets = plan.assets;
 
   let completed = 0;
   const total = assets.length;
-  const failed = [];
   let cancelled = false;
 
-  // Parallel fetch + upload with concurrency control
-  const running = new Set();
-  let idx = 0;
-
   async function processOne(asset) {
-    // Check cancelled
+    // Check whether the helper job is still running before fetching
     try {
-      const checkRes = await fetch(`${helperUrl}/jobs/${encodeURIComponent(job.id)}`);
+      const checkRes = await fetch(`${helperUrl}/jobs/${encodeURIComponent(job.id)}`, {
+        headers: authHeaders
+      });
       if (checkRes.ok) {
         const j = await checkRes.json().catch(() => ({}));
         if (j.status === "cancelled" || j.status === "failed") {
@@ -199,7 +206,7 @@ async function handleStreamDownload(payload) {
     // Upload to helper
     const upRes = await fetchWithTimeout(
       `${helperUrl}/browser-downloads/${encodeURIComponent(job.id)}/files/${encodeURIComponent(asset.name)}`,
-      { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: data },
+      { method: "POST", headers: { "Content-Type": "application/octet-stream", ...authHeaders }, body: data },
       SEGMENT_FETCH_TIMEOUT_MS
     );
     if (!upRes.ok) throw new Error(`UPLOAD_${upRes.status}`);
@@ -207,28 +214,45 @@ async function handleStreamDownload(payload) {
     completed += 1;
   }
 
-  // Simple concurrency loop
-  const workers = [];
-  for (let i = 0; i < Math.min(concurrency, total); i++) {
-    workers.push((async () => {
-      while (idx < total && !cancelled) {
-        const currentIdx = idx++;
-        try {
-          await processOne(assets[currentIdx]);
-        } catch (e) {
-          console.warn("[ds-video-downloader] segment failed", currentIdx, e.message);
-          failed.push({ index: currentIdx, error: e.message });
+  async function runAssetBatch(batch) {
+    const failed = [];
+    let cursor = 0;
+    const workers = [];
+    for (let i = 0; i < Math.min(concurrency, batch.length); i += 1) {
+      workers.push((async () => {
+        while (cursor < batch.length && !cancelled) {
+          const entry = batch[cursor];
+          cursor += 1;
+          try {
+            await processOne(entry.asset);
+          } catch (error) {
+            console.warn("[ds-video-downloader] segment failed", entry.index, error.message);
+            failed.push({ index: entry.index, error: error.message });
+          }
         }
-      }
-    })());
+      })());
+    }
+    await Promise.all(workers);
+    return failed;
   }
-  await Promise.all(workers);
+
+  let batch = assets.map((asset, index) => ({ index, asset }));
+  let failed = await runAssetBatch(batch);
+
+  // Retry transient segment failures twice before giving up
+  let retryRound = 0;
+  while (!cancelled && failed.length && retryRound < 2) {
+    retryRound += 1;
+    console.warn(`[ds-video-downloader] retrying ${failed.length} failed segments, round ${retryRound}`);
+    const retryBatch = failed.map((entry) => ({ index: entry.index, asset: assets[entry.index] }));
+    failed = await runAssetBatch(retryBatch);
+  }
 
   if (cancelled) return { ok: false, error: "JOB_CANCELLED" };
   if (failed.length) {
     await fetch(`${helperUrl}/browser-downloads/${encodeURIComponent(job.id)}/fail`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...authHeaders },
       body: JSON.stringify({ error: `SEGMENT_DOWNLOAD_FAILED: ${failed.length}/${total}` })
     }).catch(() => {});
     return { ok: false, error: "SEGMENT_DOWNLOAD_FAILED" };
@@ -240,7 +264,7 @@ async function handleStreamDownload(payload) {
     `${helperUrl}/browser-downloads/${encodeURIComponent(job.id)}/complete`,
     {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...authHeaders },
       body: JSON.stringify({ playlistText: localPlaylist })
     }
   );
@@ -267,7 +291,10 @@ async function fetchSegmentWithRetry(url) {
       return await response.arrayBuffer();
     } catch (error) {
       lastError = error?.name === "AbortError" ? new Error("SEGMENT_TIMEOUT") : error;
-      if (attempt < SEGMENT_FETCH_RETRIES) await new Promise((resolve) => setTimeout(resolve, attempt * 1000));
+      if (attempt < SEGMENT_FETCH_RETRIES) {
+        const backoff = Math.min(1000 * 2 ** (attempt - 1), 8000) + Math.floor(Math.random() * 500);
+        await new Promise((resolve) => setTimeout(resolve, backoff));
+      }
     } finally {
       clearTimeout(timer);
     }
@@ -368,11 +395,15 @@ function handlePotentialNavigation() {
   if (currentUrl === location.href) return;
   currentUrl = location.href;
   seenUrls.clear();
-  // Tell background to clear stale media for this tab
-  chrome.runtime.sendMessage({
-    type: "page:clearMedia",
-    sourcePageUrl: location.href
-  }).catch(() => {});
+  // Only the top frame owns tab-level media caching. Iframe navigations
+  // must not clear media detected on the top page.
+  if (window === window.top) {
+    // Tell background to clear stale media for this tab
+    chrome.runtime.sendMessage({
+      type: "page:clearMedia",
+      sourcePageUrl: location.href
+    }).catch(() => {});
+  }
   scheduleScan();
 }
 
@@ -404,7 +435,7 @@ function scanAttribute(nodes, attribute, items) {
     if (!url || seenUrls.has(url)) continue;
     const classified = classifyMedia(url, node.getAttribute("type") || "");
     if (!classified) continue;
-    seenUrls.add(url);
+    rememberUrl(url);
     const item = normalizeMediaItem({
       url, sourcePageUrl: location.href, title: readableTitle(node),
       extension: classified.extension, kind: classified.kind
@@ -446,7 +477,13 @@ function detectExtension(url = "", contentType = "") {
   if (ct === "video/mp4") return "mp4";
   if (ct === "video/webm") return "webm";
   if (ct === "video/quicktime") return "mov";
+  if (ct === "video/x-matroska") return "mkv";
   if (ct === "audio/mpeg") return "mp3";
+  if (ct === "audio/mp4") return "m4a";
+  if (ct === "audio/aac") return "aac";
+  if (ct === "audio/flac") return "flac";
+  if (ct === "audio/ogg") return "ogg";
+  if (ct === "audio/wav") return "wav";
   try {
     const parsed = new URL(url);
     const m = parsed.pathname.toLowerCase().match(/\.([a-z0-9]{2,5})$/);
@@ -478,8 +515,16 @@ function normalizeMediaItem(input) {
   };
 }
 
+function safeDecodeURIComponent(value = "") {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return String(value);
+  }
+}
+
 function inferQualityLabel(value = "") {
-  const text = decodeURIComponent(String(value)).toLowerCase();
+  const text = safeDecodeURIComponent(String(value)).toLowerCase();
   const direct = text.match(/(?:^|[^0-9])((?:2160|1440|1080|720|576|540|480|360|240|180|144))p(?:[^0-9]|$)/);
   if (direct?.[1]) return `${direct[1]}p`;
   const resolution = text.match(/(?:^|[^0-9])(\d{3,5})x((?:2160|1440|1080|720|576|540|480|360|240|180|144))(?:[^0-9]|$)/);
@@ -498,7 +543,7 @@ function scanScriptText(nodes, items) {
       if (!url || seenUrls.has(url)) continue;
       const classified = classifyMedia(url, "");
       if (!classified) continue;
-      seenUrls.add(url);
+      rememberUrl(url);
       const item = normalizeMediaItem({
         url, sourcePageUrl: location.href, title: document.title || "video",
         extension: classified.extension, kind: classified.kind

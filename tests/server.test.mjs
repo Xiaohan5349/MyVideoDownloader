@@ -126,6 +126,60 @@ it("POST /download with ftp URL returns 400", async () => {
   assert.equal(res.body.error, "INVALID_URL");
 });
 
+it("POST /download from a web origin is rejected (CSRF guard)", async () => {
+  const res = await fetchJson("/download", {
+    method: "POST",
+    headers: { Origin: "https://evil.example" },
+    body: { url: "http://example.com/video.m3u8", title: "CSRF", kind: "hls" },
+  });
+  assert.equal(res.status, 403);
+  assert.equal(res.body.error, "ORIGIN_NOT_ALLOWED");
+});
+
+it("GET /auth returns a token for local callers", async () => {
+  const res = await fetchJson("/auth");
+  assert.equal(res.status, 200);
+  assert.equal(res.body.ok, true);
+  assert.ok(typeof res.body.token === "string" && res.body.token.length > 0);
+});
+
+it("GET /auth is denied for web origins", async () => {
+  const res = await fetchJson("/auth", { headers: { Origin: "https://evil.example" } });
+  assert.equal(res.status, 403);
+  assert.equal(res.body.error, "ORIGIN_NOT_ALLOWED");
+});
+
+it("POST /browser-downloads/start from a web origin works when the content-script token is supplied", async () => {
+  const auth = await fetchJson("/auth");
+  const token = auth.body.token;
+
+  const res = await fetchJson("/browser-downloads/start", {
+    method: "POST",
+    headers: { Origin: "https://site.example", "X-DS-Token": token },
+    body: {
+      url: "https://cdn.example.com/video.m3u8",
+      title: "Browser Fed Video",
+      sourcePageUrl: "https://site.example/watch/video"
+    },
+  });
+  assert.equal(res.status, 202);
+  assert.equal(res.body.job.inputMode, "browser");
+});
+
+it("POST /browser-downloads/start from a web origin is rejected without the token", async () => {
+  const res = await fetchJson("/browser-downloads/start", {
+    method: "POST",
+    headers: { Origin: "https://site.example" },
+    body: {
+      url: "https://cdn.example.com/video.m3u8",
+      title: "Browser Fed Video",
+      sourcePageUrl: "https://site.example/watch/video"
+    },
+  });
+  assert.equal(res.status, 403);
+  assert.equal(res.body.error, "ORIGIN_NOT_ALLOWED");
+});
+
 it("GET /jobs/nonexistent returns 404", async () => {
   const res = await fetchJson("/jobs/nonexistent-id");
   assert.equal(res.status, 404);
@@ -258,6 +312,21 @@ it("DELETE /jobs/:id removes output but preserves source history", async () => {
   assert.equal(fetched.body.fileExists, false);
 });
 
+it("POST /jobs/clear-missing removes only file-missing records", async () => {
+  const missingBefore = Array.from(jobs.values()).filter((job) => job.status === "missing").length;
+  const missingId = "clear-missing-a";
+  const completedId = "clear-missing-completed";
+  jobs.set(missingId, { id: missingId, status: "missing", outputPath: "/tmp/does-not-exist.mp4", downloadDir: process.env.DOWNLOAD_DIR });
+  jobs.set(completedId, { id: completedId, status: "completed", outputPath: "/tmp/keep.mp4", downloadDir: process.env.DOWNLOAD_DIR });
+
+  const res = await fetchJson("/jobs/clear-missing", { method: "POST" });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.ok, true);
+  assert.equal(res.body.removedCount, missingBefore + 1);
+  assert.equal(jobs.has(missingId), false);
+  assert.equal(jobs.has(completedId), true);
+});
+
 it("DELETE /jobs/:id/history removes every non-active record without deleting output", async () => {
   for (const status of ["failed", "missing", "cancelled", "completed"]) {
     const id = `forget-${status}`;
@@ -384,6 +453,11 @@ it("isSafeDownloadPath: path outside download dir returns false", () => {
 it("isSafeDownloadPath: falsy value returns false", () => {
   assert.equal(isSafeDownloadPath("", "/tmp"), false);
   assert.equal(isSafeDownloadPath(null, "/tmp"), false);
+});
+
+it("isSafeDownloadPath: case-different path is outside on case-sensitive filesystems", () => {
+  if (process.platform === "win32") return;
+  assert.equal(isSafeDownloadPath("/tmp/ABC/video.mp4", "/tmp/abc"), false);
 });
 
 }); // close describe

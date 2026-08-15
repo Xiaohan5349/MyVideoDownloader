@@ -4,7 +4,7 @@ import {
   normalizeMediaItem, parseDashManifest, parseHlsManifest, sanitizeFilename
 } from "./shared.js";
 
-console.log("[ds] Service worker started v1.2.8");
+console.log("[ds] Service worker started v1.4.6");
 
 const SETTINGS_KEY = "settings";
 const TAB_MEDIA_PREFIX = "tabMedia:";
@@ -76,7 +76,13 @@ async function handleMessage(message, sender) {
   if (message.type === MESSAGE.MEDIA_ADD_DETECTED) {
     const tabId = message.tabId ?? sender.tab?.id;
     if (typeof tabId !== "number") return { ok: false, error: "TAB_ID_MISSING" };
-    await addMedia(tabId, message.items || [], {
+    const frameId = Number.isInteger(sender.frameId) && sender.frameId >= 0 ? sender.frameId : null;
+    const items = (message.items || []).map((item) => ({
+      ...item,
+      frameId,
+      tabId
+    }));
+    await addMedia(tabId, items, {
       sourcePageUrl: sender.tab?.url || message.sourcePageUrl || "",
       title: sender.tab?.title || message.title || "video"
     });
@@ -100,6 +106,7 @@ async function handleMessage(message, sender) {
   if (message.type === MESSAGE.DOWNLOADS_JOB_DELETE) return deleteHelperJob(message.jobId);
   if (message.type === MESSAGE.DOWNLOADS_JOB_FORGET) return forgetHelperJob(message.jobId);
   if (message.type === MESSAGE.DOWNLOADS_JOB_CANCEL) return cancelHelperJob(message.jobId);
+  if (message.type === MESSAGE.DOWNLOADS_JOBS_CLEAR_MISSING) return clearMissingHelperJobs();
   if (message.type === MESSAGE.HELPER_STATUS_GET) return getHelperStatus();
   if (message.type === MESSAGE.HELPER_SETTINGS_UPDATE) return updateHelperSettings(message.settings || {});
   if (message.type === MESSAGE.HELPER_FOLDER_PICK) return pickHelperFolder();
@@ -158,6 +165,8 @@ async function detectFromNetwork(details) {
     title: tab.title || "video",
     extension: classified.extension,
     kind: classified.kind,
+    frameId: Number.isInteger(details.frameId) && details.frameId >= 0 ? details.frameId : null,
+    tabId: details.tabId,
     size: numberHeader(details.responseHeaders, "content-length"),
     headers: requestHeadersById.get(details.requestId) || cachedHeadersForUrl(url)
   });
@@ -209,14 +218,14 @@ async function enrichMediaItem(item) {
   if ((item.variants?.length || 0) && (item.estimatedSize || item.size)) return item;
 
   // Use content script to fetch manifest text
-  const tabId = await findTabForUrl(item.sourcePageUrl);
+  const tabId = await resolveTabId(item);
   if (typeof tabId !== "number") return item;
 
   try {
     const response = await chrome.tabs.sendMessage(tabId, {
       type: "page:fetchText",
       url: item.url
-    });
+    }, { frameId: item.frameId ?? 0 });
     if (!response?.ok || !response.text) return item;
 
     const parsed = item.kind === "hls"
@@ -226,7 +235,7 @@ async function enrichMediaItem(item) {
     // For HLS, also try to fetch each variant's child playlist for size estimates
     let variants = parsed.variants || [];
     if (item.kind === "hls" && variants.length) {
-      variants = await enrichVariantsFromContent(tabId, variants);
+      variants = await enrichVariantsFromContent(tabId, variants, item.frameId ?? 0);
     }
 
     const bandwidth = item.bandwidth || fallbackBandwidthForQuality(item.quality);
@@ -247,14 +256,14 @@ async function enrichMediaItem(item) {
   }
 }
 
-async function enrichVariantsFromContent(tabId, variants) {
+async function enrichVariantsFromContent(tabId, variants, frameId = 0) {
   return Promise.all(variants.map(async (variant) => {
     if (variant.estimatedSize) return variant;
     try {
       const response = await chrome.tabs.sendMessage(tabId, {
         type: "page:fetchText",
         url: variant.url
-      });
+      }, { frameId });
       if (!response?.ok || !response.text) return variant;
       const child = parseHlsManifest(response.text, variant.url);
       const bandwidth = variant.bandwidth || fallbackBandwidthForQuality(variant.quality);
@@ -294,8 +303,21 @@ async function startDownload(item, variant = null) {
 }
 
 async function startStreamDownload(media, variant) {
+  // The content-script path only speaks HLS (m3u8). DASH downloads go
+  // straight to the local helper, which is the only DASH-capable path.
+  if (media.kind === "dash") {
+    console.warn("[ds] startStreamDownload DASH → helper");
+    return startHelperDownload(media, variant);
+  }
+
+  const authToken = await getHelperToken();
+  if (!authToken) {
+    console.warn("[ds] startStreamDownload FALLBACK=helper (no auth token)");
+    return { ok: false, error: "HELPER_OFFLINE", variants: media.variants || [] };
+  }
+
   console.warn("[ds] startStreamDownload tabSearch url=", (media.sourcePageUrl || "").slice(0, 60));
-  const tabId = await findTabForUrl(media.sourcePageUrl);
+  const tabId = await resolveTabId(media);
   console.warn("[ds] startStreamDownload tabId=", tabId);
 
   if (typeof tabId !== "number") {
@@ -313,16 +335,17 @@ async function startStreamDownload(media, variant) {
         manifestUrl: downloadUrl,
         quality: variant?.quality || media.quality || "",
         title: media.title,
-        sourcePageUrl: media.sourcePageUrl
+        sourcePageUrl: media.sourcePageUrl,
+        authToken
       }
-    });
+    }, { frameId: media.frameId ?? 0 });
 
     console.warn("[ds] startStreamDownload contentScriptResult ok=", response?.ok, "error=", response?.error);
 
     if (response?.ok) {
       return { ok: true, helperJob: response.helperJob };
     }
-    if (["SERVER_PROTECTED_UNSUPPORTED", "JOB_CANCELLED", "SEGMENT_DOWNLOAD_FAILED"].includes(response?.error)) {
+    if (["SERVER_PROTECTED_UNSUPPORTED", "DRM_PROTECTED_UNSUPPORTED", "JOB_CANCELLED", "SEGMENT_DOWNLOAD_FAILED"].includes(response?.error)) {
       return response;
     }
     console.warn("[ds] startStreamDownload FALLBACK=helper (content script returned error)");
@@ -349,10 +372,10 @@ async function startHelperDownload(media, variant) {
       })
     });
     const payload = await response.json().catch(() => ({}));
-    if (!response.ok) return { ok: false, error: payload.error || `HELPER_${response.status}` };
+    if (!response.ok) return { ok: false, error: payload.error || `HELPER_${response.status}`, variants: media.variants || [] };
     return { ok: true, helperJob: payload.job };
   } catch {
-    return { ok: false, error: "HELPER_OFFLINE" };
+    return { ok: false, error: "HELPER_OFFLINE", variants: media.variants || [] };
   }
 }
 
@@ -368,6 +391,17 @@ async function getStreamVariants(item) {
 }
 
 // --- Helper API calls (localhost, no external fetching) ---
+
+async function getHelperToken() {
+  try {
+    const response = await fetch(`${HELPER_URL}/auth`);
+    if (!response.ok) return null;
+    const payload = await response.json().catch(() => ({}));
+    return typeof payload?.token === "string" ? payload.token : null;
+  } catch {
+    return null;
+  }
+}
 
 async function getHelperJob(jobId) {
   if (!jobId) return { ok: false, error: "JOB_ID_MISSING" };
@@ -474,6 +508,18 @@ async function forgetHelperJob(jobId) {
   }
 }
 
+async function clearMissingHelperJobs() {
+  try {
+    const response = await fetch(`${HELPER_URL}/jobs/clear-missing`, { method: "POST" });
+    const payload = await response.json().catch(() => ({}));
+    return response.ok
+      ? { ok: true, removedCount: payload.removedCount || 0 }
+      : { ok: false, error: payload.error || `HELPER_${response.status}` };
+  } catch {
+    return { ok: false, error: "HELPER_OFFLINE" };
+  }
+}
+
 async function cancelHelperJob(jobId) {
   if (!jobId) return { ok: false, error: "JOB_ID_MISSING" };
   try {
@@ -494,12 +540,33 @@ async function getSettings() {
 
 async function findTabForUrl(sourcePageUrl) {
   if (!sourcePageUrl) return null;
+  let target = null;
+  try { target = new URL(sourcePageUrl); } catch { return null; }
+
   const tabs = await chrome.tabs.query({}).catch(() => []);
-  const found = tabs.find((tab) => tab.id != null && (
-    tab.url === sourcePageUrl || sourcePageUrl.startsWith(tab.url || "") ||
-    (tab.url && tab.url.startsWith(sourcePageUrl))
-  ));
-  return found?.id ?? null;
+  let originFallback = null;
+
+  for (const tab of tabs) {
+    if (tab.id == null || !tab.url) continue;
+    if (tab.url === sourcePageUrl) return tab.id;
+    try {
+      const tabUrl = new URL(tab.url);
+      if (tabUrl.origin === target.origin) {
+        if (tabUrl.pathname === target.pathname && tabUrl.search === target.search) return tab.id;
+        if (!originFallback) originFallback = tab.id;
+      }
+    } catch {}
+  }
+
+  return originFallback;
+}
+
+async function resolveTabId(item) {
+  if (Number.isInteger(item?.tabId)) {
+    const tab = await chrome.tabs.get(item.tabId).catch(() => null);
+    if (tab) return item.tabId;
+  }
+  return findTabForUrl(item?.sourcePageUrl);
 }
 
 function tabKey(tabId) { return `${TAB_MEDIA_PREFIX}${tabId}`; }
