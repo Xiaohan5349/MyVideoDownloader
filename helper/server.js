@@ -362,6 +362,10 @@ async function completeBrowserDownload(id, payload) {
   if (!playlistText.trimStart().startsWith("#EXTM3U")) return { ok: false, status: 400, error: "INVALID_PLAYLIST" };
   if (playlistText.length > 20 * 1024 * 1024) return { ok: false, status: 413, error: "PLAYLIST_TOO_LARGE" };
 
+  if (Number.isInteger(job.totalSegments) && job.receivedSegments < job.totalSegments) {
+    return { ok: false, status: 409, error: "SEGMENTS_INCOMPLETE" };
+  }
+
   const playlistPath = path.join(job.tempDir, "input.m3u8");
   await writeFile(playlistPath, playlistText, "utf8");
   job.localPlaylistPath = playlistPath;

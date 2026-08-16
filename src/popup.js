@@ -372,6 +372,13 @@ async function startDownload(item, variantContainer, statusContainer) {
       type: MESSAGE.DOWNLOADS_START,
       item
     });
+  } catch (error) {
+    if (downloadButton) {
+      downloadButton.disabled = false;
+      downloadButton.textContent = item.kind === "direct" ? getMessage("btnSave") : getMessage("btnDownload");
+    }
+    showNotice(getMessage("msgDownloadFailed"), true);
+    return;
   } finally {
     pendingDownloads.delete(item.url);
     if (statusContainer) statusContainer.classList.remove("is-pending");
@@ -457,11 +464,19 @@ function renderVariants(container, variants, item = null) {
 }
 
 async function startVariantDownload(item, variant, statusContainer) {
-  const response = await chrome.runtime.sendMessage({
-    type: MESSAGE.DOWNLOADS_START,
-    item,
-    variant
-  });
+  if (pendingDownloads.has(item.url)) return;
+  pendingDownloads.add(item.url);
+
+  let response;
+  try {
+    response = await chrome.runtime.sendMessage({
+      type: MESSAGE.DOWNLOADS_START,
+      item,
+      variant
+    });
+  } finally {
+    pendingDownloads.delete(item.url);
+  }
 
   if (response?.ok) {
     if (response.helperJob) {

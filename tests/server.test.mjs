@@ -396,6 +396,28 @@ it("POST /browser-downloads/:id/files/:name stores segment bytes", async () => {
   assert.equal(upload.body.job.receivedSegments, 1);
 });
 
+it("POST /browser-downloads/:id/complete rejects incomplete segment uploads", async () => {
+  const start = await fetchJson("/browser-downloads/start", {
+    method: "POST",
+    body: {
+      url: "https://cdn.example.com/video.m3u8",
+      title: "Incomplete Upload",
+      totalSegments: 2,
+      totalBytes: 4,
+      totalSizeSource: "exact"
+    },
+  });
+  const jobId = start.body.job.id;
+
+  const complete = await fetchJson(`/browser-downloads/${encodeURIComponent(jobId)}/complete`, {
+    method: "POST",
+    body: { playlistText: "#EXTM3U\n#EXTINF:1.0,\nseg-000000.ts\n#EXT-X-ENDLIST\n" },
+  });
+
+  assert.equal(complete.status, 409);
+  assert.equal(complete.body.error, "SEGMENTS_INCOMPLETE");
+});
+
 it("POST /browser-downloads/:id/files rejects unsafe filenames", async () => {
   const start = await fetchJson("/browser-downloads/start", {
     method: "POST",
