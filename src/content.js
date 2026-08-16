@@ -321,6 +321,35 @@ async function fetchSegmentWithRetry(url, byteRange = null) {
         ...(headers ? { headers } : {})
       });
       if (!response.ok) throw new Error(`SEGMENT_${response.status}`);
+
+      if (byteRange) {
+        const expectedStart = byteRange.offset;
+        const expectedEnd = byteRange.offset + byteRange.length - 1;
+
+        if (response.status === 206) {
+          const range = response.headers.get("content-range") || "";
+          const match = range.match(/bytes\s+(\d+)-(\d+)\//i);
+          if (!match || Number(match[1]) !== expectedStart || Number(match[2]) !== expectedEnd) {
+            throw new Error("SEGMENT_RANGE_MISMATCH");
+          }
+          const buffer = await response.arrayBuffer();
+          if (buffer.byteLength !== byteRange.length) throw new Error("SEGMENT_RANGE_MISMATCH");
+          return buffer;
+        }
+
+        if (response.status === 200) {
+          // Some CDNs ignore Range and return the whole resource. Slice the
+          // requested bytes locally instead of writing a corrupt oversized file.
+          const full = await response.arrayBuffer();
+          if (expectedStart >= full.byteLength || full.byteLength < expectedEnd + 1) {
+            throw new Error("SEGMENT_RANGE_OUT_OF_BOUNDS");
+          }
+          return full.slice(expectedStart, expectedEnd + 1);
+        }
+
+        throw new Error(`SEGMENT_${response.status}`);
+      }
+
       return await response.arrayBuffer();
     } catch (error) {
       lastError = error?.name === "AbortError" ? new Error("SEGMENT_TIMEOUT") : error;

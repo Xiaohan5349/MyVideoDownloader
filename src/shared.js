@@ -190,9 +190,36 @@ export function addUniqueMedia(existing = [], additions = []) {
   for (const addition of additions) {
     const item = normalizeMediaItem(addition);
     if (!item) continue;
-    byId.set(item.id, { ...byId.get(item.id), ...item });
+    const previous = byId.get(item.id);
+    byId.set(item.id, previous ? mergeMediaItems(previous, item) : item);
   }
   return Array.from(byId.values()).sort((a, b) => b.detectedAt - a.detectedAt);
+}
+
+function mergeMediaItems(previous, incoming) {
+  return {
+    ...previous,
+    ...incoming,
+    url: incoming.url || previous.url,
+    sourcePageUrl: incoming.sourcePageUrl || previous.sourcePageUrl,
+    pageUrl: incoming.pageUrl || previous.pageUrl || "",
+    title: incoming.title && incoming.title !== "video" ? incoming.title : previous.title || incoming.title,
+    extension: incoming.extension || previous.extension,
+    kind: incoming.kind || previous.kind,
+    frameId: incoming.frameId ?? previous.frameId,
+    tabId: incoming.tabId ?? previous.tabId,
+    quality: incoming.quality || previous.quality || "",
+    size: incoming.size ?? previous.size ?? null,
+    estimatedSize: incoming.estimatedSize || previous.estimatedSize || null,
+    sizeSource: incoming.sizeSource || previous.sizeSource || "",
+    durationSeconds: incoming.durationSeconds ?? previous.durationSeconds,
+    bandwidth: incoming.bandwidth ?? previous.bandwidth,
+    headers: incoming.headers?.length ? incoming.headers : previous.headers || [],
+    variants: incoming.variants?.length ? incoming.variants : previous.variants || [],
+    isProtected: Boolean(previous.isProtected || incoming.isProtected),
+    unsupportedReason: incoming.isProtected ? incoming.unsupportedReason : previous.unsupportedReason || "",
+    detectedAt: incoming.detectedAt || Date.now()
+  };
 }
 
 export function parseHlsManifest(text = "", manifestUrl = "") {

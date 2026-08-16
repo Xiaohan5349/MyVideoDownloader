@@ -187,7 +187,7 @@ function renderMedia(items) {
     const status = node.querySelector(".job-status");
     const button = node.querySelector(".download-button");
 
-    title.textContent = sanitizeFilename(item.title, item.extension);
+    title.textContent = displayMediaTitle(item);
     kind.textContent = item.kind.toUpperCase();
     renderMediaMeta(meta, item);
     renderVariants(variants, item.variants || [], item);
@@ -425,6 +425,16 @@ async function startDownload(item, variantContainer, statusContainer) {
     if (!keepStatus) clearPendingStatus(statusContainer);
   }
 }
+function displayMediaTitle(item) {
+  const base = sanitizeFilename(item.title, item.extension);
+  if (item.kind !== "direct") return base;
+  const details = [
+    item.quality,
+    item.size ? formatBytes(item.size) : item.estimatedSize ? `~${formatBytes(item.estimatedSize)}` : ""
+  ].filter(Boolean);
+  return details.length ? `${base} (${details.join(" · ")})` : base;
+}
+
 function renderVariants(container, variants, item = null) {
   if (!container) return;
   container.textContent = "";

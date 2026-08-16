@@ -40,6 +40,33 @@ test("sanitizeFilename strips invalid path characters and adds extension", () =>
   assert.equal(sanitizeFilename("", "mp4"), "video.mp4");
 });
 
+test("addUniqueMedia preserves enriched variants and sizes on re-detection", () => {
+  const first = addUniqueMedia([], [{
+    url: "https://cdn.example.com/master.m3u8",
+    sourcePageUrl: "https://site.example",
+    title: "Stream",
+    extension: "m3u8",
+    kind: "hls",
+    variants: [{ url: "https://cdn.example.com/720p.m3u8", quality: "720p" }],
+    estimatedSize: 5000000,
+    durationSeconds: 100,
+    quality: "720p"
+  }]);
+  const second = addUniqueMedia(first, [{
+    url: "https://cdn.example.com/master.m3u8",
+    sourcePageUrl: "https://site.example",
+    title: "video",
+    extension: "m3u8",
+    kind: "hls"
+  }]);
+
+  assert.equal(second.length, 1);
+  assert.equal(second[0].quality, "720p");
+  assert.equal(second[0].estimatedSize, 5000000);
+  assert.equal(second[0].durationSeconds, 100);
+  assert.equal(second[0].variants.length, 1);
+});
+
 test("sanitizeFilename avoids Windows reserved device names", () => {
   assert.equal(sanitizeFilename("CON", "mp4"), "_CON.mp4");
   assert.equal(sanitizeFilename("nul", "mp4"), "_nul.mp4");

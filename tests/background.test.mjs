@@ -148,6 +148,32 @@ test("MEDIA_ADD_DETECTED stores frameId and tabId on detected items", async () =
   assert.equal(items[0].kind, "direct");
 });
 
+test("concurrent MEDIA_ADD_DETECTED calls do not overwrite each other", async () => {
+  const handler = mock.listeners.onMessage;
+  assert.ok(handler);
+
+  const call = (url) => new Promise((resolve) => {
+    handler({
+      type: MESSAGE.MEDIA_ADD_DETECTED,
+      items: [{ url, sourcePageUrl: "https://site.example", title: url, extension: "mp4", kind: "direct" }],
+    }, { tab: { id: 10, url: "https://site.example", title: "Site" }, frameId: 0 }, resolve);
+  });
+
+  await Promise.all([
+    call("https://cdn.example.com/a.mp4"),
+    call("https://cdn.example.com/b.mp4"),
+    call("https://cdn.example.com/c.mp4"),
+  ]);
+
+  const stored = await mock.storage.local.get("tabMedia:10");
+  const urls = stored["tabMedia:10"].map((item) => item.url).sort();
+  assert.deepEqual(urls, [
+    "https://cdn.example.com/a.mp4",
+    "https://cdn.example.com/b.mp4",
+    "https://cdn.example.com/c.mp4",
+  ]);
+});
+
 test("MEDIA_ADD_DETECTED replaces media from a previous page URL", async () => {
   await sendRuntimeMessage(
     {
@@ -189,6 +215,42 @@ test("tab main-frame navigation clears the previous page media", async () => {
   handler(10, { status: "loading", url: "https://site.example/new" });
   const stored = await mock.storage.local.get("tabMedia:10");
   assert.equal(stored["tabMedia:10"], undefined);
+});
+
+test("network detection uses Content-Range total for 206 responses", async () => {
+  const listener = mock.listeners.onHeadersReceived;
+  assert.ok(listener, "webRequest.onHeadersReceived listener should be registered");
+  listener({
+    tabId: 10,
+    requestId: "range-request",
+    url: "https://cdn.example.com/video.mp4",
+    type: "media",
+    responseHeaders: [
+      { name: "Content-Type", value: "video/mp4" },
+      { name: "Content-Range", value: "bytes 0-999/123456789" },
+      { name: "Content-Length", value: "1000" },
+    ],
+    initiator: "https://site.example",
+  });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const stored = await mock.storage.local.get("tabMedia:10");
+  const item = stored["tabMedia:10"]?.find((entry) => entry.url === "https://cdn.example.com/video.mp4");
+  assert.equal(item.size, 123456789);
+});
+
+test("network detection keeps m3u8 URLs whose query contains an image extension", async () => {
+  const listener = mock.listeners.onHeadersReceived;
+  listener({
+    tabId: 10,
+    requestId: "m3u8-poster-request",
+    url: "https://cdn.example.com/master.m3u8?poster=cover.jpg",
+    type: "xmlhttprequest",
+    responseHeaders: [{ name: "Content-Type", value: "application/vnd.apple.mpegurl" }],
+    initiator: "https://site.example",
+  });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const stored = await mock.storage.local.get("tabMedia:10");
+  assert.ok(stored["tabMedia:10"]?.some((entry) => entry.url === "https://cdn.example.com/master.m3u8?poster=cover.jpg"));
 });
 
 test("page:clearMedia removes the tab media cache", async () => {

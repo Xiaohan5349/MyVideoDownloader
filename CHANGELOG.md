@@ -1,5 +1,20 @@
 # Changelog
 
+## v1.6.2 - 2026-08-16
+
+### Fixed
+- Concurrent media detections could overwrite each other and lose scan results.
+- Service-worker restarts no longer clear cached tab media.
+- Re-detecting an HLS stream no longer erases already parsed variants, quality, or size estimates.
+- HTTP 206 responses now use Content-Range total size instead of the chunk Content-Length.
+- m3u8 URLs with image-looking query parameters are no longer filtered out.
+- Popup media loading no longer waits indefinitely for slow manifest inspections.
+- BYTERANGE downloads now validate 206 ranges and handle servers that ignore Range.
+
+### Changed
+- Duplicate direct-media entries with the same title and size are collapsed in the popup.
+- Direct-media titles now show quality and size when available.
+
 ## v1.6.1 - 2026-08-16
 
 ### Fixed

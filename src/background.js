@@ -4,24 +4,20 @@ import {
   normalizeMediaItem, parseDashManifest, parseHlsManifest, sanitizeFilename
 } from "./shared.js";
 
-console.log("[ds] Service worker started v1.6.1");
+console.log("[ds] Service worker started v1.6.2");
 
 const SETTINGS_KEY = "settings";
 const TAB_MEDIA_PREFIX = "tabMedia:";
 const HELPER_URL = "http://127.0.0.1:8765";
 const DEBUG = true;
 
-// Clear all stale tab media on startup (old data from previous versions)
-chrome.storage.local.get(null).then((all) => {
-  const keys = Object.keys(all).filter((k) => k.startsWith(TAB_MEDIA_PREFIX));
-  if (keys.length) {
-    chrome.storage.local.remove(keys);
-    console.log("[ds] Cleared", keys.length, "stale tab caches");
-  }
-});
+// NOTE: tabMedia:* survives service-worker restarts. Media is scoped to the
+// top-level page URL and pruned when the tab closes or navigates, so stale
+// entries are filtered out instead of being bulk-deleted on every startup.
 
 const requestHeadersById = new Map();
 const requestHeadersByUrl = new Map();
+const addMediaChains = new Map();
 const MAX_CAPTURED_HEADERS = 500;
 
 // --- Message routing ---
@@ -107,7 +103,7 @@ async function handleMessage(message, sender) {
     const tab = await chrome.tabs.get(tabId).catch(() => null);
     return {
       ok: true,
-      items: items.filter((item) => shouldKeepMedia(item, settings) && mediaMatchesTab(item, tab?.url || ""))
+      items: dedupeDirectMedia(items.filter((item) => shouldKeepMedia(item, settings) && mediaMatchesTab(item, tab?.url || "")))
     };
   }
 
@@ -146,8 +142,14 @@ async function detectFromNetwork(details) {
   // Skip internal helper traffic
   if (url.startsWith("http://127.0.0.1:") || url.startsWith("http://localhost:")) return;
 
-  // Skip analytics, telemetry, logging, CDN assets
-  if (/\/log\/|analytics|telemetry|tracker|pixel|beacon|cdn\.plyr|\.svg|\.png|\.jpg|\.jpeg|\.gif|\.webp|\.css|\.js(?:\?|$)/i.test(url)) return;
+  // Skip analytics, telemetry, logging, CDN assets. Extension checks are
+  // path-only so a legitimate manifest with e.g. ?poster=cover.jpg survives.
+  if (/\/log\/|analytics|telemetry|tracker|pixel|beacon|cdn\.plyr/i.test(url)) return;
+  try {
+    const pathname = new URL(url).pathname.toLowerCase();
+    if (/\.(?:svg|png|jpe?g|gif|webp|css)(?:$|[?#])/i.test(pathname)) return;
+    if (/\.js(?:$|[?#])/i.test(pathname)) return;
+  } catch {}
 
   const contentType = headerValue(details.responseHeaders, "content-type");
 
@@ -182,7 +184,7 @@ async function detectFromNetwork(details) {
     frameId: Number.isInteger(details.frameId) && details.frameId >= 0 ? details.frameId : null,
     tabId: details.tabId,
     pageUrl: tab.url || "",
-    size: numberHeader(details.responseHeaders, "content-length"),
+    size: responseContentLength(details.responseHeaders),
     headers: requestHeadersById.get(details.requestId) || cachedHeadersForUrl(url)
   });
   requestHeadersById.delete(details.requestId);
@@ -192,7 +194,17 @@ async function detectFromNetwork(details) {
 
 // --- Media management ---
 
-async function addMedia(tabId, additions, fallback = {}) {
+function addMedia(tabId, additions, fallback = {}) {
+  const previous = addMediaChains.get(tabId) || Promise.resolve();
+  const task = previous.then(() => addMediaInternal(tabId, additions, fallback));
+  addMediaChains.set(tabId, task);
+  task.finally(() => {
+    if (addMediaChains.get(tabId) === task) addMediaChains.delete(tabId);
+  }).catch(() => {});
+  return task;
+}
+
+async function addMediaInternal(tabId, additions, fallback = {}) {
   const settings = await getSettings();
   const tabUrl = fallback.sourcePageUrl || "";
   const current = (await getMedia(tabId)).filter((item) => mediaMatchesTab(item, tabUrl));
@@ -228,9 +240,21 @@ async function getMedia(tabId) {
 // We CANNOT fetch from background (Cloudflare blocks non-page contexts).
 // ALL external fetches go through the content script.
 
+const ENRICH_ITEM_TIMEOUT_MS = 8000;
+
+function withTimeout(promise, timeoutMs, fallback) {
+  let timer;
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(fallback), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 async function enrichMediaForTab(tabId) {
   const items = await getMedia(tabId);
-  const enriched = await Promise.all(items.map((item) => enrichMediaItem(item)));
+  const enriched = await Promise.all(items.map((item) =>
+    withTimeout(enrichMediaItem(item), ENRICH_ITEM_TIMEOUT_MS, item)
+  ));
   const changed = enriched.some((item, index) => JSON.stringify(item) !== JSON.stringify(items[index]));
   if (changed) await chrome.storage.local.set({ [tabKey(tabId)]: enriched });
   return enriched;
@@ -604,6 +628,31 @@ function headerValue(headers = [], name) {
 function numberHeader(headers, name) {
   const v = Number(headerValue(headers, name));
   return Number.isFinite(v) && v > 0 ? v : null;
+}
+
+function responseContentLength(headers) {
+  const contentRange = headerValue(headers, "content-range");
+  if (contentRange) {
+    const total = Number(contentRange.split("/").pop());
+    if (Number.isFinite(total) && total > 0) return total;
+  }
+  return numberHeader(headers, "content-length");
+}
+
+function dedupeDirectMedia(items) {
+  const seen = new Set();
+  return items.filter((item) => {
+    if (item.kind !== "direct") return true;
+    const key = [
+      item.title || "video",
+      item.extension || "",
+      item.size ?? "",
+      item.estimatedSize ?? ""
+    ].join("|");
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function sanitizeHeaders(headers) {
