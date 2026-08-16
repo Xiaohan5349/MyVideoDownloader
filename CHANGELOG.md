@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.5.0 - 2026-08-15
+
+### Added
+- Added `Clear missing` action to the extension popup and helper dashboard; removes all `File missing` history records.
+- Added helper auth token (`GET /auth` + `X-DS-Token`) so web pages cannot use the local helper without the token.
+
+### Changed
+- HLS segment downloads now retry failed segments in two additional passes before failing the job.
+- Segment fetch retries increased from 3 to 5 with exponential backoff and jitter.
+- Browser-fed HLS jobs now use a more lenient stall timeout (3x the regular timeout).
+- `tabs.sendMessage` now targets the detecting frame explicitly to avoid duplicate downloads on pages with iframes.
+
+### Fixed
+- Fixed popup helper-job list failing to render on initial popup open (`helperJobNodes` TDZ error).
+- Fixed DRM-protected stream errors being incorrectly reported as `HELPER_OFFLINE`.
+- Fixed malformed percent-encoded URLs crashing media detection.
+- Fixed stale version strings in service worker and options page.
+
 ## v1.4.6 - 2026-07-18
 
 ### Fixed

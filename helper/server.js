@@ -786,7 +786,7 @@ async function sweepStalledJobs(now = Date.now(), timeoutMs = JOB_STALL_TIMEOUT_
 
     job.status = "failed";
     job.error = "DOWNLOAD_STALLED";
-    job.progressText = "No download progress for 2 minutes; task stopped";
+    job.progressText = `No download progress for ${Math.round(stallTimeout / 60000)} minutes; task stopped`;
     job.finishedAt = new Date(now).toISOString();
     job.etaSeconds = null;
     await cleanupBrowserTemp(job);

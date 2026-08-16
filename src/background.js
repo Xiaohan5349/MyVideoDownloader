@@ -4,7 +4,7 @@ import {
   normalizeMediaItem, parseDashManifest, parseHlsManifest, sanitizeFilename
 } from "./shared.js";
 
-console.log("[ds] Service worker started v1.4.6");
+console.log("[ds] Service worker started v1.5.0");
 
 const SETTINGS_KEY = "settings";
 const TAB_MEDIA_PREFIX = "tabMedia:";
