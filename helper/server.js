@@ -1,10 +1,12 @@
 import http from "node:http";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { createWriteStream, existsSync } from "node:fs";
 import { mkdir, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -49,6 +51,8 @@ async function loadJobsFromDisk() {
 }
 
 let persistJobsChain = Promise.resolve();
+let persistTimer = null;
+let persistQueued = false;
 
 function persistJobsToDisk() {
   const data = JSON.stringify(Array.from(jobs.values()), null, 2);
@@ -62,6 +66,26 @@ function persistJobsToDisk() {
       // Silently fail — persistence is best-effort
     });
   return persistJobsChain;
+}
+
+function queuePersistJobsToDisk() {
+  persistQueued = true;
+  if (persistTimer) return;
+  persistTimer = setTimeout(() => {
+    persistTimer = null;
+    persistQueued = false;
+    persistJobsToDisk();
+  }, 1000);
+  persistTimer.unref?.();
+}
+
+async function persistJobsNow() {
+  if (persistTimer) {
+    clearTimeout(persistTimer);
+    persistTimer = null;
+  }
+  persistQueued = false;
+  await persistJobsToDisk();
 }
 
 let downloadDir = await loadDownloadDir();
@@ -142,7 +166,13 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "GET" && req.url?.startsWith("/jobs/")) {
       const id = decodeURIComponent(req.url.split("/").pop() || "");
       const job = jobs.get(id);
-      if (job && reconcileJobFileState(job)) await persistJobsToDisk();
+      if (job && reconcileJobFileState(job)) await persistJobsNow();
+      if (job && job.status === "running" && hasValidHelperToken(req)) {
+        // Content-script workers poll this endpoint before each segment fetch;
+        // treating the authenticated poll as a heartbeat keeps legitimately
+        // slow retry loops from tripping the stall sweeper.
+        job.lastActivityAt = Date.now();
+      }
       writeJson(res, job ? 200 : 404, job || { ok: false, error: "JOB_NOT_FOUND" });
       return;
     }
@@ -295,8 +325,11 @@ async function startBrowserDownload(payload) {
   await mkdir(tempDir, { recursive: true });
 
   const totalBytes = Number(payload.totalBytes);
-  const totalSegments = Number(payload.totalSegments);
   const durationSeconds = Number(payload.durationSeconds);
+  const totalSegments = Number(payload.totalSegments);
+  if (!Number.isInteger(totalSegments) || totalSegments <= 0) {
+    return { ok: false, status: 400, error: "INVALID_TOTAL_SEGMENTS" };
+  }
   const job = {
     id,
     ok: true,
@@ -316,7 +349,7 @@ async function startBrowserDownload(payload) {
     downloadedBytes: 0,
     totalBytes: Number.isFinite(totalBytes) && totalBytes > 0 ? totalBytes : null,
     totalSizeSource: payload.totalSizeSource || "unknown",
-    totalSegments: Number.isFinite(totalSegments) && totalSegments > 0 ? totalSegments : null,
+    totalSegments,
     receivedSegments: 0,
     durationSeconds: Number.isFinite(durationSeconds) && durationSeconds > 0 ? durationSeconds : null,
     downloadedSeconds: 0,
@@ -344,12 +377,18 @@ async function uploadBrowserDownloadFile(id, fileName, req) {
   const targetPath = path.join(job.tempDir, safeName);
   if (!isSafeDownloadPath(targetPath, job.tempDir)) return { ok: false, status: 403, error: "OUTPUT_PATH_UNSAFE" };
 
-  const data = await readRaw(req, 256 * 1024 * 1024);
-  await writeFile(targetPath, data);
+  if (existsSync(targetPath)) {
+    // Retried upload after the previous attempt actually succeeded. Consume
+    // and discard the duplicate body without double-counting progress.
+    await discardRaw(req, 256 * 1024 * 1024);
+    return { ok: true, job };
+  }
+
+  const bytesWritten = await readRawToFile(req, targetPath, 256 * 1024 * 1024);
   job.receivedSegments += /^seg-/i.test(safeName) ? 1 : 0;
-  updateDownloadedBytes(job, job.downloadedBytes + data.length);
+  updateDownloadedBytes(job, job.downloadedBytes + bytesWritten);
   job.progressText = formatBrowserReceiveProgress(job);
-  await persistJobsToDisk();
+  queuePersistJobsToDisk();
   return { ok: true, job };
 }
 
@@ -363,6 +402,13 @@ async function completeBrowserDownload(id, payload) {
   if (playlistText.length > 20 * 1024 * 1024) return { ok: false, status: 413, error: "PLAYLIST_TOO_LARGE" };
 
   if (Number.isInteger(job.totalSegments) && job.receivedSegments < job.totalSegments) {
+    job.status = "failed";
+    job.error = "SEGMENTS_INCOMPLETE";
+    job.progressText = `Expected ${job.totalSegments} segments but received ${job.receivedSegments}`;
+    job.finishedAt = new Date().toISOString();
+    job.etaSeconds = null;
+    await cleanupBrowserTemp(job);
+    await persistJobsNow();
     return { ok: false, status: 409, error: "SEGMENTS_INCOMPLETE" };
   }
 
@@ -430,14 +476,15 @@ async function inspectManifest(url, kind, headers) {
       headers: {
         ...headersToObject(headers),
         Accept: "application/vnd.apple.mpegurl,application/dash+xml,*/*"
-      }
+      },
+      signal: AbortSignal.timeout(30_000)
     });
 
     if (!response.ok) {
       return { ok: false, status: response.status, error: response.status === 403 ? "SERVER_PROTECTED_UNSUPPORTED" : `MANIFEST_FETCH_${response.status}` };
     }
 
-    const text = await response.text();
+    const text = (await response.text()).replace(/^\uFEFF/, "");
     if (kind === "hls" || /\.m3u8(?:[?#]|$)/i.test(url)) {
       if (!text.trimStart().startsWith("#EXTM3U")) {
         return { ok: false, status: 422, error: "MANIFEST_NOT_HLS" };
@@ -549,8 +596,9 @@ function updateProgress(job, text) {
     if (key === "out_time") updateDownloadedSeconds(job, parseTimeToSeconds(value));
     if (key === "out_time_ms" && !job.downloadedSeconds) updateDownloadedSeconds(job, Number(value) / 1_000_000);
     if (key === "speed") updateEta(job, value);
-    if (key === "progress" && value === "end") job.progressText = "finalizing";
-    if (key === "progress") job.progressText = formatProgress(job);
+    if (key === "progress") {
+      job.progressText = value === "end" ? "finalizing" : formatProgress(job);
+    }
   }
 }
 
@@ -916,10 +964,11 @@ async function fetchText(url, headers) {
       headers: {
         ...headersToObject(headers),
         Accept: "application/vnd.apple.mpegurl,application/dash+xml,*/*"
-      }
+      },
+      signal: AbortSignal.timeout(30_000)
     });
     if (!response.ok) return { ok: false, status: response.status, text: "" };
-    return { ok: true, status: response.status, text: await response.text() };
+    return { ok: true, status: response.status, text: (await response.text()).replace(/^\uFEFF/, "") };
   } catch {
     return { ok: false, status: 0, text: "" };
   }
@@ -1193,22 +1242,45 @@ async function cleanupBrowserTemp(job) {
   await rm(job.tempDir, { recursive: true, force: true }).catch(() => {});
 }
 
-function readRaw(req, maxBytes) {
+function byteLimitError() {
+  const error = new Error("REQUEST_TOO_LARGE");
+  error.status = 413;
+  return error;
+}
+
+async function readRawToFile(req, filePath, maxBytes) {
+  let total = 0;
+  const limiter = new Transform({
+    transform(chunk, _encoding, callback) {
+      total += chunk.length;
+      if (total > maxBytes) {
+        callback(byteLimitError());
+        return;
+      }
+      callback(null, chunk);
+    }
+  });
+  try {
+    await pipeline(req, limiter, createWriteStream(filePath));
+    return total;
+  } catch (error) {
+    await unlink(filePath).catch(() => {});
+    throw error;
+  }
+}
+
+function discardRaw(req, maxBytes) {
   return new Promise((resolve, reject) => {
-    const chunks = [];
     let total = 0;
     req.on("data", (chunk) => {
       total += chunk.length;
       if (total > maxBytes) {
-        const error = new Error("REQUEST_TOO_LARGE");
-        error.status = 413;
+        const error = byteLimitError();
+        req.destroy(error);
         reject(error);
-        req.destroy();
-        return;
       }
-      chunks.push(chunk);
     });
-    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("end", resolve);
     req.on("error", reject);
   });
 }

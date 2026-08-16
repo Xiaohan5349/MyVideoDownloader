@@ -295,5 +295,8 @@
   },
   "msgHelperOfflineClearMissing": {
     "message": "Start the helper before clearing missing records."
+  },
+  "msgDownloadInProgress": {
+    "message": "Download already in progress."
   }
 }

@@ -8,6 +8,8 @@ export function parseHlsMediaPlaylist(text = "", manifestUrl = "") {
   let hasDrm = false;
   let isMaster = false;
   let pendingDuration = null;
+  let pendingByteRange = null;
+  const byteRangeEndByUrl = new Map();
   let durationSeconds = 0;
 
   for (const rawLine of lines) {
@@ -17,6 +19,7 @@ export function parseHlsMediaPlaylist(text = "", manifestUrl = "") {
     if (line.startsWith("#EXT-X-STREAM-INF")) {
       isMaster = true;
       pendingDuration = null;
+      pendingByteRange = null;
       continue;
     }
 
@@ -46,6 +49,11 @@ export function parseHlsMediaPlaylist(text = "", manifestUrl = "") {
       continue;
     }
 
+    if (line.startsWith("#EXT-X-BYTERANGE")) {
+      pendingByteRange = parseByteRange(line);
+      continue;
+    }
+
     if (line.startsWith("#EXTINF")) {
       pendingDuration = Number(line.match(/^#EXTINF:([\d.]+)/i)?.[1]);
       if (!Number.isFinite(pendingDuration)) pendingDuration = null;
@@ -56,9 +64,17 @@ export function parseHlsMediaPlaylist(text = "", manifestUrl = "") {
       if (!isMaster && (pendingDuration != null || segments.length > 0)) {
         const duration = pendingDuration || null;
         if (duration) durationSeconds += duration;
-        segments.push({ url: resolveUrl(line, manifestUrl), duration });
+        const resolved = resolveUrl(line, manifestUrl);
+        let byteRange = null;
+        if (pendingByteRange) {
+          const offset = pendingByteRange.offset ?? byteRangeEndByUrl.get(resolved) ?? 0;
+          byteRange = { offset, length: pendingByteRange.length };
+          byteRangeEndByUrl.set(resolved, offset + byteRange.length);
+        }
+        segments.push({ url: resolved, duration, byteRange });
       }
       pendingDuration = null;
+      pendingByteRange = null;
     }
   }
 
@@ -77,17 +93,26 @@ export function buildHlsAssetPlan(mediaPlaylist = {}) {
   const assetNameByUrl = new Map();
 
   for (const [index, item] of (mediaPlaylist.keys || []).entries()) {
-    addAsset(assets, assetNameByUrl, item.url, `key-${pad(index)}.key`, "key");
+    addAsset(assets, assetNameByUrl, item.url, item.url, `key-${pad(index)}.key`, "key");
   }
 
   for (const [index, item] of (mediaPlaylist.maps || []).entries()) {
-    addAsset(assets, assetNameByUrl, item.url, `init-${pad(index)}.${extensionFromUrl(item.url, "mp4")}`, "map");
+    addAsset(assets, assetNameByUrl, item.url, item.url, `init-${pad(index)}.${extensionFromUrl(item.url, "mp4")}`, "map");
   }
 
   let segmentAssetCount = 0;
   for (const item of mediaPlaylist.segments || []) {
-    if (assetNameByUrl.has(item.url)) continue;
-    addAsset(assets, assetNameByUrl, item.url, `seg-${pad(segmentAssetCount)}.${segmentExtension(item.url)}`, "segment");
+    const key = byteRangeKey(item.url, item.byteRange);
+    if (assetNameByUrl.has(key)) continue;
+    addAsset(
+      assets,
+      assetNameByUrl,
+      key,
+      item.url,
+      `seg-${pad(segmentAssetCount)}.${segmentExtension(item.url)}`,
+      "segment",
+      item.byteRange || null
+    );
     segmentAssetCount += 1;
   }
 
@@ -96,7 +121,10 @@ export function buildHlsAssetPlan(mediaPlaylist = {}) {
 
 export function buildLocalHlsPlaylist(text = "", manifestUrl = "", assetNameByUrl = new Map()) {
   const lines = String(text).split(/\r?\n/);
-  return lines.map((rawLine) => {
+  let pendingByteRange = null;
+  const byteRangeEndByUrl = new Map();
+
+  const rewritten = lines.map((rawLine) => {
     const line = rawLine.trim();
     if (!line) return rawLine;
 
@@ -107,10 +135,27 @@ export function buildLocalHlsPlaylist(text = "", manifestUrl = "", assetNameByUr
       return localName ? replaceUriAttribute(rawLine, localName) : rawLine;
     }
 
+    if (line.startsWith("#EXT-X-BYTERANGE")) {
+      pendingByteRange = parseByteRange(line);
+      // Each byte-range asset is downloaded as its own local file already
+      // limited to that range, so drop source-file BYTERANGE metadata.
+      return "";
+    }
+
     if (line.startsWith("#")) return rawLine;
-    const localName = assetNameByUrl.get(resolveUrl(line, manifestUrl));
-    return localName || rawLine;
-  }).join("\n").replace(/\n+$/g, "");
+
+    const resolved = resolveUrl(line, manifestUrl);
+    let key = resolved;
+    if (pendingByteRange) {
+      const offset = pendingByteRange.offset ?? byteRangeEndByUrl.get(resolved) ?? 0;
+      key = byteRangeKey(resolved, { offset, length: pendingByteRange.length });
+      byteRangeEndByUrl.set(resolved, offset + pendingByteRange.length);
+    }
+    pendingByteRange = null;
+    return assetNameByUrl.get(key) || rawLine;
+  }).filter((line) => line !== "");
+
+  return rewritten.join("\n").replace(/\n+$/g, "");
 }
 
 export function isProtectedHlsKey(line = "") {
@@ -139,10 +184,22 @@ function resolveUrl(url, baseUrl) {
   }
 }
 
-function addAsset(assets, assetNameByUrl, url, name, role) {
-  if (assetNameByUrl.has(url)) return;
-  assetNameByUrl.set(url, name);
-  assets.push({ url, name, role });
+function parseByteRange(line) {
+  const match = String(line).match(/^#EXT-X-BYTERANGE:(\d+)(?:@(\d+))?/i);
+  if (!match) return null;
+  const length = Number(match[1]);
+  const offset = match[2] != null ? Number(match[2]) : null;
+  return Number.isFinite(length) && length > 0 ? { length, offset } : null;
+}
+
+function byteRangeKey(url, byteRange) {
+  return byteRange ? `${url}|${byteRange.offset}|${byteRange.length}` : url;
+}
+
+function addAsset(assets, assetNameByUrl, key, url, name, role, byteRange = null) {
+  if (assetNameByUrl.has(key)) return;
+  assetNameByUrl.set(key, name);
+  assets.push({ url, name, role, byteRange });
 }
 
 function segmentExtension(url) {

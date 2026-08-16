@@ -206,6 +206,34 @@ test("DOWNLOADS_START for HLS returns HELPER_OFFLINE when /auth is unavailable",
   assert.equal(mock.tabs.sendMessageCalls.length, 0);
 });
 
+test("SEGMENTS_INCOMPLETE from the content script is not retried via helper fallback", async () => {
+  globalThis.fetch = async (url) => {
+    if (String(url).endsWith("/auth")) {
+      return new Response(JSON.stringify({ ok: true, token: "token-incomplete" }), {
+        status: 200, headers: { "Content-Type": "application/json" },
+      });
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  };
+  mock.tabs.sendMessageResult = { ok: false, error: "SEGMENTS_INCOMPLETE" };
+
+  const response = await sendRuntimeMessage({
+    type: MESSAGE.DOWNLOADS_START,
+    item: {
+      url: "https://cdn.example.com/master.m3u8",
+      sourcePageUrl: "https://site.example",
+      title: "Incomplete",
+      extension: "m3u8",
+      kind: "hls",
+      frameId: 0,
+      tabId: 10,
+    },
+  });
+
+  assert.equal(response.ok, false);
+  assert.equal(response.error, "SEGMENTS_INCOMPLETE");
+});
+
 test("DOWNLOADS_JOBS_CLEAR_MISSING calls the helper clear-missing endpoint", async () => {
   globalThis.fetch = async (url, options) => {
     if (String(url).endsWith("/jobs/clear-missing")) {

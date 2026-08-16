@@ -201,7 +201,7 @@ async function handleStreamDownload(payload) {
       }
     } catch (_) {}
 
-    const data = await fetchSegmentWithRetry(asset.url);
+    const data = await fetchSegmentWithRetry(asset.url, asset.byteRange || null);
 
     // Upload to helper
     const upRes = await fetchWithTimeout(
@@ -268,7 +268,20 @@ async function handleStreamDownload(payload) {
       body: JSON.stringify({ playlistText: localPlaylist })
     }
   );
-  if (!completeRes.ok) throw new Error(`HELPER_COMPLETE_${completeRes.status}`);
+  if (!completeRes.ok) {
+    const completePayload = await completeRes.json().catch(() => ({}));
+    const errorCode = completePayload.error === "SEGMENTS_INCOMPLETE"
+      ? "SEGMENTS_INCOMPLETE"
+      : `HELPER_COMPLETE_${completeRes.status}`;
+    // Mark the helper job failed so it cannot sit in "running" until the
+    // stall sweeper kills it with a misleading DOWNLOAD_STALLED error.
+    await fetch(`${helperUrl}/browser-downloads/${encodeURIComponent(job.id)}/fail`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders },
+      body: JSON.stringify({ error: errorCode })
+    }).catch(() => {});
+    throw new Error(errorCode);
+  }
 
   return { ok: true, helperJob: job, completed, total };
 }
@@ -280,13 +293,21 @@ function getHlsBrowserModule() {
   return hlsBrowserModulePromise;
 }
 
-async function fetchSegmentWithRetry(url) {
+async function fetchSegmentWithRetry(url, byteRange = null) {
   let lastError;
+  const headers = byteRange
+    ? { Range: `bytes=${byteRange.offset}-${byteRange.offset + byteRange.length - 1}` }
+    : undefined;
+
   for (let attempt = 1; attempt <= SEGMENT_FETCH_RETRIES; attempt += 1) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), SEGMENT_FETCH_TIMEOUT_MS);
     try {
-      const response = await fetch(url, { cache: "no-store", signal: controller.signal });
+      const response = await fetch(url, {
+        cache: "no-store",
+        signal: controller.signal,
+        ...(headers ? { headers } : {})
+      });
       if (!response.ok) throw new Error(`SEGMENT_${response.status}`);
       return await response.arrayBuffer();
     } catch (error) {

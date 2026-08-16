@@ -159,6 +159,7 @@ it("POST /browser-downloads/start from a web origin works when the content-scrip
     body: {
       url: "https://cdn.example.com/video.m3u8",
       title: "Browser Fed Video",
+      totalSegments: 1,
       sourcePageUrl: "https://site.example/watch/video"
     },
   });
@@ -173,6 +174,7 @@ it("POST /browser-downloads/start from a web origin is rejected without the toke
     body: {
       url: "https://cdn.example.com/video.m3u8",
       title: "Browser Fed Video",
+      totalSegments: 1,
       sourcePageUrl: "https://site.example/watch/video"
     },
   });
@@ -360,6 +362,38 @@ it("DELETE /jobs/:id/history removes every non-active record without deleting ou
   }
 });
 
+it("POST /browser-downloads/start rejects fractional totalSegments", async () => {
+  const res = await fetchJson("/browser-downloads/start", {
+    method: "POST",
+    body: {
+      url: "https://cdn.example.com/video.m3u8",
+      title: "Fractional",
+      totalSegments: 1.5,
+      totalBytes: 4,
+      totalSizeSource: "exact"
+    },
+  });
+  assert.equal(res.status, 400);
+  assert.equal(res.body.error, "INVALID_TOTAL_SEGMENTS");
+});
+
+it("authenticated job polling acts as a browser-download heartbeat", async () => {
+  const start = await fetchJson("/browser-downloads/start", {
+    method: "POST",
+    body: { url: "https://cdn.example.com/video.m3u8", title: "Heartbeat", totalSegments: 1 },
+  });
+  const jobId = start.body.job.id;
+  const job = jobs.get(jobId);
+  job.lastActivityAt = 1;
+
+  const auth = await fetchJson("/auth");
+  const res = await fetchJson(`/jobs/${encodeURIComponent(jobId)}`, {
+    headers: { Origin: "https://site.example", "X-DS-Token": auth.body.token },
+  });
+  assert.equal(res.status, 200);
+  assert.ok(jobs.get(jobId).lastActivityAt > Date.now() - 5000);
+});
+
 it("POST /browser-downloads/:id/files/:name stores segment bytes", async () => {
   const start = await fetchJson("/browser-downloads/start", {
     method: "POST",
@@ -396,6 +430,46 @@ it("POST /browser-downloads/:id/files/:name stores segment bytes", async () => {
   assert.equal(upload.body.job.receivedSegments, 1);
 });
 
+it("duplicate segment upload is idempotent and does not double-count", async () => {
+  const start = await fetchJson("/browser-downloads/start", {
+    method: "POST",
+    body: {
+      url: "https://cdn.example.com/video.m3u8",
+      title: "Duplicate Upload",
+      totalSegments: 1,
+      totalBytes: 4,
+      totalSizeSource: "exact"
+    },
+  });
+  const jobId = start.body.job.id;
+  const payload = Buffer.from([1, 2, 3, 4]);
+
+  async function uploadSegment() {
+    return new Promise((resolve, reject) => {
+      const url = new URL(`/browser-downloads/${encodeURIComponent(jobId)}/files/seg-000000.ts`, baseUrl);
+      const req = http.request(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/octet-stream" },
+      }, (res) => {
+        let body = "";
+        res.on("data", (chunk) => { body += chunk; });
+        res.on("end", () => resolve({ status: res.statusCode, body: JSON.parse(body) }));
+      });
+      req.on("error", reject);
+      req.write(payload);
+      req.end();
+    });
+  }
+
+  const first = await uploadSegment();
+  const second = await uploadSegment();
+  assert.equal(first.status, 200);
+  assert.equal(second.status, 200);
+  const job = jobs.get(jobId);
+  assert.equal(job.receivedSegments, 1);
+  assert.equal(job.downloadedBytes, payload.length);
+});
+
 it("POST /browser-downloads/:id/complete rejects incomplete segment uploads", async () => {
   const start = await fetchJson("/browser-downloads/start", {
     method: "POST",
@@ -416,6 +490,9 @@ it("POST /browser-downloads/:id/complete rejects incomplete segment uploads", as
 
   assert.equal(complete.status, 409);
   assert.equal(complete.body.error, "SEGMENTS_INCOMPLETE");
+  const job = jobs.get(jobId);
+  assert.equal(job.status, "failed");
+  assert.equal(job.error, "SEGMENTS_INCOMPLETE");
 });
 
 it("POST /browser-downloads/:id/files rejects unsafe filenames", async () => {

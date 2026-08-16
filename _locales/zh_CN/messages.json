@@ -295,5 +295,8 @@
   },
   "msgHelperOfflineClearMissing": {
     "message": "清除丢失记录前请先启动助手。"
+  },
+  "msgDownloadInProgress": {
+    "message": "下载已在进行中。"
   }
 }

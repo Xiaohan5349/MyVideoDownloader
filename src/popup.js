@@ -334,110 +334,94 @@ function confirmDownload(item, callback) {
 }
 
 async function startDownload(item, variantContainer, statusContainer) {
-  // Optimistic feedback + double-click guard
-  const downloadButton = statusContainer?.closest(".media-item")?.querySelector(".download-button");
-  if (pendingDownloads.has(item.url)) return;
+  if (pendingDownloads.has(item.url)) {
+    showNotice(getMessage("msgDownloadInProgress"), true);
+    return;
+  }
   pendingDownloads.add(item.url);
 
-  if (downloadButton) {
-    downloadButton.disabled = true;
-    downloadButton.textContent = "Starting...";
-  }
+  let releasePending = true;
+  let keepStatus = false;
+
   if (statusContainer) {
     statusContainer.hidden = false;
     statusContainer.classList.add("is-pending");
     statusContainer.textContent = "Connecting to helper...";
   }
 
-  if (item.kind === "direct") {
-    const hasPermission = await chrome.permissions.contains({ permissions: ["downloads"] });
-    if (!hasPermission) {
-      const granted = await chrome.permissions.request({ permissions: ["downloads"] });
-      if (!granted) {
-        pendingDownloads.delete(item.url);
-        if (downloadButton) {
-          downloadButton.disabled = false;
-          downloadButton.textContent = item.kind === "direct" ? getMessage("btnSave") : getMessage("btnDownload");
+  try {
+    if (item.kind === "direct") {
+      try {
+        const hasPermission = await chrome.permissions.contains({ permissions: ["downloads"] });
+        if (!hasPermission) {
+          const granted = await chrome.permissions.request({ permissions: ["downloads"] });
+          if (!granted) {
+            showNotice(getMessage("msgDownloadPermission"), true);
+            return;
+          }
         }
-        if (statusContainer) statusContainer.classList.remove("is-pending");
-        showNotice(getMessage("msgDownloadPermission"), true);
+      } catch (error) {
+        console.error("[ds-video-downloader] permission check failed", error);
+        showNotice(getMessage("msgDownloadFailed"), true);
         return;
       }
     }
-  }
 
-  let response;
-  try {
-    response = await chrome.runtime.sendMessage({
-      type: MESSAGE.DOWNLOADS_START,
-      item
-    });
-  } catch (error) {
-    if (downloadButton) {
-      downloadButton.disabled = false;
-      downloadButton.textContent = item.kind === "direct" ? getMessage("btnSave") : getMessage("btnDownload");
+    let response;
+    try {
+      response = await chrome.runtime.sendMessage({
+        type: MESSAGE.DOWNLOADS_START,
+        item
+      });
+    } catch (error) {
+      console.error("[ds-video-downloader] startDownload sendMessage failed", error);
+      showNotice(getMessage("msgDownloadFailed"), true);
+      return;
     }
-    showNotice(getMessage("msgDownloadFailed"), true);
-    return;
+
+    console.log("[ds-video-downloader] startDownload response ok=%s helperJob=%s error=%s",
+      response?.ok, Boolean(response?.helperJob), response?.error);
+
+    if (response?.ok) {
+      if (response.helperJob) {
+        keepStatus = true;
+        releasePending = false;
+        showJobStatus(statusContainer, response.helperJob);
+        pollJob(response.helperJob.id, statusContainer, () => pendingDownloads.delete(item.url));
+        await loadHelperStatus();
+        showNotice(getMessage("msgHelperStreamStarted"));
+      } else {
+        showNotice(getMessage("msgDownloadStarted"));
+      }
+      return;
+    }
+
+    if (response?.error === "DRM_PROTECTED_UNSUPPORTED") {
+      showNotice(getMessage("msgDrmUnsupported"), true);
+      return;
+    }
+
+    if (response?.error === "SERVER_PROTECTED_UNSUPPORTED") {
+      showNotice(getMessage("msgServerBlocked"), true);
+      return;
+    }
+
+    if (response?.error === "HELPER_OFFLINE") {
+      const variants = response.variants || [];
+      renderVariants(variantContainer, variants, item);
+      const count = variants.length;
+      showNotice(count
+        ? getMessage("msgStreamVariantsHint", { count: String(count), plural: count === 1 ? "" : "s" })
+        : getMessage("msgStartHelperHint"), true);
+      return;
+    }
+
+    showNotice(response?.error || getMessage("msgDownloadFailed"), true);
   } finally {
-    pendingDownloads.delete(item.url);
-    if (statusContainer) statusContainer.classList.remove("is-pending");
+    if (releasePending) pendingDownloads.delete(item.url);
+    if (!keepStatus) clearPendingStatus(statusContainer);
   }
-
-  console.log("[ds-video-downloader] startDownload response ok=%s helperJob=%s error=%s",
-    response?.ok, Boolean(response?.helperJob), response?.error);
-
-  if (response?.ok) {
-    if (response.helperJob) {
-      showJobStatus(statusContainer, response.helperJob);
-      pollJob(response.helperJob.id, statusContainer);
-      await loadHelperStatus();
-      showNotice(getMessage("msgHelperStreamStarted"));
-    } else {
-      showNotice(getMessage("msgDownloadStarted"));
-    }
-    return;
-  }
-
-  if (response?.error === "DRM_PROTECTED_UNSUPPORTED") {
-    if (downloadButton) {
-      downloadButton.disabled = false;
-      downloadButton.textContent = item.kind === "direct" ? getMessage("btnSave") : getMessage("btnDownload");
-    }
-    showNotice(getMessage("msgDrmUnsupported"), true);
-    return;
-  }
-
-  if (response?.error === "SERVER_PROTECTED_UNSUPPORTED") {
-    if (downloadButton) {
-      downloadButton.disabled = false;
-      downloadButton.textContent = item.kind === "direct" ? getMessage("btnSave") : getMessage("btnDownload");
-    }
-    showNotice(getMessage("msgServerBlocked"), true);
-    return;
-  }
-
-  if (response?.error === "HELPER_OFFLINE") {
-    const variants = response.variants || [];
-    renderVariants(variantContainer, variants, item);
-    const count = variants.length;
-    if (downloadButton) {
-      downloadButton.disabled = false;
-      downloadButton.textContent = item.kind === "direct" ? getMessage("btnSave") : getMessage("btnDownload");
-    }
-    showNotice(count
-      ? getMessage("msgStreamVariantsHint", { count: String(count), plural: count === 1 ? "" : "s" })
-      : getMessage("msgStartHelperHint"), true);
-    return;
-  }
-
-  if (downloadButton) {
-    downloadButton.disabled = false;
-    downloadButton.textContent = item.kind === "direct" ? getMessage("btnSave") : getMessage("btnDownload");
-  }
-  showNotice(response?.error || getMessage("msgDownloadFailed"), true);
 }
-
 function renderVariants(container, variants, item = null) {
   if (!container) return;
   container.textContent = "";
@@ -464,40 +448,57 @@ function renderVariants(container, variants, item = null) {
 }
 
 async function startVariantDownload(item, variant, statusContainer) {
-  if (pendingDownloads.has(item.url)) return;
+  if (pendingDownloads.has(item.url)) {
+    showNotice(getMessage("msgDownloadInProgress"), true);
+    return;
+  }
   pendingDownloads.add(item.url);
 
-  let response;
+  let releasePending = true;
+  let keepStatus = false;
+
   try {
-    response = await chrome.runtime.sendMessage({
-      type: MESSAGE.DOWNLOADS_START,
-      item,
-      variant
-    });
-  } finally {
-    pendingDownloads.delete(item.url);
-  }
-
-  if (response?.ok) {
-    if (response.helperJob) {
-      showJobStatus(statusContainer, response.helperJob);
-      pollJob(response.helperJob.id, statusContainer);
-      await loadHelperStatus();
+    let response;
+    try {
+      response = await chrome.runtime.sendMessage({
+        type: MESSAGE.DOWNLOADS_START,
+        item,
+        variant
+      });
+    } catch (error) {
+      console.error("[ds-video-downloader] startVariantDownload sendMessage failed", error);
+      showNotice(getMessage("msgVariantFailed"), true);
+      return;
     }
-    showNotice(getMessage("msgVariantStreamStarted"));
-    return;
-  }
 
-  if (response?.error === "HELPER_OFFLINE") {
-    showNotice(getMessage("msgVariantHelperOffline"), true);
-    return;
-  }
+    if (response?.ok) {
+      if (response.helperJob) {
+        keepStatus = true;
+        releasePending = false;
+        showJobStatus(statusContainer, response.helperJob);
+        pollJob(response.helperJob.id, statusContainer, () => pendingDownloads.delete(item.url));
+        await loadHelperStatus();
+      }
+      showNotice(getMessage("msgVariantStreamStarted"));
+      return;
+    }
 
-  showNotice(response?.error || getMessage("msgVariantFailed"), true);
+    if (response?.error === "HELPER_OFFLINE") {
+      showNotice(getMessage("msgVariantHelperOffline"), true);
+      return;
+    }
+
+    showNotice(response?.error || getMessage("msgVariantFailed"), true);
+  } finally {
+    if (releasePending) pendingDownloads.delete(item.url);
+    if (!keepStatus) clearPendingStatus(statusContainer);
+  }
 }
-
-function pollJob(jobId, container) {
-  if (!jobId || !container) return;
+function pollJob(jobId, container, onSettled) {
+  if (!jobId || !container) {
+    onSettled?.();
+    return;
+  }
   window.clearInterval(jobPollers.get(jobId));
 
   const timer = window.setInterval(async () => {
@@ -512,6 +513,7 @@ function pollJob(jobId, container) {
       container.textContent = response?.error || getMessage("msgCouldNotReadHelperStatus");
       window.clearInterval(timer);
       jobPollers.delete(jobId);
+      onSettled?.();
       return;
     }
 
@@ -519,11 +521,18 @@ function pollJob(jobId, container) {
     if (response.job.status === "completed" || response.job.status === "failed" || response.job.status === "cancelled") {
       window.clearInterval(timer);
       jobPollers.delete(jobId);
+      onSettled?.();
       await loadHelperStatus();
     }
   }, 1000);
 
   jobPollers.set(jobId, timer);
+}
+function clearPendingStatus(container) {
+  if (!container) return;
+  container.classList.remove("is-pending");
+  container.hidden = true;
+  container.textContent = "";
 }
 
 function showJobStatus(container, job) {

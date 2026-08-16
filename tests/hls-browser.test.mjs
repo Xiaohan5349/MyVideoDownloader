@@ -98,3 +98,33 @@ test("Jable-style AES-128 key with a .ts name is downloaded and rewritten as a k
   ]);
   assert.match(playlist, /#EXT-X-KEY:METHOD=AES-128,URI="key-000000\.key",IV=/);
 });
+
+test("BYTERANGE segments become separate ranged assets with local playlists", () => {
+  const manifestUrl = "https://cdn.example.com/hls/video.m3u8";
+  const text = [
+    "#EXTM3U",
+    "#EXTINF:1.0,",
+    "#EXT-X-BYTERANGE:100@0",
+    "file.ts",
+    "#EXTINF:1.0,",
+    "#EXT-X-BYTERANGE:100",
+    "file.ts"
+  ].join("\n");
+
+  const parsed = parseHlsMediaPlaylist(text, manifestUrl);
+  assert.equal(parsed.segments.length, 2);
+  assert.deepEqual(parsed.segments[0].byteRange, { offset: 0, length: 100 });
+  assert.deepEqual(parsed.segments[1].byteRange, { offset: 100, length: 100 });
+
+  const plan = buildHlsAssetPlan(parsed);
+  assert.equal(plan.segmentAssetCount, 2);
+  assert.deepEqual(plan.assets.map((asset) => asset.byteRange), [
+    { offset: 0, length: 100 },
+    { offset: 100, length: 100 }
+  ]);
+
+  const local = buildLocalHlsPlaylist(text, manifestUrl, plan.assetNameByUrl);
+  assert.doesNotMatch(local, /#EXT-X-BYTERANGE/);
+  assert.match(local, /\nseg-000000\.ts\n/);
+  assert.match(local, /seg-000001\.ts$/);
+});

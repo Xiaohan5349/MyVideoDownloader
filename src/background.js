@@ -345,7 +345,8 @@ async function startStreamDownload(media, variant) {
     if (response?.ok) {
       return { ok: true, helperJob: response.helperJob };
     }
-    if (["SERVER_PROTECTED_UNSUPPORTED", "DRM_PROTECTED_UNSUPPORTED", "JOB_CANCELLED", "SEGMENT_DOWNLOAD_FAILED"].includes(response?.error)) {
+    if (["SERVER_PROTECTED_UNSUPPORTED", "DRM_PROTECTED_UNSUPPORTED", "JOB_CANCELLED", "SEGMENT_DOWNLOAD_FAILED", "SEGMENTS_INCOMPLETE"].includes(response?.error) ||
+        response?.error?.startsWith("HELPER_COMPLETE_")) {
       return response;
     }
     console.warn("[ds] startStreamDownload FALLBACK=helper (content script returned error)");
