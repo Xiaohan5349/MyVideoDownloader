@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.6.6 - 2026-08-16
+
+### Fixed
+- Rescan now keeps webRequest-discovered media that DOM scanning cannot replay, while replacing DOM-scan results.
+
 ## v1.6.5 - 2026-08-16
 
 ### Fixed

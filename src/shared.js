@@ -166,6 +166,7 @@ export function normalizeMediaItem(input, fallback = {}) {
     url: input.url,
     sourcePageUrl,
     pageUrl: typeof input.pageUrl === "string" ? input.pageUrl : "",
+    source: typeof input.source === "string" ? input.source : "dom",
     title,
     extension,
     kind: input.kind || classified.kind,

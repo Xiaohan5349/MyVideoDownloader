@@ -32,7 +32,7 @@ let statusPending = false;
 rescanButton.addEventListener("click", async () => {
   if (!activeTab?.id) return;
   // Clear first so rescan replaces the previous page results instead of merging.
-  await chrome.runtime.sendMessage({ type: "page:clearMedia", tabId: activeTab.id }).catch(() => {});
+  await chrome.runtime.sendMessage({ type: "page:clearMedia", tabId: activeTab.id, keepNetwork: true }).catch(() => {});
   const response = await chrome.tabs.sendMessage(activeTab.id, { type: "page:rescan" }).catch(() => null);
   if (!response?.ok) {
     showNotice(response?.error || getMessage("msgCouldNotReadMedia"), true);

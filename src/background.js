@@ -4,7 +4,7 @@ import {
   normalizeMediaItem, parseDashManifest, parseHlsManifest, sanitizeFilename
 } from "./shared.js";
 
-console.log("[ds] Service worker started v1.6.5");
+console.log("[ds] Service worker started v1.6.6");
 
 const SETTINGS_KEY = "settings";
 const TAB_MEDIA_PREFIX = "tabMedia:";
@@ -69,11 +69,22 @@ async function handleMessage(message, sender) {
   if (DEBUG) console.warn("[ds] handleMessage type=", message?.type);
   if (!message || typeof message !== "object") return { ok: false, error: "INVALID_MESSAGE" };
 
-  // Content script navigation — clear stale data
+  // Content script navigation / rescan — clear stale data
   if (message.type === "page:clearMedia") {
     const tabId = message.tabId ?? sender.tab?.id;
     if (typeof tabId === "number") {
-      await enqueueTabMediaMutation(tabId, () => chrome.storage.local.remove(tabKey(tabId)));
+      if (message.keepNetwork) {
+        // Rescan: keep only webRequest-discovered media because a DOM rescan
+        // cannot replay those network events.
+        await enqueueTabMediaMutation(tabId, async () => {
+          const current = await getMedia(tabId);
+          await chrome.storage.local.set({
+            [tabKey(tabId)]: current.filter((item) => item.source === "network")
+          });
+        });
+      } else {
+        await enqueueTabMediaMutation(tabId, () => chrome.storage.local.remove(tabKey(tabId)));
+      }
     }
     return { ok: true };
   }
@@ -184,6 +195,7 @@ async function detectFromNetwork(details) {
     frameId: Number.isInteger(details.frameId) && details.frameId >= 0 ? details.frameId : null,
     tabId: details.tabId,
     pageUrl: tab.url || "",
+    source: "network",
     size: responseContentLength(details.responseHeaders),
     headers: requestHeadersById.get(details.requestId) || cachedHeadersForUrl(url)
   });

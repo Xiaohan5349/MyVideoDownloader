@@ -431,6 +431,24 @@ test("network detection keeps m3u8 URLs whose query contains an image extension"
   assert.ok(stored["tabMedia:10"]?.some((entry) => entry.url === "https://cdn.example.com/master.m3u8?poster=cover.jpg"));
 });
 
+test("page:clearMedia keepNetwork preserves network-detected media only", async () => {
+  await mock.storage.local.set({
+    "tabMedia:10": [
+      { id: "dom-item", url: "https://cdn.example.com/dom.mp4", source: "dom", sourcePageUrl: "https://site.example", pageUrl: "https://site.example", title: "DOM", kind: "direct", extension: "mp4" },
+      { id: "net-item", url: "https://cdn.example.com/net.mp4", source: "network", sourcePageUrl: "https://site.example", pageUrl: "https://site.example", title: "Net", kind: "direct", extension: "mp4" }
+    ]
+  });
+
+  const response = await sendRuntimeMessage(
+    { type: "page:clearMedia", tabId: 10, keepNetwork: true },
+    { tab: { id: 10, url: "https://site.example" } }
+  );
+  assert.equal(response.ok, true);
+  const stored = await mock.storage.local.get("tabMedia:10");
+  assert.equal(stored["tabMedia:10"].length, 1);
+  assert.equal(stored["tabMedia:10"][0].id, "net-item");
+});
+
 test("page:clearMedia removes the tab media cache", async () => {
   await mock.storage.local.set({ "tabMedia:10": [{ url: "x", id: "x" }] });
   const response = await sendRuntimeMessage(
