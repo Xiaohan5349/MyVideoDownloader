@@ -31,6 +31,8 @@ let statusPending = false;
 
 rescanButton.addEventListener("click", async () => {
   if (!activeTab?.id) return;
+  // Clear first so rescan replaces the previous page results instead of merging.
+  await chrome.runtime.sendMessage({ type: "page:clearMedia", tabId: activeTab.id }).catch(() => {});
   await chrome.tabs.sendMessage(activeTab.id, { type: "page:rescan" }).catch(() => {});
   window.setTimeout(loadMedia, 300);
 });

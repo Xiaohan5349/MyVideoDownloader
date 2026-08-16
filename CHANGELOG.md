@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.6.4 - 2026-08-16
+
+### Fixed
+- Direct media with unknown size now gets probed from page context via HEAD / Range when the popup loads.
+- Rescan now clears the previous page cache before scanning, so old results are replaced instead of merged.
+
 ## v1.6.3 - 2026-08-16
 
 ### Fixed

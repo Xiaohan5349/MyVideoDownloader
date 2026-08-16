@@ -179,6 +179,33 @@ test("concurrent MEDIA_ADD_DETECTED calls do not overwrite each other", async ()
   ]);
 });
 
+test("MEDIA_GET_FOR_TAB enriches unknown direct media size from the page", async () => {
+  await mock.storage.local.set({
+    "tabMedia:10": [{
+      id: "https://site.example::https://cdn.example.com/video.mp4",
+      url: "https://cdn.example.com/video.mp4",
+      sourcePageUrl: "https://site.example",
+      pageUrl: "https://site.example",
+      title: "Direct",
+      extension: "mp4",
+      kind: "direct",
+      tabId: 10,
+      frameId: 0,
+      size: null,
+      quality: "",
+      detectedAt: 5,
+      headers: [],
+      variants: []
+    }]
+  });
+  mock.tabs.sendMessageResult = { ok: true, size: 456789012 };
+
+  const response = await sendRuntimeMessage({ type: "media:getForTab", tabId: 10 });
+  assert.equal(response.ok, true);
+  assert.equal(response.items[0].size, 456789012);
+  assert.equal(response.items[0].sizeSource, "exact");
+});
+
 test("MEDIA_GET_FOR_TAB keeps same-title direct media with different URLs", async () => {
   await mock.storage.local.set({
     "tabMedia:10": [

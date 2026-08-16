@@ -4,7 +4,7 @@ import {
   normalizeMediaItem, parseDashManifest, parseHlsManifest, sanitizeFilename
 } from "./shared.js";
 
-console.log("[ds] Service worker started v1.6.3");
+console.log("[ds] Service worker started v1.6.4");
 
 const SETTINGS_KEY = "settings";
 const TAB_MEDIA_PREFIX = "tabMedia:";
@@ -275,6 +275,7 @@ async function enrichMediaForTab(tabId) {
 }
 
 async function enrichMediaItem(item) {
+  if (item.kind === "direct" && !item.size) return enrichDirectMediaSize(item);
   if (item.kind !== "hls" && item.kind !== "dash") return item;
   if ((item.variants?.length || 0) && (item.estimatedSize || item.size)) return item;
 
@@ -313,6 +314,22 @@ async function enrichMediaItem(item) {
     };
   } catch {
     // Content script might not respond — keep original item
+    return item;
+  }
+}
+
+async function enrichDirectMediaSize(item) {
+  const tabId = await resolveTabId(item);
+  if (typeof tabId !== "number") return item;
+  try {
+    const response = await chrome.tabs.sendMessage(tabId, {
+      type: "page:fetchSize",
+      url: item.url
+    }, { frameId: item.frameId ?? 0 });
+    const size = Number(response?.size);
+    if (!response?.ok || !Number.isFinite(size) || size <= 0) return item;
+    return { ...item, size, sizeSource: "exact" };
+  } catch {
     return item;
   }
 }

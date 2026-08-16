@@ -84,6 +84,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true; // async response
   }
 
+  // Probe a direct media URL size with page-context Referer/cookies.
+  if (message?.type === "page:fetchSize") {
+    fetchSizeFromPage(message.url || "")
+      .then((size) => sendResponse({ ok: size != null, size }))
+      .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
+    return true; // async response
+  }
+
   // Full HLS download: fetch manifest → parse segments → fetch + upload
   if (message?.type === "page:downloadStream") {
     console.warn("[ds-content] page:downloadStream received url=", (message.payload?.manifestUrl || "").slice(0, 80));
@@ -121,6 +129,41 @@ async function fetchTextFromPage(url) {
     throw error;
   } finally {
     clearTimeout(timer);
+  }
+}
+
+async function fetchSizeFromPage(url) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), SEGMENT_FETCH_TIMEOUT_MS);
+  try {
+    let response = await fetch(url, { method: "HEAD", cache: "no-store", signal: controller.signal });
+    if (response.ok) {
+      const length = Number(response.headers.get("content-length"));
+      if (Number.isFinite(length) && length > 0) return length;
+    }
+
+    response = await fetch(url, {
+      method: "GET",
+      headers: { Range: "bytes=0-0" },
+      cache: "no-store",
+      signal: controller.signal
+    });
+
+    const contentRange = response.headers.get("content-range") || "";
+    if (response.status === 206 && contentRange) {
+      const total = Number(contentRange.split("/").pop());
+      if (Number.isFinite(total) && total > 0) return total;
+    }
+    if (response.ok) {
+      const length = Number(response.headers.get("content-length"));
+      if (Number.isFinite(length) && length > 0) return length;
+    }
+    return null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+    try { controller.abort(); } catch {}
   }
 }
 
