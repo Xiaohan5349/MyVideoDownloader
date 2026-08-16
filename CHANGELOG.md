@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.6.3 - 2026-08-16
+
+### Fixed
+- Removed fuzzy direct-media deduplication that could hide different 360p/720p/1080p MP4 URLs.
+- Manifest enrichment now merges into the latest media list inside the same per-tab mutation queue as detection, so new videos detected during inspection are no longer overwritten.
+- Stale enrichment results are filtered by the current tab URL, so navigating away cannot revive old-page media.
+
+### Changed
+- Direct-media titles display quality/size when available to make duplicate candidates distinguishable.
+
 ## v1.6.2 - 2026-08-16
 
 ### Fixed

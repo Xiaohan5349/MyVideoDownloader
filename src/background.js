@@ -4,7 +4,7 @@ import {
   normalizeMediaItem, parseDashManifest, parseHlsManifest, sanitizeFilename
 } from "./shared.js";
 
-console.log("[ds] Service worker started v1.6.2");
+console.log("[ds] Service worker started v1.6.3");
 
 const SETTINGS_KEY = "settings";
 const TAB_MEDIA_PREFIX = "tabMedia:";
@@ -17,7 +17,7 @@ const DEBUG = true;
 
 const requestHeadersById = new Map();
 const requestHeadersByUrl = new Map();
-const addMediaChains = new Map();
+const tabMediaMutationChains = new Map();
 const MAX_CAPTURED_HEADERS = 500;
 
 // --- Message routing ---
@@ -51,7 +51,7 @@ chrome.webRequest.onHeadersReceived.addListener(
 
 // Cleanup stale tab data
 chrome.tabs.onRemoved.addListener((tabId) => {
-  chrome.storage.local.remove(tabKey(tabId));
+  enqueueTabMediaMutation(tabId, () => chrome.storage.local.remove(tabKey(tabId))).catch(() => {});
 });
 
 // Full-page navigation destroys the old content script before it can send
@@ -59,7 +59,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 // URL; same-document navigations are still handled by the content script.
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.status === "loading" && changeInfo.url) {
-    chrome.storage.local.remove(tabKey(tabId));
+    enqueueTabMediaMutation(tabId, () => chrome.storage.local.remove(tabKey(tabId))).catch(() => {});
   }
 });
 
@@ -73,7 +73,7 @@ async function handleMessage(message, sender) {
   if (message.type === "page:clearMedia") {
     const tabId = message.tabId ?? sender.tab?.id;
     if (typeof tabId === "number") {
-      await chrome.storage.local.remove(tabKey(tabId));
+      await enqueueTabMediaMutation(tabId, () => chrome.storage.local.remove(tabKey(tabId)));
     }
     return { ok: true };
   }
@@ -103,7 +103,7 @@ async function handleMessage(message, sender) {
     const tab = await chrome.tabs.get(tabId).catch(() => null);
     return {
       ok: true,
-      items: dedupeDirectMedia(items.filter((item) => shouldKeepMedia(item, settings) && mediaMatchesTab(item, tab?.url || "")))
+      items: items.filter((item) => shouldKeepMedia(item, settings) && mediaMatchesTab(item, tab?.url || ""))
     };
   }
 
@@ -195,13 +195,18 @@ async function detectFromNetwork(details) {
 // --- Media management ---
 
 function addMedia(tabId, additions, fallback = {}) {
-  const previous = addMediaChains.get(tabId) || Promise.resolve();
-  const task = previous.then(() => addMediaInternal(tabId, additions, fallback));
-  addMediaChains.set(tabId, task);
-  task.finally(() => {
-    if (addMediaChains.get(tabId) === task) addMediaChains.delete(tabId);
-  }).catch(() => {});
-  return task;
+  return enqueueTabMediaMutation(tabId, () => addMediaInternal(tabId, additions, fallback));
+}
+
+function enqueueTabMediaMutation(tabId, operation) {
+  const previous = tabMediaMutationChains.get(tabId) || Promise.resolve();
+  const task = previous.catch(() => {}).then(operation);
+  const tracked = task.finally(() => {
+    if (tabMediaMutationChains.get(tabId) === tracked) tabMediaMutationChains.delete(tabId);
+  });
+  tabMediaMutationChains.set(tabId, tracked);
+  tracked.catch(() => {});
+  return tracked;
 }
 
 async function addMediaInternal(tabId, additions, fallback = {}) {
@@ -251,13 +256,22 @@ function withTimeout(promise, timeoutMs, fallback) {
 }
 
 async function enrichMediaForTab(tabId) {
-  const items = await getMedia(tabId);
-  const enriched = await Promise.all(items.map((item) =>
+  const snapshot = await getMedia(tabId);
+  const enriched = await Promise.all(snapshot.map((item) =>
     withTimeout(enrichMediaItem(item), ENRICH_ITEM_TIMEOUT_MS, item)
   ));
-  const changed = enriched.some((item, index) => JSON.stringify(item) !== JSON.stringify(items[index]));
-  if (changed) await chrome.storage.local.set({ [tabKey(tabId)]: enriched });
-  return enriched;
+
+  // Manifest inspection happens outside the write queue so new detections
+  // can keep flowing. Only the final merge + write is serialized.
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  const validEnriched = enriched.filter((item) => mediaMatchesTab(item, tab?.url || ""));
+
+  return enqueueTabMediaMutation(tabId, async () => {
+    const latest = await getMedia(tabId);
+    const merged = addUniqueMedia(latest, validEnriched);
+    await chrome.storage.local.set({ [tabKey(tabId)]: merged.slice(0, 30) });
+    return merged;
+  });
 }
 
 async function enrichMediaItem(item) {
@@ -637,22 +651,6 @@ function responseContentLength(headers) {
     if (Number.isFinite(total) && total > 0) return total;
   }
   return numberHeader(headers, "content-length");
-}
-
-function dedupeDirectMedia(items) {
-  const seen = new Set();
-  return items.filter((item) => {
-    if (item.kind !== "direct") return true;
-    const key = [
-      item.title || "video",
-      item.extension || "",
-      item.size ?? "",
-      item.estimatedSize ?? ""
-    ].join("|");
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
 }
 
 function sanitizeHeaders(headers) {

@@ -1,6 +1,6 @@
 {
   "name": "ds-video-downloader",
-  "version": "1.6.2",
+  "version": "1.6.3",
   "private": true,
   "type": "module",
   "scripts": {

@@ -68,6 +68,9 @@ function createChromeMock() {
       async sendMessage(tabId, message, options) {
         mock.tabs.sendMessageCalls.push({ tabId, message, options });
         if (mock.tabs.sendMessageError) throw mock.tabs.sendMessageError;
+        if (mock.tabs.sendMessageDeferred) {
+          return mock.tabs.sendMessageDeferred.promise;
+        }
         return mock.tabs.sendMessageResult;
       },
       tabsById: {},
@@ -75,6 +78,7 @@ function createChromeMock() {
       sendMessageCalls: [],
       sendMessageResult: { ok: true },
       sendMessageError: null,
+      sendMessageDeferred: null,
     },
     permissions: {
       async contains() { return true; },
@@ -94,6 +98,7 @@ function createChromeMock() {
       mock.tabs.sendMessageCalls = [];
       mock.tabs.sendMessageResult = { ok: true };
       mock.tabs.sendMessageError = null;
+      mock.tabs.sendMessageDeferred = null;
     },
   };
 
@@ -174,6 +179,98 @@ test("concurrent MEDIA_ADD_DETECTED calls do not overwrite each other", async ()
   ]);
 });
 
+test("MEDIA_GET_FOR_TAB keeps same-title direct media with different URLs", async () => {
+  await mock.storage.local.set({
+    "tabMedia:10": [
+      {
+        id: "https://site.example::https://cdn.example.com/a.mp4",
+        url: "https://cdn.example.com/a.mp4",
+        sourcePageUrl: "https://site.example",
+        pageUrl: "https://site.example",
+        title: "Same Title",
+        extension: "mp4",
+        kind: "direct",
+        quality: "360p",
+        detectedAt: 3,
+        headers: [],
+        variants: []
+      },
+      {
+        id: "https://site.example::https://cdn.example.com/b.mp4",
+        url: "https://cdn.example.com/b.mp4",
+        sourcePageUrl: "https://site.example",
+        pageUrl: "https://site.example",
+        title: "Same Title",
+        extension: "mp4",
+        kind: "direct",
+        quality: "720p",
+        detectedAt: 2,
+        headers: [],
+        variants: []
+      }
+    ]
+  });
+
+  const response = await sendRuntimeMessage({
+    type: "media:getForTab",
+    tabId: 10,
+  });
+  assert.equal(response.ok, true);
+  assert.equal(response.items.length, 2);
+  assert.deepEqual(response.items.map((item) => item.url).sort(), [
+    "https://cdn.example.com/a.mp4",
+    "https://cdn.example.com/b.mp4"
+  ]);
+});
+
+test("enrichment write-back merges with media detected during manifest inspection", async () => {
+  await mock.storage.local.set({
+    "tabMedia:10": [{
+      id: "https://site.example::https://cdn.example.com/master.m3u8",
+      url: "https://cdn.example.com/master.m3u8",
+      sourcePageUrl: "https://site.example",
+      pageUrl: "https://site.example",
+      title: "Stream",
+      extension: "m3u8",
+      kind: "hls",
+      tabId: 10,
+      frameId: 0,
+      quality: "",
+      detectedAt: 5,
+      headers: [],
+      variants: []
+    }]
+  });
+
+  let releaseManifestFetch;
+  mock.tabs.sendMessageDeferred = {
+    promise: new Promise((resolve) => { releaseManifestFetch = resolve; })
+  };
+
+  const getPromise = sendRuntimeMessage({ type: "media:getForTab", tabId: 10 });
+
+  // Wait until the manifest fetch is in flight, then detect a new video.
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  await sendRuntimeMessage(
+    {
+      type: MESSAGE.MEDIA_ADD_DETECTED,
+      items: [{ url: "https://cdn.example.com/new.mp4", sourcePageUrl: "https://site.example", title: "New", extension: "mp4", kind: "direct" }]
+    },
+    { tab: { id: 10, url: "https://site.example", title: "Site" }, frameId: 0 }
+  );
+
+  releaseManifestFetch({ ok: false });
+  const response = await getPromise;
+
+  assert.equal(response.ok, true);
+  const stored = await mock.storage.local.get("tabMedia:10");
+  const urls = stored["tabMedia:10"].map((item) => item.url).sort();
+  assert.deepEqual(urls, [
+    "https://cdn.example.com/master.m3u8",
+    "https://cdn.example.com/new.mp4"
+  ]);
+});
+
 test("MEDIA_ADD_DETECTED replaces media from a previous page URL", async () => {
   await sendRuntimeMessage(
     {
@@ -213,6 +310,7 @@ test("tab main-frame navigation clears the previous page media", async () => {
   const handler = mock.listeners.onTabUpdated;
   assert.ok(handler, "tabs.onUpdated listener should be registered");
   handler(10, { status: "loading", url: "https://site.example/new" });
+  await new Promise((resolve) => setTimeout(resolve, 10));
   const stored = await mock.storage.local.get("tabMedia:10");
   assert.equal(stored["tabMedia:10"], undefined);
 });

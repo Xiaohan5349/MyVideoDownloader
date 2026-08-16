@@ -85,6 +85,23 @@ test("addUniqueMedia deduplicates by page and URL", () => {
   assert.equal(second[0].title, "A updated");
 });
 
+test("addUniqueMedia keeps different direct URLs even when title/size match", () => {
+  const items = addUniqueMedia([], [
+    { url: "https://cdn.example.com/a.mp4", sourcePageUrl: "https://site.example", title: "Same", extension: "mp4", kind: "direct", quality: "360p", size: null },
+    { url: "https://cdn.example.com/b.mp4", sourcePageUrl: "https://site.example", title: "Same", extension: "mp4", kind: "direct", quality: "720p", size: null },
+    { url: "https://cdn.example.com/c.mp4", sourcePageUrl: "https://site.example", title: "Same", extension: "mp4", kind: "direct", size: 12345 },
+    { url: "https://cdn.example.com/d.mp4", sourcePageUrl: "https://site.example", title: "Same", extension: "mp4", kind: "direct", size: 12345 },
+    { url: "https://cdn.example.com/a.mp4", sourcePageUrl: "https://site.example", title: "Same", extension: "mp4", kind: "direct" }
+  ]);
+  assert.equal(items.length, 4);
+  assert.deepEqual(items.map((item) => item.url).sort(), [
+    "https://cdn.example.com/a.mp4",
+    "https://cdn.example.com/b.mp4",
+    "https://cdn.example.com/c.mp4",
+    "https://cdn.example.com/d.mp4"
+  ]);
+});
+
 test("parseHlsManifest extracts variants and DRM state", () => {
   const parsed = parseHlsManifest(
     [
