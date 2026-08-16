@@ -197,11 +197,16 @@ export function addUniqueMedia(existing = [], additions = []) {
   return Array.from(byId.values()).sort((a, b) => b.detectedAt - a.detectedAt);
 }
 
+const SOURCE_PRIORITY = { network: 3, main: 2, dom: 1 };
+
 function mergeMediaItems(previous, incoming) {
+  const previousPriority = SOURCE_PRIORITY[previous.source] || 1;
+  const incomingPriority = SOURCE_PRIORITY[incoming.source] || 1;
   return {
     ...previous,
     ...incoming,
     url: incoming.url || previous.url,
+    source: incomingPriority >= previousPriority ? incoming.source : previous.source,
     sourcePageUrl: incoming.sourcePageUrl || previous.sourcePageUrl,
     pageUrl: incoming.pageUrl || previous.pageUrl || "",
     title: incoming.title && incoming.title !== "video" ? incoming.title : previous.title || incoming.title,

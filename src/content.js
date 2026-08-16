@@ -43,7 +43,8 @@ document.addEventListener("ds-video-downloader-found", (event) => {
         rememberUrl(url);
         const item = normalizeMediaItem({
           url, sourcePageUrl: location.href, title: document.title || "video",
-          extension: classified.extension, kind: classified.kind
+          extension: classified.extension, kind: classified.kind,
+          source: "main"
         });
         if (item) items.push(item);
       }
@@ -637,6 +638,7 @@ function normalizeMediaItem(input) {
   return {
     id: `${input.sourcePageUrl || "unknown"}::${input.url}`,
     url: input.url,
+    source: input.source || "dom",
     sourcePageUrl: input.sourcePageUrl || "",
     title: input.title || "video",
     extension: declaredExtension || classified.extension,

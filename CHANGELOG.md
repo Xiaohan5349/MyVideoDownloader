@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.6.7 - 2026-08-16
+
+### Fixed
+- Network-detected media no longer loses its source when the same URL is later detected by DOM scan.
+- MAIN-world discoveries are now tagged as `main` and preserved during Rescan, matching network media.
+
 ## v1.6.6 - 2026-08-16
 
 ### Fixed

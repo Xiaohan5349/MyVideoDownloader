@@ -435,7 +435,8 @@ test("page:clearMedia keepNetwork preserves network-detected media only", async 
   await mock.storage.local.set({
     "tabMedia:10": [
       { id: "dom-item", url: "https://cdn.example.com/dom.mp4", source: "dom", sourcePageUrl: "https://site.example", pageUrl: "https://site.example", title: "DOM", kind: "direct", extension: "mp4" },
-      { id: "net-item", url: "https://cdn.example.com/net.mp4", source: "network", sourcePageUrl: "https://site.example", pageUrl: "https://site.example", title: "Net", kind: "direct", extension: "mp4" }
+      { id: "net-item", url: "https://cdn.example.com/net.mp4", source: "network", sourcePageUrl: "https://site.example", pageUrl: "https://site.example", title: "Net", kind: "direct", extension: "mp4" },
+      { id: "main-item", url: "https://cdn.example.com/main.m3u8", source: "main", sourcePageUrl: "https://site.example", pageUrl: "https://site.example", title: "Main", kind: "hls", extension: "m3u8" }
     ]
   });
 
@@ -445,8 +446,7 @@ test("page:clearMedia keepNetwork preserves network-detected media only", async 
   );
   assert.equal(response.ok, true);
   const stored = await mock.storage.local.get("tabMedia:10");
-  assert.equal(stored["tabMedia:10"].length, 1);
-  assert.equal(stored["tabMedia:10"][0].id, "net-item");
+  assert.deepEqual(stored["tabMedia:10"].map((item) => item.id).sort(), ["main-item", "net-item"]);
 });
 
 test("page:clearMedia removes the tab media cache", async () => {

@@ -85,6 +85,44 @@ test("addUniqueMedia deduplicates by page and URL", () => {
   assert.equal(second[0].title, "A updated");
 });
 
+test("addUniqueMedia keeps network source when the same URL is redetected by DOM", () => {
+  const networkFirst = addUniqueMedia([], [{
+    url: "https://cdn.example.com/video.mp4",
+    sourcePageUrl: "https://site.example",
+    title: "Video",
+    extension: "mp4",
+    kind: "direct",
+    source: "network"
+  }]);
+  const afterDom = addUniqueMedia(networkFirst, [{
+    url: "https://cdn.example.com/video.mp4",
+    sourcePageUrl: "https://site.example",
+    title: "Video",
+    extension: "mp4",
+    kind: "direct",
+    source: "dom"
+  }]);
+  assert.equal(afterDom[0].source, "network");
+
+  const domFirst = addUniqueMedia([], [{
+    url: "https://cdn.example.com/video.mp4",
+    sourcePageUrl: "https://site.example",
+    title: "Video",
+    extension: "mp4",
+    kind: "direct",
+    source: "dom"
+  }]);
+  const afterNetwork = addUniqueMedia(domFirst, [{
+    url: "https://cdn.example.com/video.mp4",
+    sourcePageUrl: "https://site.example",
+    title: "Video",
+    extension: "mp4",
+    kind: "direct",
+    source: "network"
+  }]);
+  assert.equal(afterNetwork[0].source, "network");
+});
+
 test("addUniqueMedia keeps different direct URLs even when title/size match", () => {
   const items = addUniqueMedia([], [
     { url: "https://cdn.example.com/a.mp4", sourcePageUrl: "https://site.example", title: "Same", extension: "mp4", kind: "direct", quality: "360p", size: null },

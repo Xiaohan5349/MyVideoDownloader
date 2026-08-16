@@ -4,7 +4,7 @@ import {
   normalizeMediaItem, parseDashManifest, parseHlsManifest, sanitizeFilename
 } from "./shared.js";
 
-console.log("[ds] Service worker started v1.6.6");
+console.log("[ds] Service worker started v1.6.7");
 
 const SETTINGS_KEY = "settings";
 const TAB_MEDIA_PREFIX = "tabMedia:";
@@ -74,12 +74,12 @@ async function handleMessage(message, sender) {
     const tabId = message.tabId ?? sender.tab?.id;
     if (typeof tabId === "number") {
       if (message.keepNetwork) {
-        // Rescan: keep only webRequest-discovered media because a DOM rescan
-        // cannot replay those network events.
+        // Rescan: keep webRequest and MAIN-world discoveries because DOM
+        // rescanning cannot replay either of those sources.
         await enqueueTabMediaMutation(tabId, async () => {
           const current = await getMedia(tabId);
           await chrome.storage.local.set({
-            [tabKey(tabId)]: current.filter((item) => item.source === "network")
+            [tabKey(tabId)]: current.filter((item) => item.source === "network" || item.source === "main")
           });
         });
       } else {
