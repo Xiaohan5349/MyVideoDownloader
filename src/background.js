@@ -4,7 +4,7 @@ import {
   normalizeMediaItem, parseDashManifest, parseHlsManifest, sanitizeFilename
 } from "./shared.js";
 
-console.log("[ds] Service worker started v1.5.0");
+console.log("[ds] Service worker started v1.6.0");
 
 const SETTINGS_KEY = "settings";
 const TAB_MEDIA_PREFIX = "tabMedia:";
@@ -420,7 +420,7 @@ async function getHelperStatus() {
   try {
     const [healthRes, jobsRes] = await Promise.all([
       fetch(`${HELPER_URL}/health`),
-      fetch(`${HELPER_URL}/jobs`)
+      fetch(`${HELPER_URL}/jobs?limit=20`)
     ]);
     const health = await healthRes.json().catch(() => ({}));
     const jobs = await jobsRes.json().catch(() => ({}));
@@ -437,7 +437,8 @@ async function getHelperStatus() {
       ok: healthRes.ok && jobsRes.ok,
       online: healthRes.ok,
       health,
-      jobs: jobsList
+      jobs: jobsList,
+      stats: jobs.stats || null
     };
   } catch {
     const cached = await chrome.storage.local.get("recentJobs").catch(() => ({}));

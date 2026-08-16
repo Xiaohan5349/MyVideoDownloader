@@ -17,7 +17,7 @@ process.env.JOBS_PATH = path.join(process.env.DOWNLOAD_DIR, "helper-jobs.json");
 // Dynamic import to get server reference
 const serverPath = pathToFileURL(path.join(__dirname, "..", "helper", "server.js")).href;
 const serverModule = await import(serverPath);
-const { server, jobs, isSafeDownloadPath, sweepStalledJobs } = serverModule;
+const { server, jobs, isSafeDownloadPath, sweepStalledJobs, enforceJobHistoryCap } = serverModule;
 
 let baseUrl;
 
@@ -263,6 +263,48 @@ it("marks a running job failed when downloaded bytes stop advancing", async () =
   assert.equal(jobs.get(id).error, "DOWNLOAD_STALLED");
 });
 
+it("GET /jobs supports limit, offset, total, and global stats", async () => {
+  const page1 = await fetchJson("/jobs?limit=2&offset=0");
+  assert.equal(page1.status, 200);
+  assert.equal(page1.body.limit, 2);
+  assert.equal(page1.body.offset, 0);
+  assert.equal(page1.body.total, jobs.size);
+  assert.ok(page1.body.jobs.length <= 2);
+  assert.equal(typeof page1.body.stats.active, "number");
+  assert.equal(typeof page1.body.stats.downloadedBytes, "number");
+
+  const page2 = await fetchJson("/jobs?limit=2&offset=2");
+  assert.equal(page2.status, 200);
+  assert.equal(page2.body.offset, 2);
+});
+
+it("enforceJobHistoryCap drops only old missing records above the cap", async () => {
+  const addedIds = [];
+  const existingCount = jobs.size;
+  const toAdd = 5005 - existingCount;
+  for (let index = 0; index < toAdd; index += 1) {
+    const id = `cap-test-${index}`;
+    jobs.set(id, {
+      id,
+      status: index % 2 === 0 ? "missing" : "completed",
+      startedAt: new Date(Date.UTC(2020, 0, 1, 0, index)).toISOString(),
+      outputPath: "/tmp/cap-test.mp4",
+      downloadDir: process.env.DOWNLOAD_DIR
+    });
+    addedIds.push(id);
+  }
+
+  const removed = enforceJobHistoryCap();
+  assert.ok(jobs.size <= 5000);
+  assert.ok(removed > 0);
+  for (const id of addedIds) {
+    if (jobs.get(id)?.status === "completed") {
+      assert.ok(jobs.has(id), `completed record ${id} should survive the cap`);
+    }
+    jobs.delete(id);
+  }
+});
+
 it("GET /jobs marks completed history missing after its output is removed", async () => {
   const id = "externally-deleted-job";
   const outputPath = path.join(process.env.DOWNLOAD_DIR, "deleted-outside-helper.mp4");
@@ -360,6 +402,24 @@ it("DELETE /jobs/:id/history removes every non-active record without deleting ou
     assert.equal(rejected.body.error, "JOB_HISTORY_NOT_REMOVABLE");
     assert.equal(jobs.has(id), true);
   }
+});
+
+it("cancel persists completed state fields before returning", async () => {
+  const start = await fetchJson("/browser-downloads/start", {
+    method: "POST",
+    body: { url: "https://cdn.example.com/video.m3u8", title: "Cancel Persist", totalSegments: 1 },
+  });
+  const jobId = start.body.job.id;
+  jobs.get(jobId).etaSeconds = 123;
+
+  const cancel = await fetchJson(`/jobs/${encodeURIComponent(jobId)}/cancel`, { method: "POST" });
+  assert.equal(cancel.status, 200);
+
+  const persisted = JSON.parse(await readFile(process.env.JOBS_PATH, "utf8"));
+  const saved = persisted.find((job) => job.id === jobId);
+  assert.equal(saved.status, "cancelled");
+  assert.equal(saved.etaSeconds, null);
+  assert.ok(saved.finishedAt);
 });
 
 it("POST /browser-downloads/start rejects fractional totalSegments", async () => {

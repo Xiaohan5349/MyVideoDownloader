@@ -125,6 +125,7 @@ async function loadHelperStatus() {
     const online = Boolean(response?.online);
     const liveJobs = response?.jobs || [];
     const cachedJobs = response?.cachedJobs || [];
+    const stats = response?.stats || null;
     const downloadDir = response?.health?.downloadDir || "";
 
     console.log("[ds-video-downloader] loadHelperStatus online=%s jobs=%d cached=%d",
@@ -138,8 +139,10 @@ async function loadHelperStatus() {
     ].sort((a, b) => (b.startedAt || "").localeCompare(a.startedAt || "")).slice(0, 20);
 
     try {
+      const activeCount = stats ? stats.active : runningCount(liveJobs);
+      const totalCount = stats ? stats.total : liveJobs.length;
       helperSummary.textContent = online
-        ? getMessage("msgActiveJobs", { active: String(runningCount(liveJobs)), total: String(liveJobs.length), plural: liveJobs.length === 1 ? "" : "s" })
+        ? getMessage("msgActiveJobs", { active: String(activeCount), total: String(totalCount), plural: totalCount === 1 ? "" : "s" })
         : getMessage("statusHelperOffline");
       helperStatus.className = `helper-status ${online ? "is-online" : "is-offline"}`;
       helperStatus.textContent = online

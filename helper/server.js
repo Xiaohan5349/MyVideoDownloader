@@ -22,8 +22,12 @@ const SIZE_PROBE_LIMIT = Number(process.env.SIZE_PROBE_LIMIT || 1500);
 const SIZE_PROBE_CONCURRENCY = Number(process.env.SIZE_PROBE_CONCURRENCY || 8);
 const SIZE_PROBE_TIMEOUT_MS = Number(process.env.SIZE_PROBE_TIMEOUT_MS || 5000);
 const JOB_STALL_TIMEOUT_MS = Number(process.env.JOB_STALL_TIMEOUT_MS || 120_000);
+const MAX_JOB_HISTORY = 5000;
+const JOBS_PAGE_SIZE_DEFAULT = 50;
+const JOBS_PAGE_SIZE_MAX = 500;
 const jobs = new Map();
 const jobProcesses = new Map();
+const uploadLocks = new Map();
 
 async function loadJobsFromDisk() {
   try {
@@ -44,7 +48,9 @@ async function loadJobsFromDisk() {
         jobs.set(job.id, job);
       }
     }
-    console.log(`Loaded ${jobs.size} jobs from history`);
+    const removed = enforceJobHistoryCap();
+    if (removed > 0) await persistJobsNow();
+    console.log(`Loaded ${jobs.size} jobs from history${removed > 0 ? ` (removed ${removed} missing records over cap)` : ""}`);
   } catch {
     // No history file yet — that's fine
   }
@@ -62,8 +68,9 @@ function persistJobsToDisk() {
       await writeFile(tmpPath, data, "utf8");
       await rename(tmpPath, JOBS_PATH);
     })
-    .catch(() => {
-      // Silently fail — persistence is best-effort
+    .catch((error) => {
+      // Persistence is best-effort, but make failures visible for diagnostics.
+      console.warn("[helper] failed to persist helper-jobs.json:", error?.message || error);
     });
   return persistJobsChain;
 }
@@ -157,9 +164,18 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    if (req.method === "GET" && req.url === "/jobs") {
+    if (req.method === "GET" && new URL(req.url || "/jobs", "http://127.0.0.1").pathname === "/jobs") {
       await reconcileAllJobFiles();
-      writeJson(res, 200, { ok: true, jobs: Array.from(jobs.values()).reverse() });
+      const page = parseJobsPage(req.url);
+      const allJobs = Array.from(jobs.values()).reverse();
+      writeJson(res, 200, {
+        ok: true,
+        jobs: allJobs.slice(page.offset, page.offset + page.limit),
+        total: allJobs.length,
+        limit: page.limit,
+        offset: page.offset,
+        stats: buildJobStats()
+      });
       return;
     }
 
@@ -186,7 +202,7 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "POST" && /^\/jobs\/[^/]+\/cancel$/.test(req.url || "")) {
       const id = decodeURIComponent(req.url.split("/")[2] || "");
-      const result = cancelJob(id);
+      const result = await cancelJob(id);
       writeJson(res, result.ok ? 200 : result.status || 400, result);
       return;
     }
@@ -266,7 +282,7 @@ if (process.env.NODE_ENV !== "test") {
   });
 }
 
-export { server, jobs, isSafeDownloadPath, persistJobsToDisk, sweepStalledJobs };
+export { server, jobs, isSafeDownloadPath, persistJobsToDisk, sweepStalledJobs, enforceJobHistoryCap };
 
 async function startDownload(payload) {
   const url = validateUrl(payload?.url);
@@ -308,6 +324,7 @@ async function startDownload(payload) {
     log: []
   };
   jobs.set(id, job);
+  enforceJobHistoryCap();
   persistJobsToDisk();
 
   runFfmpeg(job, headers);
@@ -318,18 +335,19 @@ async function startBrowserDownload(payload) {
   const url = validateUrl(payload?.url);
   if (!url) return { ok: false, status: 400, error: "INVALID_URL" };
 
-  const id = randomUUID();
-  const filename = buildFilename(payload.title || "video", url);
-  const outputPath = await uniqueOutputPath(path.join(downloadDir, filename));
-  const tempDir = path.join(tmpdir(), `ds-video-browser-${id}`);
-  await mkdir(tempDir, { recursive: true });
-
   const totalBytes = Number(payload.totalBytes);
   const durationSeconds = Number(payload.durationSeconds);
   const totalSegments = Number(payload.totalSegments);
   if (!Number.isInteger(totalSegments) || totalSegments <= 0) {
     return { ok: false, status: 400, error: "INVALID_TOTAL_SEGMENTS" };
   }
+
+  const id = randomUUID();
+  const filename = buildFilename(payload.title || "video", url);
+  const outputPath = await uniqueOutputPath(path.join(downloadDir, filename));
+  const tempDir = path.join(tmpdir(), `ds-video-browser-${id}`);
+  await mkdir(tempDir, { recursive: true });
+
   const job = {
     id,
     ok: true,
@@ -362,6 +380,7 @@ async function startBrowserDownload(payload) {
     log: []
   };
   jobs.set(id, job);
+  enforceJobHistoryCap();
   await persistJobsToDisk();
   return { ok: true, job };
 }
@@ -377,19 +396,30 @@ async function uploadBrowserDownloadFile(id, fileName, req) {
   const targetPath = path.join(job.tempDir, safeName);
   if (!isSafeDownloadPath(targetPath, job.tempDir)) return { ok: false, status: 403, error: "OUTPUT_PATH_UNSAFE" };
 
-  if (existsSync(targetPath)) {
-    // Retried upload after the previous attempt actually succeeded. Consume
-    // and discard the duplicate body without double-counting progress.
+  const lockKey = `${id}:${safeName}`;
+  if (uploadLocks.has(lockKey)) {
+    // Same segment is already being uploaded concurrently.
     await discardRaw(req, 256 * 1024 * 1024);
     return { ok: true, job };
   }
+  uploadLocks.set(lockKey, true);
+  try {
+    if (existsSync(targetPath)) {
+      // Retried upload after the previous attempt actually succeeded. Consume
+      // and discard the duplicate body without double-counting progress.
+      await discardRaw(req, 256 * 1024 * 1024);
+      return { ok: true, job };
+    }
 
-  const bytesWritten = await readRawToFile(req, targetPath, 256 * 1024 * 1024);
-  job.receivedSegments += /^seg-/i.test(safeName) ? 1 : 0;
-  updateDownloadedBytes(job, job.downloadedBytes + bytesWritten);
-  job.progressText = formatBrowserReceiveProgress(job);
-  queuePersistJobsToDisk();
-  return { ok: true, job };
+    const bytesWritten = await readRawToFile(req, targetPath, 256 * 1024 * 1024);
+    job.receivedSegments += /^seg-/i.test(safeName) ? 1 : 0;
+    updateDownloadedBytes(job, job.downloadedBytes + bytesWritten);
+    job.progressText = formatBrowserReceiveProgress(job);
+    queuePersistJobsToDisk();
+    return { ok: true, job };
+  } finally {
+    uploadLocks.delete(lockKey);
+  }
 }
 
 async function completeBrowserDownload(id, payload) {
@@ -574,8 +604,8 @@ function runFfmpeg(job, headers) {
     jobProcesses.delete(job.id);
     if (job.status === "failed" || job.status === "cancelled") {
       if (!job.finishedAt) job.finishedAt = new Date().toISOString();
-      persistJobsToDisk();
       job.exitCode = code;
+      persistJobsToDisk();
       return;
     }
     job.status = code === 0 ? "completed" : "failed";
@@ -792,6 +822,47 @@ async function forgetJobRecord(id) {
   return { ok: true };
 }
 
+function parseJobsPage(url) {
+  try {
+    const parsed = new URL(url, "http://127.0.0.1");
+    const rawLimit = Number(parsed.searchParams.get("limit") ?? JOBS_PAGE_SIZE_DEFAULT);
+    const rawOffset = Number(parsed.searchParams.get("offset") ?? 0);
+    const limit = Number.isInteger(rawLimit) ? Math.min(Math.max(rawLimit, 1), JOBS_PAGE_SIZE_MAX) : JOBS_PAGE_SIZE_DEFAULT;
+    const offset = Number.isInteger(rawOffset) && rawOffset >= 0 ? rawOffset : 0;
+    return { limit, offset };
+  } catch {
+    return { limit: JOBS_PAGE_SIZE_DEFAULT, offset: 0 };
+  }
+}
+
+function buildJobStats() {
+  const stats = { active: 0, completed: 0, failed: 0, downloadedBytes: 0 };
+  for (const job of jobs.values()) {
+    if (job.status === "queued" || job.status === "running") stats.active += 1;
+    if (job.status === "completed") stats.completed += 1;
+    if (job.status === "failed") stats.failed += 1;
+    stats.downloadedBytes += Number(job.downloadedBytes) || 0;
+  }
+  return stats;
+}
+
+function enforceJobHistoryCap() {
+  if (jobs.size <= MAX_JOB_HISTORY) return 0;
+  const missing = Array.from(jobs.values())
+    .filter((job) => job.status === "missing")
+    .sort((a, b) => String(a.startedAt || "").localeCompare(String(b.startedAt || "")));
+  let removed = 0;
+  for (const job of missing) {
+    if (jobs.size <= MAX_JOB_HISTORY) break;
+    jobs.delete(job.id);
+    removed += 1;
+  }
+  if (jobs.size > MAX_JOB_HISTORY) {
+    console.warn(`[helper] job history is still above ${MAX_JOB_HISTORY}; refusing to drop non-missing records`);
+  }
+  return removed;
+}
+
 async function clearMissingJobRecords() {
   const removed = [];
   for (const [id, job] of jobs) {
@@ -859,7 +930,7 @@ function terminateJobProcess(id) {
   }
 }
 
-function cancelJob(id) {
+async function cancelJob(id) {
   const job = jobs.get(id);
   if (!job) return { ok: false, status: 404, error: "JOB_NOT_FOUND" };
   if (job.status !== "running" && job.status !== "queued") return { ok: false, status: 409, error: "JOB_NOT_RUNNING" };
@@ -868,9 +939,9 @@ function cancelJob(id) {
   job.error = null;
   job.progressText = "Stopped by user";
   job.finishedAt = new Date().toISOString();
-  cleanupBrowserTemp(job);
-  persistJobsToDisk();
   job.etaSeconds = null;
+  await cleanupBrowserTemp(job);
+  await persistJobsNow();
 
   terminateJobProcess(id);
 
@@ -2754,7 +2825,10 @@ function renderHomePage() {
         </div>
         <div class="toolbar">
           <button type="button" onclick="clearMissingJobs()">Clear missing</button>
-          <button type="button" onclick="loadJobs()">Refresh</button>
+          <button id="prevJobsPageButton" type="button" onclick="prevJobsPage()">Prev</button>
+          <span id="jobsPageLabel" style="align-self:center;padding:0 4px;font:11px/1 var(--mono);color:var(--muted)">Page 1</span>
+          <button id="nextJobsPageButton" type="button" onclick="nextJobsPage()">Next</button>
+          <button type="button" onclick="loadJobs(true)">Refresh</button>
         </div>
       </header>
       <section class="stats" aria-label="Download summary">
@@ -2767,31 +2841,51 @@ function renderHomePage() {
     </main>
   </div>
   <script>
-    async function loadJobs() {
+    const JOBS_PAGE_SIZE = 50;
+    let jobsPageOffset = 0;
+
+    async function loadJobs(resetPage = false) {
       const root = document.querySelector("#jobs");
       const summary = document.querySelector("#summary");
+      if (resetPage) jobsPageOffset = 0;
       try {
-        const response = await fetch("/jobs");
+        const response = await fetch('/jobs?limit=' + JOBS_PAGE_SIZE + '&offset=' + jobsPageOffset);
         const data = await response.json();
         const jobs = data.jobs || [];
-        const active = jobs.filter(job => job.status === 'queued' || job.status === 'running').length;
-        const completed = jobs.filter(job => job.status === 'completed').length;
-        const failed = jobs.filter(job => job.status === 'failed').length;
-        const downloaded = jobs.reduce((sum, job) => sum + (Number(job.downloadedBytes) || 0), 0);
-        document.querySelector("#activeStat").textContent = active;
-        document.querySelector("#completedStat").textContent = completed;
-        document.querySelector("#failedStat").textContent = failed;
-        document.querySelector("#bytesStat").textContent = formatBytes(downloaded);
-        setCardState("#activeCard", active);
-        setCardState("#completedCard", completed);
-        setCardState("#failedCard", failed);
-        setCardState("#bytesCard", downloaded);
-        summary.textContent = active + ' active, ' + jobs.length + ' total job' + (jobs.length === 1 ? '' : 's');
-        if (!jobs.length) {
+        const total = data.total || jobs.length;
+        const stats = data.stats || { active: 0, completed: 0, failed: 0, downloadedBytes: 0 };
+
+        // If the current page is now past the end (e.g. records were removed),
+        // jump back to the last valid page and reload once.
+        if (total > 0 && jobsPageOffset >= total) {
+          jobsPageOffset = Math.max(0, Math.floor((total - 1) / JOBS_PAGE_SIZE) * JOBS_PAGE_SIZE);
+          loadJobs();
+          return;
+        }
+
+        document.querySelector("#activeStat").textContent = stats.active;
+        document.querySelector("#completedStat").textContent = stats.completed;
+        document.querySelector("#failedStat").textContent = stats.failed;
+        document.querySelector("#bytesStat").textContent = formatBytes(stats.downloadedBytes);
+        setCardState("#activeCard", stats.active);
+        setCardState("#completedCard", stats.completed);
+        setCardState("#failedCard", stats.failed);
+        setCardState("#bytesCard", stats.downloadedBytes);
+        summary.textContent = stats.active + ' active, ' + total + ' total job' + (total === 1 ? '' : 's');
+
+        const prevButton = document.querySelector("#prevJobsPageButton");
+        const nextButton = document.querySelector("#nextJobsPageButton");
+        if (prevButton) prevButton.disabled = jobsPageOffset === 0;
+        if (nextButton) nextButton.disabled = jobsPageOffset + jobs.length >= total;
+        const pageLabel = document.querySelector("#jobsPageLabel");
+        if (pageLabel) pageLabel.textContent = 'Page ' + (Math.floor(jobsPageOffset / JOBS_PAGE_SIZE) + 1);
+
+        if (!total) {
+          jobsPageOffset = 0;
           root.innerHTML = '<div class="empty"><div class="empty-box"><div class="empty-title">No helper jobs yet</div><div class="empty-text">Start an HLS or DASH download from the extension popup. Jobs will appear here with progress, output path, and file actions.</div></div></div>';
           return;
         }
-        root.innerHTML = '<div class="panel-head"><div>Queue</div><div class="panel-count">' + jobs.length + ' item' + (jobs.length === 1 ? '' : 's') + '</div></div>' + jobs.map(renderJob).join('');
+        root.innerHTML = '<div class="panel-head"><div>Queue</div><div class="panel-count">' + total + ' item' + (total === 1 ? '' : 's') + '</div></div>' + jobs.map(renderJob).join('');
       } catch {
         summary.textContent = 'Helper offline';
         document.querySelector("#activeStat").textContent = '0';
@@ -2800,6 +2894,14 @@ function renderHomePage() {
         document.querySelector("#bytesStat").textContent = '0 B';
         root.innerHTML = '<div class="empty failed">Could not read helper jobs.</div>';
       }
+    }
+    function prevJobsPage() {
+      jobsPageOffset = Math.max(0, jobsPageOffset - JOBS_PAGE_SIZE);
+      loadJobs();
+    }
+    function nextJobsPage() {
+      jobsPageOffset += JOBS_PAGE_SIZE;
+      loadJobs();
     }
     function renderJob(job) {
       const isActive = job.status === 'running' || job.status === 'queued';
@@ -2822,14 +2924,14 @@ function renderHomePage() {
     }
     async function clearMissingJobs() {
       const response = await fetch('/jobs/clear-missing', { method: 'POST' });
-      if (response.ok) loadJobs();
+      if (response.ok) loadJobs(true);
     }
     async function showJob(id) {
       await fetch('/jobs/' + encodeURIComponent(id) + '/show', { method: 'POST' });
     }
     async function cancelJob(id) {
       const response = await fetch('/jobs/' + encodeURIComponent(id) + '/cancel', { method: 'POST' });
-      if (response.ok) loadJobs();
+      if (response.ok) loadJobs(true);
     }
     function openRemoveDialog(id, fileExists, title) {
       if (!fileExists) {
@@ -2862,7 +2964,7 @@ function renderHomePage() {
         const response = await fetch('/jobs/' + encodeURIComponent(id) + '/history', { method: 'DELETE' });
         if (!response.ok) return;
       }
-      loadJobs();
+      loadJobs(true);
     }
     function escapeHtml(value) {
       return String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));

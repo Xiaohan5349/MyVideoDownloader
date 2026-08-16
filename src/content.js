@@ -176,10 +176,11 @@ async function handleStreamDownload(payload) {
   if (!startRes.ok) throw new Error(startPayload.error || `HELPER_${startRes.status}`);
   const job = startPayload.job;
 
-  // Step 7: Fetch and upload segments in parallel (8 at a time).
-  // Transient CDN/Cloudflare failures are common, so failed segments get
-  // two additional retry passes before the whole job is marked failed.
-  const concurrency = 8;
+  // Step 7: Fetch and upload segments in parallel.
+  // Keep ArrayBuffer memory bounded, but allow faster devices to use more
+  // workers (3-6). Segment size is unknown until fetched, so this is driven
+  // by available device memory rather than per-segment size.
+  const concurrency = chooseConcurrency();
   const assets = plan.assets;
 
   let completed = 0;
@@ -284,6 +285,17 @@ async function handleStreamDownload(payload) {
   }
 
   return { ok: true, helperJob: job, completed, total };
+}
+
+function chooseConcurrency() {
+  try {
+    const memoryGB = Number(navigator.deviceMemory || 4);
+    if (memoryGB >= 8) return 6;
+    if (memoryGB >= 4) return 4;
+    return 3;
+  } catch {
+    return 4;
+  }
 }
 
 function getHlsBrowserModule() {

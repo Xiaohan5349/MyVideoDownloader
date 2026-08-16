@@ -44,12 +44,27 @@
     return found;
   }
 
+  const MAX_SERIALIZED_NODES = 5000;
+  const MAX_SERIALIZED_STRING = 2000;
+
   function safeString(v) {
-    try { return JSON.stringify(v, (_k, val) => {
-      if (typeof val === "function" || typeof val === "symbol") return undefined;
-      if (val instanceof Node) return undefined;
-      return val;
-    }); } catch { return ""; }
+    let nodeCount = 0;
+    try {
+      return JSON.stringify(v, (_k, val) => {
+        if (typeof val === "string" && val.length > MAX_SERIALIZED_STRING) {
+          return `${val.slice(0, MAX_SERIALIZED_STRING)}…`;
+        }
+        if (val && typeof val === "object") {
+          nodeCount += 1;
+          if (nodeCount > MAX_SERIALIZED_NODES) return undefined;
+        }
+        if (typeof val === "function" || typeof val === "symbol") return undefined;
+        if (val instanceof Node) return undefined;
+        return val;
+      });
+    } catch {
+      return "";
+    }
   }
 
   function notify(findings) {

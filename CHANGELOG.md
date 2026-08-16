@@ -1,5 +1,22 @@
 # Changelog
 
+## v1.6.0 - 2026-08-16
+
+### Added
+- Paginated `GET /jobs` with `limit` / `offset` and global dashboard stats.
+- Dashboard job pagination with Prev / Next controls.
+- 5000-record history protection cap; only oldest `File missing` records are pruned.
+
+### Changed
+- Popup fetches only the latest 20 helper jobs and uses server-side stats.
+- Browser segment concurrency now adapts to device memory (3-6 workers).
+- MAIN-world scan serialization is bounded by node count and string length.
+
+### Fixed
+- Eliminated simultaneous same-segment upload double-counting with per-job upload locks.
+- Fixed cancel/ffmpeg-close persistence ordering so `etaSeconds` and `exitCode` are saved correctly.
+- Persistence failures now emit a warning instead of failing silently.
+
 ## v1.5.0 - 2026-08-15
 
 ### Added
