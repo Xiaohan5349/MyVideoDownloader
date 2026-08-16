@@ -165,6 +165,7 @@ export function normalizeMediaItem(input, fallback = {}) {
     id: input.id || makeMediaId(input.url, sourcePageUrl),
     url: input.url,
     sourcePageUrl,
+    pageUrl: typeof input.pageUrl === "string" ? input.pageUrl : "",
     title,
     extension,
     kind: input.kind || classified.kind,

@@ -4,7 +4,7 @@ import {
   normalizeMediaItem, parseDashManifest, parseHlsManifest, sanitizeFilename
 } from "./shared.js";
 
-console.log("[ds] Service worker started v1.6.0");
+console.log("[ds] Service worker started v1.6.1");
 
 const SETTINGS_KEY = "settings";
 const TAB_MEDIA_PREFIX = "tabMedia:";
@@ -58,6 +58,15 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   chrome.storage.local.remove(tabKey(tabId));
 });
 
+// Full-page navigation destroys the old content script before it can send
+// page:clearMedia. Clear tab media when the main frame starts loading a new
+// URL; same-document navigations are still handled by the content script.
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (changeInfo.status === "loading" && changeInfo.url) {
+    chrome.storage.local.remove(tabKey(tabId));
+  }
+});
+
 // --- Message handler ---
 
 async function handleMessage(message, sender) {
@@ -80,7 +89,8 @@ async function handleMessage(message, sender) {
     const items = (message.items || []).map((item) => ({
       ...item,
       frameId,
-      tabId
+      tabId,
+      pageUrl: sender.tab?.url || message.pageUrl || ""
     }));
     await addMedia(tabId, items, {
       sourcePageUrl: sender.tab?.url || message.sourcePageUrl || "",
@@ -94,7 +104,11 @@ async function handleMessage(message, sender) {
     if (typeof tabId !== "number") return { ok: false, error: "TAB_ID_MISSING" };
     const settings = await getSettings();
     const items = await enrichMediaForTab(tabId);
-    return { ok: true, items: items.filter((item) => shouldKeepMedia(item, settings)) };
+    const tab = await chrome.tabs.get(tabId).catch(() => null);
+    return {
+      ok: true,
+      items: items.filter((item) => shouldKeepMedia(item, settings) && mediaMatchesTab(item, tab?.url || ""))
+    };
   }
 
   if (message.type === MESSAGE.DOWNLOADS_START) {
@@ -167,24 +181,33 @@ async function detectFromNetwork(details) {
     kind: classified.kind,
     frameId: Number.isInteger(details.frameId) && details.frameId >= 0 ? details.frameId : null,
     tabId: details.tabId,
+    pageUrl: tab.url || "",
     size: numberHeader(details.responseHeaders, "content-length"),
     headers: requestHeadersById.get(details.requestId) || cachedHeadersForUrl(url)
   });
   requestHeadersById.delete(details.requestId);
 
-  if (item) await addMedia(details.tabId, [item]);
+  if (item) await addMedia(details.tabId, [item], { sourcePageUrl: tab.url || details.initiator || "" });
 }
 
 // --- Media management ---
 
 async function addMedia(tabId, additions, fallback = {}) {
   const settings = await getSettings();
-  const current = await getMedia(tabId);
+  const tabUrl = fallback.sourcePageUrl || "";
+  const current = (await getMedia(tabId)).filter((item) => mediaMatchesTab(item, tabUrl));
   const next = addUniqueMedia(current, additions
     .map((item) => withCachedHeaders(normalizeMediaItem(item, fallback)))
     .filter((item) => shouldKeepMedia(item, settings)));
   await chrome.storage.local.set({ [tabKey(tabId)]: next.slice(0, 30) });
   await updateBadge(tabId, next);
+}
+
+function mediaMatchesTab(item, tabUrl) {
+  if (!tabUrl || !item) return true;
+  if (item.pageUrl) return item.pageUrl === tabUrl;
+  // Legacy items from before pageUrl was tracked only know their source page.
+  return !item.sourcePageUrl || item.sourcePageUrl === tabUrl;
 }
 
 function shouldKeepMedia(item, settings) {

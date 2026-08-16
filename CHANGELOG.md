@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.6.1 - 2026-08-16
+
+### Fixed
+- Fixed media detected on a previous page remaining in the popup after a full-page navigation to another path on the same site.
+- Main-frame navigations now clear the previous tab media cache, and items are filtered by the tracked top-level page URL.
+
 ## v1.6.0 - 2026-08-16
 
 ### Added

@@ -17,6 +17,7 @@ function createChromeMock() {
     onBeforeSendHeaders: null,
     onHeadersReceived: null,
     onTabRemoved: null,
+    onTabUpdated: null,
   };
 
   const storage = {
@@ -54,6 +55,9 @@ function createChromeMock() {
     tabs: {
       onRemoved: {
         addListener(fn) { listeners.onTabRemoved = fn; },
+      },
+      onUpdated: {
+        addListener(fn) { listeners.onTabUpdated = fn; },
       },
       async query() { return mock.tabs.queryResult; },
       async get(tabId) {
@@ -142,6 +146,49 @@ test("MEDIA_ADD_DETECTED stores frameId and tabId on detected items", async () =
   assert.equal(items[0].frameId, 3);
   assert.equal(items[0].tabId, 10);
   assert.equal(items[0].kind, "direct");
+});
+
+test("MEDIA_ADD_DETECTED replaces media from a previous page URL", async () => {
+  await sendRuntimeMessage(
+    {
+      type: MESSAGE.MEDIA_ADD_DETECTED,
+      items: [{
+        url: "https://cdn.example.com/video-a.mp4",
+        sourcePageUrl: "https://site.example/a",
+        title: "Video A",
+        extension: "mp4",
+        kind: "direct",
+      }],
+    },
+    { tab: { id: 10, url: "https://site.example/a", title: "A" }, frameId: 0 }
+  );
+
+  await sendRuntimeMessage(
+    {
+      type: MESSAGE.MEDIA_ADD_DETECTED,
+      items: [{
+        url: "https://cdn.example.com/video-b.mp4",
+        sourcePageUrl: "https://site.example/b",
+        title: "Video B",
+        extension: "mp4",
+        kind: "direct",
+      }],
+    },
+    { tab: { id: 10, url: "https://site.example/b", title: "B" }, frameId: 0 }
+  );
+
+  const stored = await mock.storage.local.get("tabMedia:10");
+  assert.equal(stored["tabMedia:10"].length, 1);
+  assert.equal(stored["tabMedia:10"][0].title, "Video B");
+});
+
+test("tab main-frame navigation clears the previous page media", async () => {
+  await mock.storage.local.set({ "tabMedia:10": [{ id: "old", title: "Old" }] });
+  const handler = mock.listeners.onTabUpdated;
+  assert.ok(handler, "tabs.onUpdated listener should be registered");
+  handler(10, { status: "loading", url: "https://site.example/new" });
+  const stored = await mock.storage.local.get("tabMedia:10");
+  assert.equal(stored["tabMedia:10"], undefined);
 });
 
 test("page:clearMedia removes the tab media cache", async () => {
