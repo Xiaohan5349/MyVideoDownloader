@@ -60,6 +60,8 @@ export const SEGMENT_EXTENSIONS = new Set([
 ]);
 
 export function isSegmentFile(url = "", contentType = "") {
+  const contentExtension = detectExtension("", contentType);
+  if (contentExtension && DIRECT_EXTENSIONS.has(contentExtension)) return false;
   try {
     const path = new URL(url).pathname.toLowerCase();
     // Image/segment extensions used as obfuscated video segments

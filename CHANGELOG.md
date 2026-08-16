@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.6.8 - 2026-08-16
+
+### Fixed
+- Partial direct-video responses without `Content-Range` no longer use the downloaded chunk size as the full file size and disappear behind the minimum-size filter.
+- Direct video responses with image-like URL suffixes are classified by their media response type instead of being discarded as HLS segments.
+
 ## v1.6.7 - 2026-08-16
 
 ### Fixed

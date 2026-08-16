@@ -403,6 +403,7 @@ test("network detection uses Content-Range total for 206 responses", async () =>
     requestId: "range-request",
     url: "https://cdn.example.com/video.mp4",
     type: "media",
+    statusCode: 206,
     responseHeaders: [
       { name: "Content-Type", value: "video/mp4" },
       { name: "Content-Range", value: "bytes 0-999/123456789" },
@@ -414,6 +415,48 @@ test("network detection uses Content-Range total for 206 responses", async () =>
   const stored = await mock.storage.local.get("tabMedia:10");
   const item = stored["tabMedia:10"]?.find((entry) => entry.url === "https://cdn.example.com/video.mp4");
   assert.equal(item.size, 123456789);
+});
+
+test("network detection keeps partial direct media when total size is unknown", async () => {
+  const listener = mock.listeners.onHeadersReceived;
+  listener({
+    tabId: 10,
+    requestId: "partial-without-total",
+    url: "https://cdn.example.com/video.mp4",
+    type: "media",
+    statusCode: 206,
+    responseHeaders: [
+      { name: "Content-Type", value: "video/mp4" },
+      { name: "Content-Length", value: "102400" },
+    ],
+    initiator: "https://site.example",
+  });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const stored = await mock.storage.local.get("tabMedia:10");
+  const item = stored["tabMedia:10"]?.find((entry) => entry.url === "https://cdn.example.com/video.mp4");
+  assert.ok(item, "partial media should not be discarded by the minimum-size filter");
+  assert.equal(item.size, null);
+});
+
+test("network detection keeps direct video with an image-like URL suffix", async () => {
+  const listener = mock.listeners.onHeadersReceived;
+  listener({
+    tabId: 10,
+    requestId: "disguised-direct",
+    url: "https://cdn.example.com/video.jpg",
+    type: "media",
+    statusCode: 200,
+    responseHeaders: [
+      { name: "Content-Type", value: "video/mp4" },
+      { name: "Content-Length", value: "123456789" },
+    ],
+    initiator: "https://site.example",
+  });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const stored = await mock.storage.local.get("tabMedia:10");
+  const item = stored["tabMedia:10"]?.find((entry) => entry.url === "https://cdn.example.com/video.jpg");
+  assert.equal(item.kind, "direct");
+  assert.equal(item.extension, "mp4");
 });
 
 test("network detection keeps m3u8 URLs whose query contains an image extension", async () => {

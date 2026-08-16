@@ -167,6 +167,35 @@ it("POST /inspect falls back to a byte range when HEAD has no usable size", asyn
   }
 });
 
+it("POST /inspect does not treat a partial response length as the full direct size", async () => {
+  const upstream = http.createServer((req, res) => {
+    if (req.method === "HEAD") {
+      res.writeHead(405);
+      res.end();
+      return;
+    }
+    res.writeHead(206, { "Content-Length": "1", "Content-Type": "video/mp4" });
+    res.end("x");
+  });
+  await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+  const address = upstream.address();
+  try {
+    const res = await fetchJson("/inspect", {
+      method: "POST",
+      body: {
+        url: `http://127.0.0.1:${address.port}/video.mp4`,
+        kind: "direct",
+        headers: []
+      }
+    });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.totalBytes, null);
+    assert.equal(res.body.totalSizeSource, "unknown");
+  } finally {
+    await new Promise((resolve) => upstream.close(resolve));
+  }
+});
+
 it("POST /inspect rejects an HTML login page as a direct media size", async () => {
   const upstream = http.createServer((_req, res) => {
     res.writeHead(200, { "Content-Length": "4321", "Content-Type": "text/html; charset=utf-8" });

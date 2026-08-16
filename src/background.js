@@ -4,7 +4,7 @@ import {
   normalizeMediaItem, parseDashManifest, parseHlsManifest, sanitizeFilename
 } from "./shared.js";
 
-console.log("[ds] Service worker started v1.6.7");
+console.log("[ds] Service worker started v1.6.8");
 
 const SETTINGS_KEY = "settings";
 const TAB_MEDIA_PREFIX = "tabMedia:";
@@ -149,6 +149,8 @@ async function detectFromNetwork(details) {
   if (details.tabId < 0) return;
 
   const url = details.url;
+  const contentType = headerValue(details.responseHeaders, "content-type");
+  const classifiedByContentType = classifyMedia("", contentType);
 
   // Skip internal helper traffic
   if (url.startsWith("http://127.0.0.1:") || url.startsWith("http://localhost:")) return;
@@ -158,11 +160,9 @@ async function detectFromNetwork(details) {
   if (/\/log\/|analytics|telemetry|tracker|pixel|beacon|cdn\.plyr/i.test(url)) return;
   try {
     const pathname = new URL(url).pathname.toLowerCase();
-    if (/\.(?:svg|png|jpe?g|gif|webp|css)(?:$|[?#])/i.test(pathname)) return;
-    if (/\.js(?:$|[?#])/i.test(pathname)) return;
+    if (!classifiedByContentType && /\.(?:svg|png|jpe?g|gif|webp|css)$/.test(pathname)) return;
+    if (!classifiedByContentType && /\.js$/.test(pathname)) return;
   } catch {}
-
-  const contentType = headerValue(details.responseHeaders, "content-type");
 
   // Skip HLS/DASH segment files aggressively
   if (isSegmentFile(url, contentType)) return;
@@ -196,7 +196,7 @@ async function detectFromNetwork(details) {
     tabId: details.tabId,
     pageUrl: tab.url || "",
     source: "network",
-    size: responseContentLength(details.responseHeaders),
+    size: responseContentLength(details.responseHeaders, details.statusCode),
     headers: requestHeadersById.get(details.requestId) || cachedHeadersForUrl(url)
   });
   requestHeadersById.delete(details.requestId);
@@ -691,12 +691,15 @@ function numberHeader(headers, name) {
   return Number.isFinite(v) && v > 0 ? v : null;
 }
 
-function responseContentLength(headers) {
+function responseContentLength(headers, statusCode = 200) {
   const contentRange = headerValue(headers, "content-range");
   if (contentRange) {
     const total = Number(contentRange.split("/").pop());
     if (Number.isFinite(total) && total > 0) return total;
   }
+  // A partial response's Content-Length is only the current byte range, not
+  // the media size. Keep it unknown when the server omits Content-Range.
+  if (statusCode === 206) return null;
   return numberHeader(headers, "content-length");
 }
 

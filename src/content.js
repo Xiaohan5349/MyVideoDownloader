@@ -184,6 +184,7 @@ function directResponseSize(response) {
     const total = Number(contentRange.split("/").pop());
     if (Number.isFinite(total) && total > 0) return total;
   }
+  if (response.status === 206) return null;
   const length = Number(response.headers.get("content-length"));
   return Number.isFinite(length) && length > 0 ? length : null;
 }
