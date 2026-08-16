@@ -106,6 +106,87 @@ it("GET /assets/app-background.webp returns the dashboard background", async () 
   assert.ok(typeof res.body === "string" && res.body.length > 100);
 });
 
+it("POST /inspect probes direct file size without downloading the body", async () => {
+  const upstream = http.createServer((req, res) => {
+    assert.equal(req.method, "HEAD");
+    assert.equal(req.headers.range, undefined);
+    res.writeHead(200, { "Content-Length": "7654321", "Content-Type": "video/mp4" });
+    res.end();
+  });
+  await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+  const address = upstream.address();
+  try {
+    const res = await fetchJson("/inspect", {
+      method: "POST",
+      body: {
+        url: `http://127.0.0.1:${address.port}/video.mp4`,
+        kind: "direct",
+        headers: [{ name: "Range", value: "bytes=100-200" }]
+      }
+    });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.totalBytes, 7654321);
+    assert.equal(res.body.totalSizeSource, "exact");
+  } finally {
+    await new Promise((resolve) => upstream.close(resolve));
+  }
+});
+
+it("POST /inspect falls back to a byte range when HEAD has no usable size", async () => {
+  const upstream = http.createServer((req, res) => {
+    if (req.method === "HEAD") {
+      res.writeHead(405);
+      res.end();
+      return;
+    }
+    assert.equal(req.method, "GET");
+    assert.equal(req.headers.range, "bytes=0-0");
+    res.writeHead(206, {
+      "Content-Length": "1",
+      "Content-Range": "bytes 0-0/9876543",
+      "Content-Type": "video/mp4"
+    });
+    res.end("x");
+  });
+  await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+  const address = upstream.address();
+  try {
+    const res = await fetchJson("/inspect", {
+      method: "POST",
+      body: {
+        url: `http://127.0.0.1:${address.port}/video.mp4`,
+        kind: "direct",
+        headers: []
+      }
+    });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.totalBytes, 9876543);
+    assert.equal(res.body.totalSizeSource, "exact");
+  } finally {
+    await new Promise((resolve) => upstream.close(resolve));
+  }
+});
+
+it("POST /inspect rejects an HTML login page as a direct media size", async () => {
+  const upstream = http.createServer((_req, res) => {
+    res.writeHead(200, { "Content-Length": "4321", "Content-Type": "text/html; charset=utf-8" });
+    res.end();
+  });
+  await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+  const address = upstream.address();
+  try {
+    const res = await fetchJson("/inspect", {
+      method: "POST",
+      body: { url: `http://127.0.0.1:${address.port}/login`, kind: "direct", headers: [] }
+    });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.totalBytes, null);
+    assert.equal(res.body.totalSizeSource, "unknown");
+  } finally {
+    await new Promise((resolve) => upstream.close(resolve));
+  }
+});
+
 // ─── Error Handling ───
 
 it("POST /download with missing URL returns 400", async () => {

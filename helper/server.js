@@ -474,6 +474,18 @@ async function inspectForUi(payload) {
   if (!url) return { ok: false, status: 400, error: "INVALID_URL" };
 
   const headers = normalizeHeaders(payload.headers || []);
+  if (payload.kind === "direct") {
+    const totalBytes = await probeContentLength(url, headers);
+    return {
+      ok: true,
+      hasDrm: false,
+      durationSeconds: null,
+      totalBytes,
+      totalSizeSource: totalBytes ? "exact" : "unknown",
+      variants: []
+    };
+  }
+
   const inspection = await inspectManifest(url, payload.kind || "", headers);
   if (!inspection.ok) return inspection;
 
@@ -1169,27 +1181,44 @@ async function probeContentLength(url, headers) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), SIZE_PROBE_TIMEOUT_MS);
   try {
+    const baseHeaders = headersToObject(headers);
+    for (const name of Object.keys(baseHeaders)) {
+      if (name.toLowerCase() === "range") delete baseHeaders[name];
+    }
     let response = await fetch(url, {
       method: "HEAD",
-      headers: headersToObject(headers),
+      headers: baseHeaders,
       signal: controller.signal
     });
-    let size = Number(response.headers.get("content-length"));
-    if (response.ok && Number.isFinite(size) && size > 0) return size;
+    let size = directResponseContentLength(response);
+    if (size) return size;
 
     response = await fetch(url, {
       method: "GET",
-      headers: { ...headersToObject(headers), Range: "bytes=0-0" },
+      headers: { ...baseHeaders, Range: "bytes=0-0" },
       signal: controller.signal
     });
-    const range = response.headers.get("content-range");
-    size = range ? Number(range.split("/").pop()) : Number(response.headers.get("content-length"));
-    return response.ok && Number.isFinite(size) && size > 0 ? size : null;
+    size = directResponseContentLength(response);
+    await response.body?.cancel().catch(() => {});
+    return size;
   } catch {
     return null;
   } finally {
     clearTimeout(timer);
   }
+}
+
+function directResponseContentLength(response) {
+  if (!response?.ok) return null;
+  const contentType = (response.headers.get("content-type") || "").toLowerCase();
+  if (/^(?:text\/html|text\/xml|application\/(?:json|xml|xhtml\+xml))\b/.test(contentType)) return null;
+  const range = response.headers.get("content-range") || "";
+  if (response.status === 206 && range) {
+    const total = Number(range.split("/").pop());
+    if (Number.isFinite(total) && total > 0) return total;
+  }
+  const length = Number(response.headers.get("content-length"));
+  return Number.isFinite(length) && length > 0 ? length : null;
 }
 
 function parseManifestDurationSeconds(text, kind, url) {

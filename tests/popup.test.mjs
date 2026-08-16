@@ -87,6 +87,8 @@ const documentMock = {
 };
 
 const timers = { setIntervalCalls: [], setTimeoutCalls: [] };
+const runtimeMessages = [];
+const tabMessages = [];
 const windowMock = {
   setInterval(fn, ms) { timers.setIntervalCalls.push({ fn, ms }); return timers.setIntervalCalls.length; },
   setTimeout(fn, ms) { timers.setTimeoutCalls.push({ fn, ms }); return timers.setTimeoutCalls.length; },
@@ -98,6 +100,7 @@ const chromeMock = {
   runtime: {
     getURL(path) { return `https://mock.local/${path}`; },
     async sendMessage(message) {
+      runtimeMessages.push(message);
       if (message?.type === "settings:get") return { ok: true, settings: { minSizeBytes: 1048576, showUnsupported: true } };
       if (message?.type === "media:getForTab") return { ok: true, items: [] };
       if (message?.type === "helper:statusGet") {
@@ -120,7 +123,10 @@ const chromeMock = {
   },
   tabs: {
     async query() { return [{ id: 1, url: "https://site.example" }]; },
-    async sendMessage() { return { ok: true }; },
+    async sendMessage(tabId, message) {
+      tabMessages.push({ tabId, message });
+      return { ok: true };
+    },
   },
 };
 
@@ -159,4 +165,16 @@ test("popup notice helpers show and hide", () => {
   assert.equal(notice.textContent, "test");
   assert.equal(notice.hidden, false);
   assert.ok(notice.classList.className.includes("error"));
+});
+
+test("rescan clears background media and waits for the content scan", async () => {
+  runtimeMessages.length = 0;
+  tabMessages.length = 0;
+  getElement("#rescanButton").click();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(runtimeMessages[0]?.type, "page:clearMedia");
+  assert.equal(tabMessages[0]?.message?.type, "page:rescan");
+  assert.ok(runtimeMessages.some((message) => message.type === "media:getForTab"));
+  assert.equal(timers.setTimeoutCalls.length, 0);
 });

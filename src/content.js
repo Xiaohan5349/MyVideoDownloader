@@ -21,9 +21,10 @@ let scanTimer = null;
 let currentUrl = location.href;
 const SEGMENT_FETCH_TIMEOUT_MS = 30_000;
 const SEGMENT_FETCH_RETRIES = 5;
+const DIRECT_SIZE_PROBE_TIMEOUT_MS = 7_000;
 let hlsBrowserModulePromise = null;
 
-scanDocument();
+scanDocument().catch(() => {});
 observePageChanges();
 
 // Listen for stream URLs found by inject-main.js (MAIN world)
@@ -70,9 +71,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   // Rescan page
   if (message?.type === "page:rescan") {
     seenUrls.clear();
-    scanDocument();
-    sendResponse({ ok: true });
-    return;
+    scanDocument()
+      .then((count) => sendResponse({ ok: true, count }))
+      .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
+    return true;
   }
 
   // Fetch a URL from content script context (has page's Referer/TLS/cookies)
@@ -134,29 +136,36 @@ async function fetchTextFromPage(url) {
 
 async function fetchSizeFromPage(url) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), SEGMENT_FETCH_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), DIRECT_SIZE_PROBE_TIMEOUT_MS);
   try {
-    let response = await fetch(url, { method: "HEAD", cache: "no-store", signal: controller.signal });
-    if (response.ok) {
-      const length = Number(response.headers.get("content-length"));
-      if (Number.isFinite(length) && length > 0) return length;
+    const credentialModes = isSameOrigin(url) ? ["include"] : ["include", "same-origin"];
+    for (const credentials of credentialModes) {
+      try {
+        const response = await fetch(url, {
+          method: "HEAD", cache: "no-store", credentials, signal: controller.signal
+        });
+        const size = directResponseSize(response);
+        if (size) return size;
+      } catch (error) {
+        if (error?.name === "AbortError") throw error;
+      }
     }
 
-    response = await fetch(url, {
-      method: "GET",
-      headers: { Range: "bytes=0-0" },
-      cache: "no-store",
-      signal: controller.signal
-    });
-
-    const contentRange = response.headers.get("content-range") || "";
-    if (response.status === 206 && contentRange) {
-      const total = Number(contentRange.split("/").pop());
-      if (Number.isFinite(total) && total > 0) return total;
-    }
-    if (response.ok) {
-      const length = Number(response.headers.get("content-length"));
-      if (Number.isFinite(length) && length > 0) return length;
+    for (const credentials of credentialModes) {
+      try {
+        const response = await fetch(url, {
+          method: "GET",
+          headers: { Range: "bytes=0-0" },
+          cache: "no-store",
+          credentials,
+          signal: controller.signal
+        });
+        const size = directResponseSize(response);
+        await response.body?.cancel().catch(() => {});
+        if (size) return size;
+      } catch (error) {
+        if (error?.name === "AbortError") throw error;
+      }
     }
     return null;
   } catch {
@@ -165,6 +174,26 @@ async function fetchSizeFromPage(url) {
     clearTimeout(timer);
     try { controller.abort(); } catch {}
   }
+}
+
+function directResponseSize(response) {
+  if (!response?.ok || isNonMediaResponse(response)) return null;
+  const contentRange = response.headers.get("content-range") || "";
+  if (response.status === 206 && contentRange) {
+    const total = Number(contentRange.split("/").pop());
+    if (Number.isFinite(total) && total > 0) return total;
+  }
+  const length = Number(response.headers.get("content-length"));
+  return Number.isFinite(length) && length > 0 ? length : null;
+}
+
+function isNonMediaResponse(response) {
+  const contentType = (response.headers.get("content-type") || "").toLowerCase();
+  return /^(?:text\/html|text\/xml|application\/(?:json|xml|xhtml\+xml))\b/.test(contentType);
+}
+
+function isSameOrigin(url) {
+  try { return new URL(url, location.href).origin === location.origin; } catch { return false; }
 }
 
 // --- Full stream download from page context ---
@@ -514,22 +543,23 @@ function handlePotentialNavigation() {
 
 function scheduleScan() {
   window.clearTimeout(scanTimer);
-  scanTimer = window.setTimeout(scanDocument, 250);
+  scanTimer = window.setTimeout(() => scanDocument().catch(() => {}), 250);
 }
 
-function scanDocument() {
+async function scanDocument() {
   const items = [];
   scanAttribute(document.querySelectorAll("video[src], audio[src], source[src]"), "src", items);
   // Intentionally NOT scanning <a href> — too many false positives on listing pages
   scanScriptText(document.querySelectorAll("script"), items);
 
-  if (!items.length) return;
-  chrome.runtime.sendMessage({
+  if (!items.length) return 0;
+  await chrome.runtime.sendMessage({
     type: MESSAGE_MEDIA_ADD_DETECTED,
     sourcePageUrl: location.href,
     title: document.title || "video",
     items
   });
+  return items.length;
 }
 
 function scanAttribute(nodes, attribute, items) {

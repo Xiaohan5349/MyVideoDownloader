@@ -4,7 +4,7 @@ import {
   normalizeMediaItem, parseDashManifest, parseHlsManifest, sanitizeFilename
 } from "./shared.js";
 
-console.log("[ds] Service worker started v1.6.4");
+console.log("[ds] Service worker started v1.6.5");
 
 const SETTINGS_KEY = "settings";
 const TAB_MEDIA_PREFIX = "tabMedia:";
@@ -55,10 +55,10 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 });
 
 // Full-page navigation destroys the old content script before it can send
-// page:clearMedia. Clear tab media when the main frame starts loading a new
-// URL; same-document navigations are still handled by the content script.
+// page:clearMedia. Clear tab media whenever the main frame starts loading,
+// including same-URL reloads; same-document navigation stays content-driven.
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
-  if (changeInfo.status === "loading" && changeInfo.url) {
+  if (changeInfo.status === "loading") {
     enqueueTabMediaMutation(tabId, () => chrome.storage.local.remove(tabKey(tabId))).catch(() => {});
   }
 });
@@ -321,17 +321,35 @@ async function enrichMediaItem(item) {
 async function enrichDirectMediaSize(item) {
   const tabId = await resolveTabId(item);
   if (typeof tabId !== "number") return item;
-  try {
-    const response = await chrome.tabs.sendMessage(tabId, {
+
+  const pageProbe = chrome.tabs.sendMessage(tabId, {
       type: "page:fetchSize",
       url: item.url
-    }, { frameId: item.frameId ?? 0 });
-    const size = Number(response?.size);
-    if (!response?.ok || !Number.isFinite(size) || size <= 0) return item;
-    return { ...item, size, sizeSource: "exact" };
-  } catch {
-    return item;
-  }
+    }, { frameId: item.frameId ?? 0 })
+    .then((response) => positiveSize(response?.ok ? response.size : null))
+    .catch(() => null);
+
+  const helperProbe = fetch(`${HELPER_URL}/inspect`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      url: item.url,
+      kind: "direct",
+      headers: helperHeadersForMedia(item)
+    })
+  }).then(async (response) => {
+    const payload = await response.json().catch(() => ({}));
+    return positiveSize(response.ok ? payload.totalBytes : null);
+  }).catch(() => null);
+
+  const [pageSize, helperSize] = await Promise.all([pageProbe, helperProbe]);
+  const size = pageSize || helperSize;
+  return size ? { ...item, size, sizeSource: "exact" } : item;
+}
+
+function positiveSize(value) {
+  const size = Number(value);
+  return Number.isFinite(size) && size > 0 ? size : null;
 }
 
 async function enrichVariantsFromContent(tabId, variants, frameId = 0) {
@@ -702,7 +720,12 @@ function helperHeadersForMedia(media) {
     if (!value || byName.has(name.toLowerCase())) return;
     byName.set(name.toLowerCase(), { name, value });
   };
-  add("Accept", media.kind === "dash" ? "application/dash+xml,*/*" : "application/vnd.apple.mpegurl,*/*");
+  const accept = media.kind === "dash"
+    ? "application/dash+xml,*/*"
+    : media.kind === "hls"
+      ? "application/vnd.apple.mpegurl,*/*"
+      : "video/*,audio/*,application/octet-stream,*/*";
+  add("Accept", accept);
   add("Referer", media.sourcePageUrl || "");
   add("Origin", originForUrl(media.sourcePageUrl));
   add("User-Agent", typeof navigator !== "undefined" ? navigator.userAgent : "");

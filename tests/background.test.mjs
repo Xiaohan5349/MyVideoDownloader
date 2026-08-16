@@ -199,10 +199,51 @@ test("MEDIA_GET_FOR_TAB enriches unknown direct media size from the page", async
     }]
   });
   mock.tabs.sendMessageResult = { ok: true, size: 456789012 };
+  globalThis.fetch = async () => new Response(JSON.stringify({ ok: true, totalBytes: null }), {
+    status: 200,
+    headers: { "Content-Type": "application/json" }
+  });
 
   const response = await sendRuntimeMessage({ type: "media:getForTab", tabId: 10 });
   assert.equal(response.ok, true);
   assert.equal(response.items[0].size, 456789012);
+  assert.equal(response.items[0].sizeSource, "exact");
+});
+
+test("MEDIA_GET_FOR_TAB falls back to helper for unknown direct media size", async () => {
+  await mock.storage.local.set({
+    "tabMedia:10": [{
+      id: "https://site.example::https://cdn.example.com/video.mp4",
+      url: "https://cdn.example.com/video.mp4",
+      sourcePageUrl: "https://site.example",
+      pageUrl: "https://site.example",
+      title: "Direct",
+      extension: "mp4",
+      kind: "direct",
+      tabId: 10,
+      frameId: 0,
+      size: null,
+      quality: "",
+      detectedAt: 5,
+      headers: [{ name: "Cookie", value: "session=test" }],
+      variants: []
+    }]
+  });
+  mock.tabs.sendMessageResult = { ok: false, size: null };
+  globalThis.fetch = async (url, options) => {
+    assert.equal(String(url), "http://127.0.0.1:8765/inspect");
+    const body = JSON.parse(options.body);
+    assert.equal(body.kind, "direct");
+    assert.ok(body.headers.some((header) => header.name.toLowerCase() === "cookie"));
+    return new Response(JSON.stringify({ ok: true, totalBytes: 765432100 }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" }
+    });
+  };
+
+  const response = await sendRuntimeMessage({ type: "media:getForTab", tabId: 10 });
+  assert.equal(response.ok, true);
+  assert.equal(response.items[0].size, 765432100);
   assert.equal(response.items[0].sizeSource, "exact");
 });
 
@@ -218,6 +259,7 @@ test("MEDIA_GET_FOR_TAB keeps same-title direct media with different URLs", asyn
         extension: "mp4",
         kind: "direct",
         quality: "360p",
+        size: 2 * 1024 * 1024,
         detectedAt: 3,
         headers: [],
         variants: []
@@ -231,6 +273,7 @@ test("MEDIA_GET_FOR_TAB keeps same-title direct media with different URLs", asyn
         extension: "mp4",
         kind: "direct",
         quality: "720p",
+        size: 3 * 1024 * 1024,
         detectedAt: 2,
         headers: [],
         variants: []
@@ -337,6 +380,16 @@ test("tab main-frame navigation clears the previous page media", async () => {
   const handler = mock.listeners.onTabUpdated;
   assert.ok(handler, "tabs.onUpdated listener should be registered");
   handler(10, { status: "loading", url: "https://site.example/new" });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const stored = await mock.storage.local.get("tabMedia:10");
+  assert.equal(stored["tabMedia:10"], undefined);
+});
+
+test("same-URL reload clears the previous page media", async () => {
+  await mock.storage.local.set({ "tabMedia:10": [{ id: "old", title: "Old" }] });
+  const handler = mock.listeners.onTabUpdated;
+  assert.ok(handler, "tabs.onUpdated listener should be registered");
+  handler(10, { status: "loading" });
   await new Promise((resolve) => setTimeout(resolve, 10));
   const stored = await mock.storage.local.get("tabMedia:10");
   assert.equal(stored["tabMedia:10"], undefined);

@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.6.5 - 2026-08-16
+
+### Fixed
+- Unknown direct sizes now use page and helper probes in parallel, with captured request headers available to the helper fallback.
+- Direct-size probes reject HTML/JSON/XML responses instead of reporting login or error page sizes.
+- Rescan waits for detected media to reach background storage before refreshing the popup.
+- Reloading the same URL now clears stale tab media before new requests are detected.
+
 ## v1.6.4 - 2026-08-16
 
 ### Fixed
