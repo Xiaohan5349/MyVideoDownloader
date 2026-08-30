@@ -914,8 +914,11 @@ async function sweepStalledJobs(now = Date.now(), timeoutMs = JOB_STALL_TIMEOUT_
   for (const job of jobs.values()) {
     if (job.status !== "running") continue;
     // Browser-fed HLS jobs can pause between uploads while the content
-    // script fetches and retries segments, so use a more lenient timeout.
-    const stallTimeout = job.inputMode === "browser" ? timeoutMs * 3 : timeoutMs;
+    // script fetches and retries segments, so use a much more lenient timeout.
+    // Helper-direct jobs also get extra room for transient CDN hiccups.
+    const stallTimeout = job.inputMode === "browser"
+      ? Math.max(timeoutMs * 3, 10 * 60_000)
+      : timeoutMs * 2;
     const lastActivityAt = Number(job.lastActivityAt || job.lastByteProgressAt || Date.parse(job.startedAt) || now);
     if (now - lastActivityAt < stallTimeout) continue;
 
@@ -3003,7 +3006,7 @@ function renderHomePage() {
       return ({ queued: 'Queued', running: 'Downloading', completed: 'Completed', failed: 'Failed', cancelled: 'Stopped', missing: 'File missing' })[value] || value;
     }
     function humanJobMessage(job) {
-      if (job.error === 'DOWNLOAD_STALLED') return 'No data received for 2 minutes. The task was stopped.';
+      if (job.error === 'DOWNLOAD_STALLED') return job.progressText || 'No data received. The task was stopped.';
       if (job.error === 'HELPER_RESTARTED') return 'Download was interrupted when the helper stopped.';
       return job.error || job.progressText || 'Waiting';
     }

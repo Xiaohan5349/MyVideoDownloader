@@ -249,7 +249,7 @@
     "message": "已停止助手任务。"
   },
   "msgDownloadStalled": {
-    "message": "两分钟内未收到新数据，任务已自动停止。"
+    "message": "未收到新数据，任务已停止。"
   },
   "msgHelperRestarted": {
     "message": "助手停止时下载被中断。"

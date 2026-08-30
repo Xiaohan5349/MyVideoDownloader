@@ -249,7 +249,7 @@
     "message": "Stopped helper job."
   },
   "msgDownloadStalled": {
-    "message": "No data received for 2 minutes. The task was stopped."
+    "message": "No data received. The task was stopped."
   },
   "msgHelperRestarted": {
     "message": "Download was interrupted when the helper stopped."

@@ -367,7 +367,7 @@ it("marks a running job failed when downloaded bytes stop advancing", async () =
     progressText: "Downloading"
   });
 
-  await sweepStalledJobs(10_001, 10_000);
+  await sweepStalledJobs(20_001, 10_000);
 
   assert.equal(jobs.get(id).status, "failed");
   assert.equal(jobs.get(id).error, "DOWNLOAD_STALLED");

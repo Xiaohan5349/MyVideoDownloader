@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.6.9 - 2026-08-16
+
+### Fixed
+- Stall timeout messages now show the actual timeout instead of always saying 2 minutes.
+- Helper-direct jobs receive a 2x stall timeout and browser-fed jobs a minimum 10-minute timeout, reducing false DOWNLOAD_STALLED failures during transient CDN slowdowns.
+
 ## v1.6.8 - 2026-08-16
 
 ### Fixed

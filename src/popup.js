@@ -785,7 +785,7 @@ function humanStatus(value) {
 }
 
 function humanJobMessage(job) {
-  if (job.error === "DOWNLOAD_STALLED") return getMessage("msgDownloadStalled");
+  if (job.error === "DOWNLOAD_STALLED") return job.progressText || getMessage("msgDownloadStalled");
   if (job.error === "HELPER_RESTARTED") return getMessage("msgHelperRestarted");
   return job.error || job.progressText || sizeLabel(job);
 }
