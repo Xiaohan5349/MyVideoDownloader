@@ -7,6 +7,7 @@ import {
   fallbackBandwidthForQuality,
   mergeSettings,
   inferQualityLabel,
+  jobProgressFraction,
   normalizeMediaItem,
   parseDashManifest,
   parseHlsManifest,
@@ -232,4 +233,20 @@ test("inferQualityLabel and normalizeMediaItem tolerate malformed percent encodi
   assert.equal(item.kind, "direct");
   assert.equal(item.extension, "mp4");
   assert.equal(item.quality, "");
+});
+
+test("jobProgressFraction prefers segments, then media time, then bytes", () => {
+  assert.equal(jobProgressFraction({ status: "running", receivedSegments: 25, totalSegments: 100, downloadedBytes: 1, totalBytes: 2 }), 0.25);
+  assert.equal(jobProgressFraction({ status: "running", downloadedSeconds: 30, durationSeconds: 120, downloadedBytes: 9, totalBytes: 10 }), 0.25);
+  assert.equal(jobProgressFraction({ status: "running", downloadedBytes: 50, totalBytes: 200 }), 0.25);
+});
+
+test("jobProgressFraction caps running jobs below 100% and returns null when unknown", () => {
+  // Estimated totals can undershoot; a running job must not look finished.
+  assert.equal(jobProgressFraction({ status: "running", downloadedBytes: 300, totalBytes: 200 }), 0.99);
+  assert.equal(jobProgressFraction({ status: "completed", downloadedBytes: 300, totalBytes: 200 }), 1);
+  assert.equal(jobProgressFraction({ status: "running", downloadedBytes: -5, totalBytes: 200 }), 0);
+  assert.equal(jobProgressFraction({ status: "running", downloadedBytes: 100 }), null);
+  assert.equal(jobProgressFraction({ status: "queued" }), null);
+  assert.equal(jobProgressFraction(), null);
 });

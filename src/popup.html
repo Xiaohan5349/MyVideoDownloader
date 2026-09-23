@@ -6,46 +6,52 @@
     <title data-i18n="brandName">DS Video Downloader</title>
     <link rel="stylesheet" href="popup.css">
   </head>
-  <body>
+  <body class="is-popup">
+    <svg width="0" height="0" class="icon-sprite" aria-hidden="true">
+      <symbol id="i-down" viewBox="0 0 24 24"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></symbol>
+      <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.3-5.7M20 4v5h-5"/></symbol>
+      <symbol id="i-lock" viewBox="0 0 24 24"><path d="M5 11h14v9H5zM8 11V8a4 4 0 0 1 8 0v3"/></symbol>
+    </svg>
     <main class="popup">
       <header class="topbar">
-        <div>
-          <div class="brand-mark" aria-hidden="true"></div>
-          <h1 data-i18n="brandName">DS Video Downloader</h1>
-          <div id="helperSummary" class="helper-summary" data-i18n="statusCheckingHelper">Checking helper...</div>
-        </div>
-        <button id="rescanButton" class="secondary-button" type="button" data-i18n-title="btnRescanTitle" data-i18n="btnRescan">Rescan</button>
+        <div class="brand-mark" aria-hidden="true"><i></i></div>
+        <h1 data-i18n="brandName">DS Video Downloader</h1>
+        <button id="rescanButton" class="slant-button" type="button" data-i18n-title="btnRescanTitle">
+          <span><svg class="icon"><use href="#i-refresh"/></svg><span data-i18n="btnRescan">Rescan</span></span>
+        </button>
       </header>
-      <section id="notice" class="notice" hidden></section>
+      <div id="helperSummary" class="helper-summary" data-i18n="statusCheckingHelper">Checking helper...</div>
 
       <nav class="tabs" data-i18n-aria="tabsMedia">
-        <button class="tab-button is-active" type="button" data-panel="mediaPanel" data-i18n="tabsMedia">Media</button>
-        <button class="tab-button" type="button" data-panel="helperPanel" data-i18n="tabsHelper">Helper</button>
-        <button class="tab-button" type="button" data-panel="settingsPanel" data-i18n="tabsSettings">Settings</button>
+        <button class="tab-button is-active" type="button" data-panel="mediaPanel"><span><span data-i18n="tabsMedia">Media</span><em id="mediaTabCount" class="tab-count" hidden></em></span></button>
+        <button class="tab-button" type="button" data-panel="helperPanel"><span><span data-i18n="tabsHelper">Helper</span><em id="helperTabCount" class="tab-count" hidden></em></span></button>
+        <button class="tab-button" type="button" data-panel="settingsPanel"><span><span data-i18n="tabsSettings">Settings</span></span></button>
       </nav>
+
+      <section id="notice" class="notice" role="status" hidden></section>
 
       <section id="mediaPanel" class="panel">
         <div class="section-bar">
-          <span id="mediaCount">0 detected</span>
+          <span id="mediaCount" class="section-title">0 detected</span>
           <span id="filterSummary" class="muted"></span>
         </div>
         <section id="mediaList" class="media-list" aria-live="polite"></section>
       </section>
 
       <section id="helperPanel" class="panel" hidden>
-        <div class="section-bar">
-          <span data-i18n="tabsHelper">Helper jobs</span>
-          <button id="openDashboardButton" class="text-button" type="button" data-i18n="btnOpenDashboard">Dashboard</button>
-          <button id="refreshHelperButton" class="text-button" type="button" data-i18n="btnRefresh">Refresh</button>
-          <button id="clearMissingButton" class="text-button" type="button" data-i18n="btnClearMissing">Clear missing</button>
-        </div>
         <div id="helperStatus" class="helper-status"></div>
+        <div class="section-bar toolbar">
+          <span class="section-title" data-i18n="tabsHelper">Helper jobs</span>
+          <button id="openDashboardButton" class="slant-button is-small" type="button"><span data-i18n="btnOpenDashboard">Dashboard</span></button>
+          <button id="refreshHelperButton" class="slant-button is-small" type="button"><span data-i18n="btnRefresh">Refresh</span></button>
+          <button id="clearMissingButton" class="slant-button is-small" type="button"><span data-i18n="btnClearMissing">Clear missing</span></button>
+        </div>
         <section id="helperJobs" class="job-list" aria-live="polite"></section>
       </section>
 
       <section id="settingsPanel" class="panel" hidden>
         <label class="setting-row">
-          <span data-i18n="settingsFilterLabel">Ignore direct media smaller than</span>
+          <span class="setting-label" data-i18n="settingsFilterLabel">Ignore direct media smaller than</span>
           <select id="minSizeSelect">
             <option value="0" data-i18n="settingsNoFilter">Do not filter</option>
             <option value="102400">100 KB</option>
@@ -58,16 +64,16 @@
           <input id="showUnsupportedInput" type="checkbox">
           <span data-i18n="settingsShowUnsupported">Show unsupported or protected media</span>
         </label>
-        <label class="setting-row">
-          <span data-i18n="settingsDownloadDirLabel">Helper download directory</span>
+        <div class="setting-row">
+          <label class="setting-label" for="downloadDirInput" data-i18n="settingsDownloadDirLabel">Helper download directory</label>
           <input id="downloadDirInput" type="text" data-i18n-placeholder="settingsDownloadDirPlaceholder" placeholder="C:\Users\you\Videos">
-        </label>
-        <div class="setting-actions">
-          <button id="pickDownloadDirButton" class="secondary-button" type="button" data-i18n="btnSelectFolder">Select folder</button>
-          <button id="saveDownloadDirButton" class="secondary-button" type="button" data-i18n="btnSaveHelperFolder">Save helper folder</button>
+          <div class="setting-actions">
+            <button id="pickDownloadDirButton" class="outline-button" type="button" data-i18n="btnSelectFolder">Select folder</button>
+            <button id="saveDownloadDirButton" class="outline-button is-primary" type="button" data-i18n="btnSaveHelperFolder">Save helper folder</button>
+          </div>
         </div>
         <label class="setting-row">
-          <span data-i18n="settingsLanguageLabel">Language</span>
+          <span class="setting-label" data-i18n="settingsLanguageLabel">Language</span>
           <select id="langSelector" class="lang-select">
             <option value="en" data-i18n="settingsLanguageEn">English</option>
             <option value="zh_CN" data-i18n="settingsLanguageZh">简体中文</option>
@@ -78,15 +84,18 @@
 
       <template id="mediaItemTemplate">
         <article class="media-item">
-          <div class="media-thumb" aria-hidden="true"></div>
+          <div class="media-kind"></div>
           <div class="media-main">
             <div class="media-title-row">
               <div class="media-title"></div>
-              <div class="media-kind"></div>
             </div>
             <div class="media-meta-row"></div>
             <div class="variant-list" hidden></div>
             <div class="job-status" hidden></div>
+          </div>
+          <div class="media-go" aria-hidden="true">
+            <svg class="icon icon-download"><use href="#i-down"/></svg>
+            <svg class="icon icon-locked"><use href="#i-lock"/></svg>
           </div>
           <button class="download-button" type="button" data-i18n="btnDownload">Download</button>
         </article>
@@ -94,11 +103,12 @@
 
       <template id="helperJobTemplate">
         <article class="helper-job">
+          <div class="helper-job-state"></div>
           <div class="helper-job-main">
             <div class="helper-job-title-row">
               <div class="helper-job-title"></div>
-              <div class="helper-job-state"></div>
             </div>
+            <div class="progress-bar" aria-hidden="true"><i></i></div>
             <div class="helper-job-meta"></div>
             <div class="helper-job-path"></div>
           </div>

@@ -298,5 +298,20 @@
   },
   "msgDownloadInProgress": {
     "message": "Download already in progress."
+  },
+  "confirmDownloadTitle": {
+    "message": "Start download"
+  },
+  "labelDirectDownload": {
+    "message": "Direct download"
+  },
+  "labelStreamKind": {
+    "message": "{{kind}} stream"
+  },
+  "msgClickToDownload": {
+    "message": "Click to download {{name}}"
+  },
+  "statusConnecting": {
+    "message": "Connecting to helper..."
   }
 }

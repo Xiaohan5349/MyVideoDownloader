@@ -90,7 +90,9 @@ it("GET / returns HTML dashboard", async () => {
   const res = await fetchJson("/");
   assert.equal(res.status, 200);
   assert.ok(typeof res.body === "string" && res.body.includes("<!doctype html>"));
-  assert.match(res.body, /app-background\.webp/);
+  // Must work offline: no external stylesheets, fonts, scripts or images.
+  assert.doesNotMatch(res.body, /<(link|script|img)[^>]+(href|src)="https?:/i);
+  assert.doesNotMatch(res.body, /url\(\s*["']?https?:/i);
   assert.match(res.body, /Open folder/);
   assert.match(res.body, /Remove file/);
   assert.match(res.body, /Remove record/);

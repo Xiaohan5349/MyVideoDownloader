@@ -369,3 +369,21 @@ function resolveUrl(url, baseUrl) {
     return url;
   }
 }
+
+// Fraction (0..1) of a helper job that is done, for progress bars. Prefers the
+// most precise signal the helper reports: browser segment counts, then ffmpeg
+// media time, then bytes. Returns null when progress is unknown. Estimated
+// totals can undershoot, so a running job is capped just below 100%.
+export function jobProgressFraction(job = {}) {
+  let fraction = null;
+  if (Number(job.totalSegments) > 0) {
+    fraction = Number(job.receivedSegments || 0) / Number(job.totalSegments);
+  } else if (Number(job.durationSeconds) > 0 && Number.isFinite(Number(job.downloadedSeconds))) {
+    fraction = Number(job.downloadedSeconds) / Number(job.durationSeconds);
+  } else if (Number(job.totalBytes) > 0 && Number.isFinite(Number(job.downloadedBytes))) {
+    fraction = Number(job.downloadedBytes) / Number(job.totalBytes);
+  }
+  if (fraction === null || !Number.isFinite(fraction)) return null;
+  const cap = job.status === "completed" ? 1 : 0.99;
+  return Math.min(cap, Math.max(0, fraction));
+}

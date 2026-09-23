@@ -1,4 +1,4 @@
-import { MESSAGE, sanitizeFilename } from "./shared.js";
+import { MESSAGE, jobProgressFraction, sanitizeFilename } from "./shared.js";
 import { getMessage, getUserLanguage, setUserLanguage, applyLanguageUI } from "./i18n.js";
 
 const list = document.querySelector("#mediaList");
@@ -20,6 +20,8 @@ const downloadDirInput = document.querySelector("#downloadDirInput");
 const saveDownloadDirButton = document.querySelector("#saveDownloadDirButton");
 const pickDownloadDirButton = document.querySelector("#pickDownloadDirButton");
 const langSelector = document.querySelector("#langSelector");
+const mediaTabCount = document.querySelector("#mediaTabCount");
+const helperTabCount = document.querySelector("#helperTabCount");
 
 let activeTab = null;
 let settings = null;
@@ -150,6 +152,7 @@ async function loadHelperStatus() {
       helperSummary.textContent = online
         ? getMessage("msgActiveJobs", { active: String(activeCount), total: String(totalCount), plural: totalCount === 1 ? "" : "s" })
         : getMessage("statusHelperOffline");
+      setTabCount(helperTabCount, online ? activeCount : 0);
       helperStatus.className = `helper-status ${online ? "is-online" : "is-offline"}`;
       helperStatus.textContent = online
         ? getMessage("msgHelperRunning", { dir: downloadDir || getMessage("labelDefaultFolder") })
@@ -177,6 +180,7 @@ async function loadHelperStatus() {
 function renderMedia(items) {
   list.textContent = "";
   mediaCount.textContent = getMessage("msgCountDetected", { count: String(items.length) });
+  setTabCount(mediaTabCount, items.length);
 
   if (!items.length) {
     showNotice(getMessage("msgEmptyHint"));
@@ -186,6 +190,8 @@ function renderMedia(items) {
   hideNotice();
   for (const item of items) {
     const node = template.content.firstElementChild.cloneNode(true);
+    node.dataset.kind = item.kind;
+    node.classList.toggle("is-locked", Boolean(item.isProtected));
     const title = node.querySelector(".media-title");
     const kind = node.querySelector(".media-kind");
     const meta = node.querySelector(".media-meta-row");
@@ -202,10 +208,10 @@ function renderMedia(items) {
     if (button) button.remove();
 
     // Make the entire media item a clickable download trigger
-    node.style.cursor = "pointer";
+    if (!item.isProtected) node.style.cursor = "pointer";
     node.title = item.isProtected
-      ? (item.unsupportedReason || "Unsupported")
-      : `Click to download ${sanitizeFilename(item.title, item.extension)}`;
+      ? (item.unsupportedReason || getMessage("labelUnsupported"))
+      : getMessage("msgClickToDownload", { name: sanitizeFilename(item.title, item.extension) });
 
     if (!item.isProtected) {
       node.addEventListener("click", (e) => {
@@ -248,6 +254,8 @@ function renderHelperJobs(jobs) {
       state.className = `helper-job-state ${job.status === "completed" ? "is-complete" : ""} ${job.status === "failed" ? "is-error" : ""} ${job.status === "cancelled" ? "is-cancelled" : ""} ${job.status === "missing" ? "is-missing" : ""}`;
       meta.textContent = humanJobMessage(job);
       pathEl.textContent = job.outputPath || job.url;
+      existing.dataset.status = job.status;
+      setProgress(existing, job);
 
       const isActive = job.status === "queued" || job.status === "running";
       const fileExists = job.fileExists !== false && Boolean(job.outputPath);
@@ -260,7 +268,10 @@ function renderHelperJobs(jobs) {
     } else {
       // Create new node
       const node = helperJobTemplate.content.firstElementChild.cloneNode(true);
+      translateNode(node);
       node.dataset.jobId = job.id;
+      node.dataset.status = job.status;
+      setProgress(node, job);
       node.querySelector(".helper-job-title").textContent = jobTitle(job);
       const state = node.querySelector(".helper-job-state");
       state.textContent = humanStatus(job.status);
@@ -308,38 +319,87 @@ function renderHelperJobs(jobs) {
 }
 
 function confirmDownload(item, callback) {
-  // Remove any existing overlay
-  const existing = document.querySelector(".confirm-overlay");
-  if (existing) existing.remove();
+  const kindLabel = item.kind === "direct"
+    ? getMessage("labelDirectDownload")
+    : getMessage("labelStreamKind", { kind: item.kind.toUpperCase() });
+  const quality = item.quality ? ` (${item.quality})` : "";
+  const dialog = openDialog(getMessage("confirmDownloadTitle"), `${sanitizeFilename(item.title, item.extension)}${quality}`, kindLabel, [
+    { label: getMessage("btnCancel"), className: "btn-ghost" },
+    { label: getMessage("btnDownload"), className: "btn-primary", onClick: callback, focus: true }
+  ]);
+  return dialog;
+}
+
+// Builds a modal: yellow header slab, paper body, action buttons. Every button
+// closes the dialog first, then runs its onClick. Backdrop click and Escape
+// behave like the cancel path (close without a callback).
+let closeActiveDialog = null;
+
+function openDialog(titleText, nameText, kindText, actions, actionsClassName = "") {
+  closeActiveDialog?.();
 
   const overlay = document.createElement("div");
   overlay.className = "confirm-overlay";
+  const dialog = document.createElement("div");
+  dialog.className = "confirm-dialog";
+  dialog.setAttribute("role", "dialog");
+  dialog.setAttribute("aria-modal", "true");
 
-  const title = sanitizeFilename(item.title, item.extension);
-  const quality = item.quality ? ` (${item.quality})` : "";
-  const kindLabel = item.kind === "direct" ? "Direct download" : `${item.kind.toUpperCase()} stream`;
+  const head = document.createElement("header");
+  head.className = "confirm-head";
+  const title = document.createElement("h3");
+  title.textContent = titleText;
+  head.appendChild(title);
 
-  overlay.innerHTML = `
-    <div class="confirm-dialog">
-      <h3>Start Download</h3>
-      <p>${title}${quality}<br><span style="color:var(--faint);font-size:10px;">${kindLabel}</span></p>
-      <div class="confirm-actions">
-        <button class="btn-cancel">Cancel</button>
-        <button class="btn-primary">Download</button>
-      </div>
-    </div>
-  `;
+  const body = document.createElement("div");
+  body.className = "confirm-body";
+  const name = document.createElement("p");
+  name.className = "confirm-name";
+  name.textContent = nameText;
+  body.appendChild(name);
+  if (kindText) {
+    const kind = document.createElement("p");
+    kind.className = "confirm-kind";
+    kind.textContent = kindText;
+    body.appendChild(kind);
+  }
 
-  overlay.querySelector(".btn-cancel").addEventListener("click", () => overlay.remove());
-  overlay.querySelector(".btn-primary").addEventListener("click", () => {
+  const row = document.createElement("div");
+  row.className = `confirm-actions ${actionsClassName}`.trim();
+  let focusTarget = null;
+  const close = () => {
     overlay.remove();
-    callback();
-  });
-  overlay.addEventListener("click", (e) => {
-    if (e.target === overlay) overlay.remove();
-  });
+    document.removeEventListener("keydown", onKey);
+    if (closeActiveDialog === close) closeActiveDialog = null;
+  };
+  closeActiveDialog = close;
+  const onKey = (event) => {
+    if (event.key === "Escape") close();
+  };
+  for (const action of actions) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = action.className || "";
+    button.textContent = action.label;
+    button.addEventListener("click", () => {
+      close();
+      action.onClick?.();
+    });
+    if (action.focus) focusTarget = button;
+    row.appendChild(button);
+  }
+  body.appendChild(row);
 
+  dialog.appendChild(head);
+  dialog.appendChild(body);
+  overlay.appendChild(dialog);
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay) close();
+  });
+  document.addEventListener("keydown", onKey);
   document.body.appendChild(overlay);
+  (focusTarget || row.querySelector("button"))?.focus?.();
+  return overlay;
 }
 
 async function startDownload(item, variantContainer, statusContainer) {
@@ -355,7 +415,7 @@ async function startDownload(item, variantContainer, statusContainer) {
   if (statusContainer) {
     statusContainer.hidden = false;
     statusContainer.classList.add("is-pending");
-    statusContainer.textContent = "Connecting to helper...";
+    statusContainer.textContent = getMessage("statusConnecting");
   }
 
   try {
@@ -456,11 +516,16 @@ function renderVariants(container, variants, item = null) {
       chip.type = "button";
       chip.addEventListener("click", () => confirmDownload(item, () => startVariantDownload(item, variant, container.closest(".media-item")?.querySelector(".job-status"))));
     }
-    chip.textContent = [
-      variant.quality || getMessage("labelStream"),
+    const quality = document.createElement("b");
+    quality.textContent = variant.quality || getMessage("labelStream");
+    const detail = document.createElement("small");
+    detail.textContent = [
       variant.bandwidth ? `${Math.round(variant.bandwidth / 1000)} kbps` : "",
       variantSizeLabel(variant)
-    ].filter(Boolean).join(" - ");
+    ].filter(Boolean).join(" · ");
+    chip.appendChild(quality);
+    if (detail.textContent) chip.appendChild(detail);
+    chip.title = [quality.textContent, detail.textContent].filter(Boolean).join(" - ");
     container.appendChild(chip);
   }
   container.hidden = false;
@@ -528,6 +593,7 @@ function pollJob(jobId, container, onSettled) {
 
     if (!response?.ok) {
       container.hidden = false;
+      container.classList.remove("is-running");
       container.classList.add("is-error");
       container.textContent = response?.error || getMessage("msgCouldNotReadHelperStatus");
       window.clearInterval(timer);
@@ -549,7 +615,7 @@ function pollJob(jobId, container, onSettled) {
 }
 function clearPendingStatus(container) {
   if (!container) return;
-  container.classList.remove("is-pending");
+  container.classList.remove("is-pending", "is-running");
   container.hidden = true;
   container.textContent = "";
 }
@@ -557,6 +623,8 @@ function clearPendingStatus(container) {
 function showJobStatus(container, job) {
   if (!container || !job) return;
   container.hidden = false;
+  container.classList.toggle("is-running", job.status === "queued" || job.status === "running");
+  setProgress(container, job);
   container.classList.toggle("is-complete", job.status === "completed");
   container.classList.toggle("is-error", job.status === "failed");
   container.classList.toggle("is-cancelled", job.status === "cancelled");
@@ -590,32 +658,12 @@ function openRemoveDialog(jobId, fileExists, title) {
     return;
   }
 
-  document.querySelector(".confirm-overlay")?.remove();
-  const overlay = document.createElement("div");
-  overlay.className = "confirm-overlay";
-  overlay.innerHTML = `
-    <div class="confirm-dialog">
-      <h3>${getMessage("removeDialogTitle")}</h3>
-      <p></p>
-      <div class="confirm-actions remove-actions">
-        <button type="button" data-remove-mode="file">${getMessage("btnRemoveFile")}</button>
-        <button type="button" data-remove-mode="record">${getMessage("btnRemoveRecord")}</button>
-        <button class="btn-primary" type="button" data-remove-mode="both">${getMessage("btnRemoveBoth")}</button>
-        <button type="button" data-remove-mode="cancel">${getMessage("btnCancel")}</button>
-      </div>
-    </div>`;
-  overlay.querySelector("p").textContent = title;
-  overlay.addEventListener("click", (event) => {
-    if (event.target === overlay || event.target.dataset.removeMode === "cancel") {
-      overlay.remove();
-      return;
-    }
-    const mode = event.target.dataset.removeMode;
-    if (!mode) return;
-    overlay.remove();
-    removeJob(jobId, mode);
-  });
-  document.body.appendChild(overlay);
+  openDialog(getMessage("removeDialogTitle"), title, "", [
+    { label: getMessage("btnRemoveBoth"), className: "btn-danger", onClick: () => removeJob(jobId, "both") },
+    { label: getMessage("btnRemoveFile"), onClick: () => removeJob(jobId, "file") },
+    { label: getMessage("btnRemoveRecord"), onClick: () => removeJob(jobId, "record") },
+    { label: getMessage("btnCancel"), className: "btn-ghost", focus: true }
+  ], "remove-actions");
 }
 
 async function removeJob(jobId, mode) {
@@ -805,6 +853,27 @@ function formatBytes(bytes) {
     index += 1;
   }
   return `${value >= 10 || index === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[index]}`;
+}
+
+function setTabCount(element, count) {
+  if (!element) return;
+  element.textContent = count > 0 ? String(count) : "";
+  element.hidden = !(count > 0);
+}
+
+// Progress bars read a --p custom property. Unknown progress leaves it unset,
+// which the CSS renders as a full, animated "working" stripe.
+function setProgress(element, job) {
+  const fraction = jobProgressFraction(job);
+  if (fraction === null) element.style.removeProperty("--p");
+  else element.style.setProperty("--p", `${(fraction * 100).toFixed(1)}%`);
+}
+
+// Template clones never pass through applyLanguageUI, so translate them here.
+function translateNode(root) {
+  for (const el of root.querySelectorAll("[data-i18n]")) {
+    el.textContent = getMessage(el.getAttribute("data-i18n"));
+  }
 }
 
 function showNotice(message, isError = false) {

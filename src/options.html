@@ -6,58 +6,52 @@
     <title data-i18n="brandName">DS Video Downloader</title>
     <link rel="stylesheet" href="popup.css">
     <style>
-      .options-page { max-width: 520px; margin: 40px auto; padding: 24px; }
-      .options-head { text-align: center; margin-bottom: 32px; }
-      .options-head .brand-mark { margin: 0 auto 12px; }
-      .options-head h1 { font-size: 20px; font-weight: 800; color: var(--ink); letter-spacing: 0.04em; }
-      .options-card {
-        background: var(--glass); border: 1px solid var(--line); border-radius: 4px;
-        padding: 20px; margin-bottom: 16px;
+      body { min-height: 100vh; background: repeating-linear-gradient(-45deg, rgba(255, 255, 255, 0.018) 0 10px, transparent 10px 20px), var(--bg); }
+      .options-page { max-width: 560px; margin: 0 auto; padding: 32px 16px 40px; }
+      .options-head {
+        position: relative; display: flex; align-items: center; gap: 14px; padding: 18px 20px 24px;
+        background: var(--yellow); color: var(--ink);
+        clip-path: polygon(0 0, 100% 0, 100% calc(100% - 18px), calc(100% - 40px) 100%, 0 100%);
       }
-      .options-card:hover { border-color: var(--line-strong); }
-      .setting-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 4px 0; }
-      .setting-row span { color: var(--ink); font-family: var(--sans); font-size: 14px; font-weight: 600; }
-      .lang-select {
-        background: var(--bg); color: var(--ink); border: 1px solid var(--line-strong);
-        border-radius: 2px; padding: 6px 32px 6px 12px; font-family: var(--mono); font-size: 13px;
-        font-weight: 600; cursor: pointer; appearance: none;
-        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M3 5l3 3 3-3' fill='none' stroke='%238B8982' stroke-width='1.5'/%3E%3C/svg%3E");
-        background-repeat: no-repeat; background-position: right 10px center;
-        transition: border-color 0.25s cubic-bezier(0.19, 1, 0.22, 1);
+      .options-head::after {
+        content: ""; position: absolute; top: 0; right: 0; bottom: 0; width: 40%;
+        background: repeating-linear-gradient(-45deg, rgba(0, 0, 0, 0.12) 0 7px, transparent 7px 14px); pointer-events: none;
       }
-      .lang-select:focus { outline: none; border-color: var(--cyan); box-shadow: 0 0 0 2px var(--cyan-soft); }
+      .options-head h1 { font-size: clamp(22px, 6vw, 32px); white-space: normal; line-height: 0.95; }
+      .options-card { margin-top: 18px; }
+      .options-card .setting-row { margin: 0; }
       .options-saved {
-        text-align: center; color: var(--emerald); font-family: var(--mono); font-size: 12px;
-        font-weight: 600; margin-top: 8px; opacity: 0; transition: opacity 0.3s;
+        min-height: 20px; margin-top: 10px; color: var(--yellow);
+        font: var(--display-style) 800 12.5px var(--display); letter-spacing: 0.08em; text-transform: uppercase;
+        opacity: 0; transform: translateY(-4px); transition: opacity 200ms, transform 260ms var(--spring);
       }
-      .options-saved.visible { opacity: 1; }
-      .options-footer { text-align: center; margin-top: 32px; }
-      .options-footer p { color: var(--muted); font-family: var(--mono); font-size: 11px; }
-      .options-footer a { color: var(--cyan); text-decoration: none; }
+      .options-saved.visible { opacity: 1; transform: none; }
+      .options-footer { display: flex; gap: 14px; align-items: center; margin-top: 28px; color: var(--muted); font: 11px var(--mono); }
+      .options-footer a { color: var(--yellow); text-decoration: none; font: var(--display-style) 800 13px var(--display); letter-spacing: 0.06em; text-transform: uppercase; }
       .options-footer a:hover { text-decoration: underline; }
     </style>
   </head>
   <body>
-    <main class="popup options-page">
+    <main class="options-page">
       <header class="options-head">
-        <div class="brand-mark" aria-hidden="true"></div>
+        <div class="brand-mark" aria-hidden="true"><i></i></div>
         <h1 data-i18n="settingsHeading">DS Video Downloader Settings</h1>
       </header>
 
       <section class="options-card">
         <label class="setting-row">
-          <span data-i18n="settingsLanguageLabel">Language</span>
+          <span class="setting-label" data-i18n="settingsLanguageLabel">Language</span>
           <select id="langSelector" class="lang-select">
             <option value="en" data-i18n="settingsLanguageEn">English</option>
             <option value="zh_CN" data-i18n="settingsLanguageZh">简体中文</option>
           </select>
         </label>
-        <div id="savedMsg" class="options-saved"></div>
+        <div id="savedMsg" class="options-saved" role="status"></div>
       </section>
 
       <footer class="options-footer">
-        <p>DS Video Downloader v1.6.9</p>
-        <p><a href="https://github.com/Xiaohan5349/MyVideoDownloader" target="_blank" rel="noopener">GitHub</a></p>
+        <span>DS Video Downloader v1.6.9</span>
+        <a href="https://github.com/Xiaohan5349/MyVideoDownloader" target="_blank" rel="noopener">GitHub</a>
       </footer>
     </main>
     <script type="module" src="options.js"></script>

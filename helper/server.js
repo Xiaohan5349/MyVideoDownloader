@@ -1476,1410 +1476,215 @@ function writeHtml(res, body) {
   res.end(body);
 }
 
+function escapeHtmlText(value) {
+  return String(value).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
+}
+
+// Local dashboard served at "/". Self-contained (no external fonts or scripts) so it
+// works offline. Visual language matches the extension popup ("Cipher Pop").
 function renderHomePage() {
+  const safeDir = escapeHtmlText(downloadDir);
   return `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>DS Video Downloader</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=M+PLUS+1+Code:wght@400;600;700&family=Rajdhani:wght@500;600;700&display=swap" rel="stylesheet">
   <style>
     :root {
       color-scheme: dark;
-      --bg: #060709;
-      --ink: #E8E6E3;
-      --muted: #8B8982;
-      --faint: #5E5C55;
-      --line: rgba(255, 255, 255, 0.07);
-      --line-strong: rgba(255, 255, 255, 0.14);
-      --glass: rgba(255, 255, 255, 0.02);
-      --glass-elevated: rgba(255, 255, 255, 0.04);
-      --cyan: #00E5FF;
-      --cyan-soft: rgba(0, 229, 255, 0.08);
-      --cyan-glow: rgba(0, 229, 255, 0.04);
-      --emerald: #00E676;
-      --emerald-soft: rgba(0, 230, 118, 0.08);
-      --amber: #FFD600;
-      --amber-soft: rgba(255, 214, 0, 0.07);
-      --rose: #FF5252;
-      --rose-soft: rgba(255, 82, 82, 0.08);
-      --pink: #FF7EB3;
-      --pink-soft: rgba(255, 126, 179, 0.06);
-      --lavender: #A996FF;
-      --lavender-soft: rgba(169, 150, 255, 0.06);
-      --sans: "M PLUS Rounded 1c", "Zen Kaku Gothic New", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
-      --mono: "M PLUS 1 Code", "JetBrains Mono", "Cascadia Code", "SF Mono", ui-monospace, Consolas, monospace;
-      --ease: cubic-bezier(0.19, 1, 0.22, 1);
+      --bg: #111113; --panel: #1a1a1e; --ink: #0b0b0b; --paper: #f3f0e7; --text: #f3f0e7;
+      --muted: #a6a39c; --faint: #6c6a65; --line: #2e2e35; --line-strong: #4a4a52;
+      --yellow: #ffd21f; --magenta: #ff2e7e; --cyan: #28e0ff; --cyan-deep: #0a6a7a;
+      --display: "Avenir Next Condensed", "Bahnschrift Condensed", "Bahnschrift", "DIN Condensed", "Arial Narrow", system-ui, sans-serif;
+      --sans: "Avenir Next", "Segoe UI Variable Text", "Segoe UI", system-ui, "Microsoft YaHei UI", "PingFang SC", sans-serif;
+      --mono: ui-monospace, "SF Mono", "Cascadia Mono", "Cascadia Code", Menlo, Consolas, monospace;
+      --spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+      --cut: polygon(0 0, calc(100% - 16px) 0, 100% 16px, 100% 100%, 0 100%);
     }
     * { box-sizing: border-box; }
-    html, body { min-height: 100%; }
+    html, body { margin: 0; }
     body {
-      margin: 0;
-      background:
-        radial-gradient(ellipse at 22% 0%, rgba(0, 229, 255, 0.06), transparent 55%),
-        radial-gradient(ellipse at 78% 15%, rgba(0, 230, 118, 0.03), transparent 45%),
-        radial-gradient(ellipse at 50% 85%, rgba(255, 82, 82, 0.02), transparent 50%),
-        radial-gradient(ellipse at 88% 72%, rgba(255, 126, 179, 0.05), transparent 50%),
-        radial-gradient(ellipse at 12% 78%, rgba(169, 150, 255, 0.04), transparent 45%),
-        var(--bg);
-      color: var(--ink);
-      font: 15px/1.5 var(--sans);
-      overflow-x: hidden;
+      min-height: 100vh; color: var(--text); font: 13px/1.4 var(--sans); -webkit-font-smoothing: antialiased;
+      background: repeating-linear-gradient(-45deg, rgba(255, 255, 255, 0.018) 0 10px, transparent 10px 20px), var(--bg);
     }
-    body::before {
-      content: "";
-      position: fixed;
-      inset: 0;
-      pointer-events: none;
-      opacity: 0.06;
-      background-image:
-        url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.65' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='256' height='256' filter='url(%23n)' opacity='.35'/%3E%3C/svg%3E"),
-        repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(255,255,255,0.01) 2px, rgba(255,255,255,0.01) 3px);
-      mix-blend-mode: soft-light;
-    }
-    body::after {
-      content: "";
-      position: fixed;
-      inset: 0;
-      pointer-events: none;
-      opacity: 0.20;
-      background-image:
-        /* White stars */
-        radial-gradient(circle at 18% 18%, rgba(255,255,255,0.65) 0 1px, transparent 1.6px),
-        radial-gradient(circle at 55% 8%, rgba(255,255,255,0.55) 0 1px, transparent 1.5px),
-        radial-gradient(circle at 30% 58%, rgba(255,255,255,0.50) 0 1px, transparent 1.6px),
-        radial-gradient(circle at 92% 44%, rgba(255,255,255,0.45) 0 1px, transparent 1.5px),
-        /* Cyan stars */
-        radial-gradient(circle at 74% 26%, rgba(0,229,255,0.45) 0 1px, transparent 1.8px),
-        radial-gradient(circle at 8% 42%, rgba(0,229,255,0.35) 0 1px, transparent 1.5px),
-        radial-gradient(circle at 62% 70%, rgba(0,229,255,0.30) 0 1px, transparent 1.6px),
-        /* Gold stars */
-        radial-gradient(circle at 42% 80%, rgba(255,214,0,0.35) 0 1px, transparent 1.5px),
-        radial-gradient(circle at 85% 14%, rgba(255,214,0,0.30) 0 1px, transparent 1.6px),
-        radial-gradient(circle at 14% 68%, rgba(255,214,0,0.25) 0 1px, transparent 1.5px),
-        /* Pink stardust motes */
-        radial-gradient(circle at 46% 32%, rgba(255,126,179,0.28) 0 1px, transparent 1.5px),
-        radial-gradient(circle at 6% 12%, rgba(255,126,179,0.22) 0 1px, transparent 1.4px),
-        /* Lavender motes */
-        radial-gradient(circle at 90% 58%, rgba(169,150,255,0.22) 0 1px, transparent 1.5px),
-        radial-gradient(circle at 68% 90%, rgba(169,150,255,0.18) 0 1px, transparent 1.4px);
-      background-size:
-        280px 220px, 200px 180px, 240px 200px, 180px 220px,
-        320px 260px, 200px 240px, 260px 200px,
-        300px 240px, 220px 180px, 240px 220px,
-        200px 200px, 180px 160px,
-        240px 200px, 200px 180px;
-      animation: starDrift 42s linear infinite;
-    }
-    ::-webkit-scrollbar { width: 4px; height: 4px; }
-    ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 2px; }
-    ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.14); }
+    button { font: inherit; color: inherit; cursor: pointer; }
+    button:disabled { cursor: default; opacity: 0.4; }
+    :focus-visible { outline: 2px solid var(--yellow); outline-offset: 2px; }
+    .icon { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2.4; stroke-linecap: square; }
+    .wrap { max-width: 1280px; margin: 0 auto; padding-bottom: 32px; }
 
-    button {
-      min-height: 32px;
-      padding: 0 14px;
-      border: 1px solid var(--line);
-      border-radius: 4px;
-      background: rgba(255, 255, 255, 0.03);
-      color: var(--muted);
-      font: 600 11px/1 var(--sans);
-      letter-spacing: 0.04em;
-      cursor: pointer;
-      transition: all 0.2s var(--ease);
-      backdrop-filter: blur(12px);
-      -webkit-backdrop-filter: blur(12px);
+    .hero {
+      position: relative; display: flex; flex-wrap: wrap; align-items: center; gap: 14px 24px;
+      padding: 22px 24px 30px; background: var(--yellow); color: var(--ink);
+      clip-path: polygon(0 0, 100% 0, 100% calc(100% - 22px), calc(100% - 60px) 100%, 0 100%);
     }
-    button:hover {
-      border-color: var(--line-strong);
-      background: rgba(255,255,255,0.06);
-      color: var(--ink);
+    .hero::after {
+      content: ""; position: absolute; top: 0; right: 0; bottom: 0; width: 38%; pointer-events: none;
+      background: repeating-linear-gradient(-45deg, rgba(0, 0, 0, 0.1) 0 8px, transparent 8px 16px);
     }
-    button:disabled { opacity: 0.3; cursor: default; pointer-events: none; }
-    button.warning { color: var(--amber); }
-    button.warning:hover { border-color: rgba(255,214,0,0.25); background: var(--amber-soft); color: var(--amber); }
-    button.danger { color: var(--muted); }
-    button.danger:hover { color: var(--rose); border-color: rgba(255,82,82,0.25); background: var(--rose-soft); }
+    .brand { display: flex; align-items: center; gap: 16px; min-width: 0; }
+    .brand-mark { flex: none; display: grid; place-items: center; width: 44px; height: 44px; background: var(--ink); transform: skewX(-12deg); }
+    .brand-mark i { width: 18px; height: 18px; border: 4px solid var(--yellow); border-top-color: transparent; border-radius: 50%; transform: skewX(12deg); }
+    h1 { margin: 0; font: italic 900 clamp(40px, 7vw, 64px)/0.85 var(--display); letter-spacing: -0.01em; text-transform: uppercase; }
+    .who { margin-top: 6px; font: italic 800 12px var(--display); letter-spacing: 0.2em; text-transform: uppercase; }
+    .facts { position: relative; z-index: 1; display: flex; flex-wrap: wrap; gap: 6px; margin-left: auto; max-width: 100%; }
+    .fact { display: flex; align-items: center; gap: 8px; min-width: 0; max-width: 100%; padding: 6px 10px; background: var(--ink); color: var(--paper); font: 700 11.5px var(--mono); }
+    .fact small { flex: none; color: var(--yellow); font: italic 800 10.5px var(--display); letter-spacing: 0.14em; text-transform: uppercase; }
+    .fact .val { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .fact.warn { background: var(--magenta); color: #fff; }
+    .fact button { flex: none; display: grid; place-items: center; width: 22px; height: 22px; padding: 0; border: 0; background: none; color: var(--yellow); }
+    .fact button.copied { color: var(--cyan); }
 
-    .shell {
-      position: relative;
-      z-index: 1;
-      display: grid;
-      grid-template-columns: minmax(228px, 17vw) minmax(0, 1fr);
-      min-height: 100vh;
-    }
-    /* Magic circle background */
-    .shell::before {
-      content: "";
-      position: fixed;
-      top: 50%;
-      left: 50%;
-      width: min(80vh, 80vw);
-      height: min(80vh, 80vw);
-      margin: calc(min(80vh,80vw)/-2) 0 0 calc(min(80vh,80vw)/-2);
-      pointer-events: none;
-      z-index: -1;
-      border-radius: 50%;
-      opacity: 0.45;
-      background:
-        radial-gradient(circle at 50% 50%, transparent 54%, rgba(0,229,255,0.04) 55%, transparent 57%),
-        radial-gradient(circle at 50% 50%, transparent 46%, rgba(255,214,0,0.03) 47%, transparent 49%),
-        radial-gradient(circle at 50% 50%, transparent 38%, rgba(169,150,255,0.025) 39%, transparent 41%),
-        radial-gradient(circle at 50% 50%, transparent 28%, rgba(0,229,255,0.012) 30%, transparent 32%),
-        radial-gradient(circle at 50% 50%, rgba(0,229,255,0.015) 0%, transparent 45%);
-      animation: magicCircleBreathe 8s ease-in-out infinite;
-    }
-    /* God ray */
-    .shell::after {
-      content: "";
-      position: fixed;
-      inset: 0;
-      pointer-events: none;
-      z-index: -1;
-      background: linear-gradient(
-        108deg,
-        transparent 36%,
-        rgba(0,229,255,0.02) 38%,
-        rgba(255,214,0,0.01) 40%,
-        rgba(255,126,179,0.007) 42%,
-        transparent 44%
-      );
-      animation: godRayPulse 7s ease-in-out infinite;
-    }
+    .bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 18px 24px 8px; }
+    .summary { margin-right: auto; color: var(--muted); font-weight: 700; }
+    .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+    .slant { height: 28px; padding: 0 11px; border: 2px solid var(--line-strong); background: none; transform: skewX(-12deg); transition: transform 160ms var(--spring), border-color 120ms; }
+    .slant > span { display: inline-flex; align-items: center; gap: 6px; transform: skewX(12deg); font: italic 800 12.5px var(--display); letter-spacing: 0.06em; text-transform: uppercase; white-space: nowrap; }
+    .slant:hover:not(:disabled) { border-color: var(--paper); transform: skewX(-12deg) translateY(-1px); }
+    .page-label { padding: 0 6px; color: var(--muted); font: italic 800 12.5px var(--display); letter-spacing: 0.08em; text-transform: uppercase; }
 
-    .rail {
-      display: grid;
-      grid-template-rows: auto 1fr auto;
-      gap: 20px;
-      min-width: 0;
-      padding: clamp(16px, 2vw, 26px);
-      border-right: 1px solid var(--line);
-      background: var(--glass);
-      backdrop-filter: blur(20px);
-      -webkit-backdrop-filter: blur(20px);
-    }
-    .brand { position: relative; }
-    .brand-mark {
-      position: relative;
-      width: 32px;
-      height: 32px;
-      margin-bottom: 18px;
-      background:
-        radial-gradient(circle at 35% 30%, rgba(255,255,255,0.35) 0%, rgba(0,229,255,0.10) 40%, transparent 100%);
-      border: 1px solid rgba(0, 229, 255, 0.22);
-      box-shadow: 0 0 12px rgba(0,229,255,0.12), 0 0 28px rgba(0,229,255,0.05), inset 0 0 16px rgba(0,229,255,0.04);
-      /* Hexagon tech core */
-      clip-path: polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%);
-      animation: brandGlowPulse 4s ease-in-out infinite;
-    }
-    .brand-mark::after {
-      content: "";
-      position: absolute;
-      top: 50%;
-      left: 50%;
-      width: 12px;
-      height: 12px;
-      margin: -6px 0 0 -6px;
-      border: 1px solid rgba(232,230,227,0.25);
-      border-radius: 2px;
-      transform: rotate(45deg);
-      animation: brandSpin 6s linear infinite;
-    }
-    .brand h1 {
-      margin: 0;
-      max-width: 11rem;
-      font-size: clamp(20px, 2vw, 28px);
-      line-height: 0.95;
-      font-weight: 800;
-      letter-spacing: -0.04em;
-    }
-    .brand p {
-      margin: 10px 0 0;
-      font-size: 12px;
-    }
-    .brand p, .rail-label, .summary, .panel-count { color: var(--muted); }
+    .stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; padding: 8px 24px 18px; }
+    .stat { padding: 10px 14px 12px; border: 2px solid var(--line); background: var(--panel); clip-path: var(--cut); }
+    .stat-name { color: var(--muted); font: italic 800 12px var(--display); letter-spacing: 0.16em; text-transform: uppercase; }
+    .stat-value { overflow: hidden; font: italic 900 clamp(34px, 4.4vw, 54px)/0.95 var(--display); text-overflow: ellipsis; white-space: nowrap; }
+    #activeCard .stat-value { color: var(--cyan); }
+    #completedCard .stat-value { color: var(--yellow); }
+    #failedCard .stat-value { color: var(--magenta); }
+    .stat.is-empty .stat-value { color: var(--faint); }
 
-    .rail-stack {
-      display: grid;
-      align-content: start;
-      gap: 10px;
-    }
-    .rail-section {
-      position: relative;
-      overflow: hidden;
-      min-width: 0;
-      padding: 12px;
-      border: 1px solid var(--line);
-      border-radius: 4px;
-      background: var(--glass-elevated);
-      backdrop-filter: blur(12px);
-      -webkit-backdrop-filter: blur(12px);
-    }
+    .panel-head { display: flex; align-items: baseline; gap: 10px; padding: 0 24px 10px; }
+    .panel-head b { color: var(--yellow); font: italic 900 22px var(--display); letter-spacing: 0.04em; text-transform: uppercase; }
+    .panel-head span { color: var(--muted); font: 700 11px var(--mono); }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 380px), 1fr)); gap: 12px; padding: 0 24px; }
 
-    .rail-label {
-      margin-bottom: 8px;
-      font: 700 9px/1 var(--mono);
-      letter-spacing: 0.1em;
-      text-transform: uppercase;
-    }
-    .rail-row {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
-      align-items: center;
-      gap: 6px;
-    }
-    .rail-value {
-      min-width: 0;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      font: 11px/1.4 var(--mono);
-      letter-spacing: 0.04em;
-      color: var(--ink);
-    }
-    .icon-button {
-      width: 30px;
-      min-height: 28px;
-      padding: 0;
-      display: grid;
-      place-items: center;
-      color: var(--faint);
-    }
-    .icon-button:hover { color: var(--ink); }
-
-    /* ffmpeg banner -- amber warning with mechanical breathing pulse */
-    .runtime-banner {
-      position: relative;
-      overflow: hidden;
-      padding: 12px;
-      border: 1px solid rgba(255, 214, 0, 0.15);
-      border-radius: 4px;
-      background: rgba(255, 214, 0, 0.05);
-      color: #D4B84C;
-      font: 10px/1.4 var(--mono);
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-      animation: ffmpegBreathe 3s ease-in-out infinite;
-    }
-    .runtime-banner::after {
-      content: "";
-      position: absolute;
-      inset: auto 0 0;
-      height: 1px;
-      background: linear-gradient(90deg, transparent, rgba(255,214,0,0.5), transparent);
-      animation: pulseLine 3s var(--ease) infinite;
-    }
-
-    .main {
-      min-width: 0;
-      padding: clamp(18px, 2.6vw, 36px);
-    }
-    header {
-      display: flex;
-      align-items: flex-end;
-      justify-content: space-between;
-      gap: 16px;
-      margin-bottom: 20px;
-    }
-    h2 {
-      margin: 0;
-      font-size: clamp(30px, 3.6vw, 54px);
-      line-height: 0.88;
-      font-weight: 800;
-      letter-spacing: -0.04em;
-      color: var(--ink);
-    }
-    .summary {
-      margin-top: 12px;
-      font-size: 13px;
-    }
-    .toolbar {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      flex-wrap: wrap;
-      justify-content: flex-end;
-    }
-
-    .stats {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
-      gap: 10px;
-      margin-bottom: 16px;
-    }
-    .stat {
-      position: relative;
-      overflow: hidden;
-      min-width: 0;
-      min-height: 120px;
-      display: grid;
-      align-content: space-between;
-      padding: 16px;
-      border: 1px solid var(--line);
-      border-radius: 4px;
-      background: var(--glass-elevated);
-      backdrop-filter: blur(16px);
-      -webkit-backdrop-filter: blur(16px);
-      transition: opacity 0.2s var(--ease), border-color 0.2s var(--ease), background 0.2s var(--ease);
-    }
-    .stat:hover {
-      border-color: var(--line-strong);
-      box-shadow: 0 0 20px var(--cyan-glow);
-    }
-    /* Corner bracket on stat hover -- asymmetric, neon-cyan */
-    .stat::before {
-      content: "";
-      position: absolute;
-      top: -1px;
-      left: -1px;
-      width: 16px;
-      height: 16px;
-      border-top: 2px solid var(--cyan);
-      border-left: 2px solid var(--cyan);
-      pointer-events: none;
-      opacity: 0;
-      transition: opacity 0.2s var(--ease);
-      z-index: 1;
-    }
-    .stat:hover::before {
-      opacity: 1;
-    }
-    .stat.is-empty {
-      opacity: 0.40;
-      background: rgba(255,255,255,0.01);
-    }
-    .stat.is-empty::before {
-      opacity: 0;
-    }
-    .stat-name {
-      font: 700 9px/1 var(--mono);
-      letter-spacing: 0.1em;
-      text-transform: uppercase;
-      color: var(--muted);
-    }
-    .stat-value {
-      margin-top: 12px;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      font-family: var(--sans);
-      font-size: clamp(46px, 6vw, 78px);
-      font-weight: 800;
-      line-height: 0.82;
-      letter-spacing: -0.07em;
-    }
-
-    .panel {
-      position: relative;
-      overflow: hidden;
-      border: 1px solid var(--line);
-      border-radius: 4px;
-      background: var(--glass-elevated);
-      backdrop-filter: blur(16px);
-      -webkit-backdrop-filter: blur(16px);
-    }
-    .panel-head {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-      padding: 12px 16px;
-      border-bottom: 1px solid var(--line);
-      font: 700 9px/1 var(--mono);
-      letter-spacing: 0.1em;
-      text-transform: uppercase;
-      color: var(--muted);
-    }
-    .panel-count { font: 700 9px/1 var(--mono); }
-
-    .row {
-      position: relative;
-      display: grid;
-      grid-template-columns: minmax(80px, 130px) minmax(0, 1fr) auto;
-      gap: 14px;
-      align-items: start;
-      min-width: 0;
-      padding: 14px 16px;
-      border-top: 1px solid var(--line);
-      transition: background 0.2s var(--ease), border-color 0.2s var(--ease);
-    }
-    .row:first-child { border-top: 0; }
-    .row:hover {
-      background: rgba(255,255,255,0.02);
-      border-color: var(--line-strong);
-      box-shadow: 0 0 16px var(--cyan-glow);
-    }
-    /* Corner bracket on job row hover */
-    .row::before {
-      content: "";
-      position: absolute;
-      top: -1px;
-      left: -1px;
-      width: 14px;
-      height: 14px;
-      border-top: 2px solid var(--cyan);
-      border-left: 2px solid var(--cyan);
-      pointer-events: none;
-      opacity: 0;
-      transition: opacity 0.2s var(--ease);
-      z-index: 1;
-    }
-    .row:hover::before {
-      opacity: 1;
-    }
-
-    .thumb {
-      position: relative;
-      aspect-ratio: 16 / 9;
-      min-width: 0;
-      width: 100%;
-      overflow: hidden;
-      border: 1px solid var(--line);
-      border-radius: 4px;
-      background:
-        radial-gradient(circle at 30% 28%, rgba(255,255,255,0.30), transparent 12%),
-        linear-gradient(135deg, rgba(0,229,255,0.12), transparent 40%),
-        linear-gradient(315deg, rgba(0,230,118,0.08), transparent 45%),
-        rgba(6, 7, 9, 0.6);
-      box-shadow: inset 0 0 20px rgba(0,229,255,0.03);
-    }
-    .thumb::after {
-      content: "";
-      position: absolute;
-      inset: auto 12px 12px auto;
-      width: 14px;
-      height: 14px;
-      border-right: 1px solid rgba(255,255,255,0.18);
-      border-bottom: 1px solid rgba(255,255,255,0.18);
-    }
-
-    .job-main { min-width: 0; }
-    .title-row {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      min-width: 0;
-    }
-    .job-title {
-      min-width: 0;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      font-size: 15px;
-      font-weight: 600;
-      letter-spacing: -0.01em;
-    }
+    .row { position: relative; min-width: 0; padding: 0 14px 12px; border: 2px solid var(--line); background: var(--panel); clip-path: var(--cut); }
     .status {
-      flex: 0 0 auto;
-      width: fit-content;
-      padding: 3px 8px;
-      border-radius: 2px;
-      font: 700 9px/1.2 var(--mono);
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-      color: var(--muted);
-      background: rgba(255,255,255,0.04);
+      display: inline-block; margin: 0 0 8px -14px; padding: 3px 14px 3px 14px; background: var(--faint); color: var(--ink);
+      font: italic 900 12px/1.2 var(--display); letter-spacing: 0.14em; text-transform: uppercase;
+      clip-path: polygon(0 0, 100% 0, calc(100% - 8px) 100%, 0 100%);
     }
-    .status.completed { color: var(--emerald); background: var(--emerald-soft); }
-    .status.failed { color: var(--rose); background: var(--rose-soft); }
-    .status.missing { color: var(--amber); background: var(--amber-soft); }
-    .status.running, .status.queued { color: var(--amber); background: var(--amber-soft); animation: pulseRunning 2.4s ease-in-out infinite; }
-    .status.cancelled { color: var(--faint); background: rgba(255,255,255,0.03); }
+    .status.running, .status.queued { background: var(--cyan); }
+    .status.completed { background: var(--yellow); }
+    .status.failed { background: var(--magenta); color: #fff; }
+    .status.missing { background: transparent; box-shadow: inset 0 0 0 2px var(--yellow); color: var(--yellow); }
+    .job-title { overflow: hidden; font-size: 14.5px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+    .progress { margin-top: 3px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+    .row.failed .progress { color: var(--magenta); }
+    .path { margin-top: 3px; overflow: hidden; color: var(--faint); font: 11px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+    .bar-track { position: relative; height: 10px; margin-top: 8px; overflow: hidden; border: 2px solid var(--paper); }
+    .bar-track i { position: absolute; top: 0; bottom: 0; left: 0; overflow: hidden; }
+    .bar-track i::before {
+      content: ""; position: absolute; top: 0; bottom: 0; left: -34px; right: -34px;
+      background: repeating-linear-gradient(-45deg, var(--cyan) 0 6px, var(--cyan-deep) 6px 12px);
+      animation: stripe 700ms linear infinite;
+    }
+    @keyframes stripe { to { transform: translateX(16.97px); } }
+    .meta { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
+    .chip { padding: 0 7px; border: 1px solid var(--line); background: var(--ink); color: var(--muted); font: 700 10.5px/18px var(--mono); }
+    details { margin-top: 7px; color: var(--faint); font: 11px var(--mono); }
+    summary { cursor: pointer; }
+    summary:hover { color: var(--text); }
+    code { display: block; margin-top: 5px; padding: 8px; background: var(--ink); color: var(--muted); word-break: break-all; }
+    .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+    .actions button {
+      height: 28px; padding: 0 11px; border: 2px solid var(--paper); background: none; color: var(--paper);
+      font: italic 800 12.5px var(--display); letter-spacing: 0.05em; text-transform: uppercase; transition: background-color 120ms, color 120ms;
+    }
+    .actions button:hover:not(:disabled) { background: var(--paper); color: var(--ink); }
+    .actions button:disabled { display: none; }
+    .actions .warning { border-color: var(--yellow); color: var(--yellow); }
+    .actions .warning:hover:not(:disabled) { background: var(--yellow); }
+    .actions .danger { border-color: var(--magenta); color: var(--magenta); }
+    .actions .danger:hover:not(:disabled) { background: var(--magenta); color: #fff; }
 
-    .progress {
-      margin-top: 8px;
-      font: 10px/1.4 var(--mono);
-      letter-spacing: 0.08em;
-      color: var(--faint);
-    }
-    .path {
-      margin-top: 6px;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      font: 9px/1.4 var(--mono);
-      letter-spacing: 0.08em;
-      color: rgba(139,137,130,0.5);
-    }
-    .meta {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 5px;
-      margin-top: 10px;
-    }
-    .chip {
-      padding: 3px 7px;
-      border-radius: 2px;
-      background: rgba(255,255,255,0.03);
-      color: var(--faint);
-      font: 700 9px/1 var(--mono);
-      letter-spacing: 0.08em;
-    }
-    .actions {
-      display: flex;
-      justify-content: flex-end;
-      gap: 5px;
-      padding-top: 2px;
-    }
-
-    .empty {
-      display: grid;
-      place-items: center;
-      min-height: 320px;
-      padding: 32px;
-      text-align: center;
-    }
-    .empty-box { max-width: 400px; }
-    .empty-title {
-      font-size: 17px;
-      font-weight: 720;
-      color: var(--ink);
-      letter-spacing: -0.02em;
-    }
-    .empty-text {
-      margin-top: 10px;
-      font-size: 13px;
-      line-height: 1.6;
-      color: var(--muted);
-    }
-    .empty.failed { color: var(--rose); }
-
-    details { margin-top: 10px; }
-    summary {
-      cursor: pointer;
-      font: 9px/1 var(--mono);
-      letter-spacing: 0.08em;
-      color: var(--faint);
-      transition: color 0.2s var(--ease);
-    }
-    summary:hover { color: var(--muted); }
-    code {
-      display: block;
-      margin-top: 8px;
-      padding: 10px 12px;
-      border: 1px solid var(--line);
-      border-radius: 4px;
-      background: rgba(0,0,0,0.2);
-      white-space: pre-wrap;
-      word-break: break-word;
-      font: 9px/1.45 var(--mono);
-      color: var(--faint);
-    }
-
-    @keyframes pulseLine {
-      0%, 100% { opacity: 0.15; transform: translateX(-35%); }
-      50% { opacity: 0.6; transform: translateX(35%); }
-    }
-    @keyframes starDrift {
-      from { background-position: 0 0, 0 0, 0 0, 0 0; }
-      to { background-position: 80px -40px, -90px 60px, 34px 20px, -58px 38px; }
-    }
-    @keyframes brandSpin {
-      0% { transform: rotate(45deg); }
-      100% { transform: rotate(405deg); }
-    }
-    @keyframes ffmpegBreathe {
-      0%, 100% { opacity: 0.6; }
-      50% { opacity: 1; }
-    }
-    @keyframes pulseRunning {
-      0%, 100% { opacity: 1; }
-      50% { opacity: 0.50; }
-    }
-    @keyframes brandGlowPulse {
-      0%, 100% { box-shadow: 0 0 12px rgba(0,229,255,0.12), 0 0 28px rgba(0,229,255,0.05); }
-      50% { box-shadow: 0 0 18px rgba(0,229,255,0.20), 0 0 40px rgba(0,229,255,0.08); }
-    }
-    @keyframes magicCircleBreathe {
-      0%, 100% { transform: scale(1); opacity: 0.40; }
-      50% { transform: scale(1.04); opacity: 0.65; }
-    }
-    @keyframes godRayPulse {
-      0%, 100% { opacity: 0.25; }
-      50% { opacity: 0.75; }
-    }
-
-    :root {
-      --ink: #F2F0E8;
-      --muted: #9A968B;
-      --line: rgba(255,255,255,0.10);
-      --line-strong: rgba(255,255,255,0.24);
-      --glass: rgba(255,255,255,0.025);
-      --glass-elevated: rgba(255,255,255,0.055);
-      --cyan: #29E7FF;
-      --cyan-soft: rgba(41,231,255,0.11);
-      --cyan-glow: rgba(41,231,255,0.14);
-      --amber: #FFCD42;
-      --amber-soft: rgba(255,205,66,0.11);
-      --emerald: #3CFF9E;
-      --emerald-soft: rgba(60,255,158,0.10);
-      --sans: "Rajdhani", ui-sans-serif, system-ui, sans-serif;
-      --display: "Bebas Neue", "Rajdhani", ui-sans-serif, system-ui, sans-serif;
-    }
-    body {
-      background:
-        linear-gradient(135deg, rgba(0,0,0,0.98) 0 10%, transparent 10% 100%),
-        radial-gradient(ellipse at 18% 0%, rgba(41,231,255,0.16), transparent 34rem),
-        radial-gradient(ellipse at 100% 18%, rgba(255,138,61,0.10), transparent 28rem),
-        radial-gradient(ellipse at 55% 100%, rgba(60,255,158,0.07), transparent 30rem),
-        #060709;
-    }
-    button,
-    .rail-section,
-    .runtime-banner,
-    .stat,
-    .panel,
-    .row,
-    code {
-      border-radius: 0;
-      clip-path: polygon(0 0, calc(100% - 16px) 0, 100% 16px, 100% 100%, 16px 100%, 0 calc(100% - 16px));
-    }
-    button {
-      font-family: var(--mono);
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 0.10em;
-    }
-    .shell {
-      border: 14px solid #010204;
-      min-height: 100vh;
-      background: rgba(8,10,14,0.74);
-      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.07);
-    }
-    .rail {
-      background:
-        linear-gradient(180deg, rgba(255,255,255,0.05), rgba(255,255,255,0.018)),
-        rgba(0,0,0,0.38);
-    }
-    .brand h1,
-    h2 {
-      font-family: var(--display);
-      font-weight: 400;
-      letter-spacing: 0.01em;
-      text-transform: uppercase;
-    }
-    .brand h1 {
-      font-size: clamp(34px, 3vw, 52px);
-      max-width: 13rem;
-    }
-    h2 {
-      font-size: clamp(54px, 7vw, 112px);
-      line-height: 0.78;
-    }
-    .summary {
-      font: 700 11px/1.4 var(--mono);
-      letter-spacing: 0.12em;
-      text-transform: uppercase;
-      color: var(--cyan);
-    }
-    .stat {
-      min-height: 136px;
-      background:
-        linear-gradient(135deg, rgba(255,255,255,0.065), rgba(255,255,255,0.016)),
-        rgba(0,0,0,0.24);
-    }
-    .stat-value {
-      font-family: var(--display);
-      font-weight: 400;
-      letter-spacing: 0.01em;
-    }
-    .panel-head {
-      background: rgba(0,0,0,0.22);
-      color: var(--ink);
-    }
-    .row {
-      grid-template-columns: minmax(108px, 158px) minmax(0, 1fr) auto;
-      gap: 16px;
-      background: rgba(255,255,255,0.012);
-    }
-    .row:hover {
-      background: rgba(255,255,255,0.04);
-      transform: translateY(-1px);
-    }
-    .thumb {
-      border-color: rgba(41,231,255,0.22);
-      border-radius: 0;
-      clip-path: polygon(0 0, calc(100% - 14px) 0, 100% 14px, 100% 100%, 14px 100%, 0 calc(100% - 14px));
-      background:
-        linear-gradient(135deg, rgba(41,231,255,0.22), transparent 42%),
-        linear-gradient(315deg, rgba(255,205,66,0.18), transparent 48%),
-        radial-gradient(circle at 34% 32%, rgba(255,255,255,0.34), transparent 13%),
-        rgba(0,0,0,0.5);
-    }
-    .thumb::before {
-      content: "STREAM";
-      position: absolute;
-      left: 9px;
-      top: 8px;
-      color: rgba(242,240,232,0.62);
-      font: 700 8px/1 var(--mono);
-      letter-spacing: 0.14em;
-    }
-    .job-title {
-      font-size: 17px;
-      font-weight: 700;
-    }
-    .job-title::after {
-      content: "";
-      display: block;
-      width: 100%;
-      height: 1px;
-      margin-top: 7px;
-      background: linear-gradient(90deg, rgba(41,231,255,0.50), transparent);
-    }
-    .status,
-    .chip {
-      border-radius: 0;
-      clip-path: polygon(0 0, calc(100% - 6px) 0, 100% 6px, 100% 100%, 0 100%);
-    }
-    .status.completed { color: var(--emerald); background: var(--emerald-soft); }
-    .status.missing { color: var(--amber); background: var(--amber-soft); }
-    .status.running,
-    .status.queued {
-      color: var(--amber);
-      background: var(--amber-soft);
-    }
-    .actions {
-      align-items: stretch;
-      padding: 4px;
-      border: 1px solid rgba(255,255,255,0.08);
-      background: rgba(0,0,0,0.24);
-    }
-    .runtime-banner {
-      border-color: rgba(255,205,66,0.28);
-      background: rgba(255,205,66,0.10);
-      color: var(--amber);
-    }
-
-    @media (max-width: 1024px) {
-      .stats { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
-    }
-    @media (max-width: 900px) {
-      .shell { grid-template-columns: 1fr; }
-      .rail {
-        grid-template-rows: auto;
-        border-right: 0;
-        border-bottom: 1px solid var(--line);
-      }
-      .rail-stack { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    }
-    @media (max-width: 700px) {
-      .main { padding: 14px; }
-      header { flex-direction: column; align-items: flex-start; }
-      .toolbar { justify-content: flex-start; }
-      .rail-stack, .row { grid-template-columns: 1fr; }
-      .actions { justify-content: flex-start; flex-wrap: wrap; }
-      .thumb { max-width: 220px; }
-      .stats { grid-template-columns: repeat(2, 1fr); gap: 8px; }
-      .stat { min-height: 100px; padding: 14px; }
-      .stat-value { font-size: clamp(36px, 12vw, 56px); }
-    }
-    @media (prefers-reduced-motion: reduce) {
-      *, *::before, *::after {
-        animation-duration: 0.01ms !important;
-        animation-iteration-count: 1 !important;
-        transition-duration: 0.01ms !important;
-      }
-    }
-    /* Clean download-manager theme */
-    :root {
-      --bg: #171613;
-      --surface: transparent;
-      --surface-2: rgba(255, 255, 255, 0.04);
-      --line: rgba(255, 255, 255, 0.3);
-      --line-strong: rgba(255, 255, 255, 0.58);
-      --ink: #fffdf7;
-      --muted: rgba(255, 253, 247, 0.72);
-      --faint: rgba(255, 253, 247, 0.48);
-      --cyan: #f0dfb8;
-      --cyan-soft: rgba(240, 223, 184, 0.12);
-      --emerald: #79bd91;
-      --emerald-soft: #18251c;
-      --amber: #d4a65d;
-      --amber-soft: #2a2318;
-      --rose: #d17b78;
-      --rose-soft: #2b1c1b;
-      --sans: "Bahnschrift", "Microsoft JhengHei UI", "Microsoft YaHei UI", sans-serif;
-      --mono: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
-    }
-
-    body {
-      min-width: 320px;
-      position: relative;
-      isolation: isolate;
-      background: var(--bg) url('/assets/app-background.webp') center / cover fixed no-repeat !important;
-      color: var(--ink);
-      font-family: var(--sans);
-      letter-spacing: 0;
-    }
-
-    body::before,
-    body::after,
-    .shell::before,
-    .shell::after,
-    .rail::before,
-    .rail::after,
-    .brand-mark::before,
-    .brand-mark::after,
-    .thumb::before,
-    .thumb::after,
-    .row::before,
-    .row::after,
-    .stat::before,
-    .stat::after,
-    .panel::before,
-    .panel::after {
-      display: none !important;
-    }
-
-    body::before {
-      content: "";
-      position: fixed;
-      z-index: -1;
-      inset: 0;
-      display: block !important;
-      background: rgba(14, 13, 11, 0.32);
-      pointer-events: none;
-    }
-
-    .shell {
-      position: relative;
-      z-index: 1;
-      display: grid;
-      grid-template-columns: 1fr;
-      min-height: 100vh;
-    }
-
-    .rail {
-      position: relative;
-      top: auto;
-      z-index: 2;
-      display: flex;
-      align-items: center;
-      gap: 20px;
-      min-height: 64px;
-      height: auto;
-      padding: 10px 24px;
-      overflow: visible;
-      border: 0;
-      border-bottom: 1px solid var(--line);
-      background: rgba(0, 0, 0, 0.04) !important;
-      backdrop-filter: none;
-      box-shadow: none;
-    }
-
-    .brand {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      min-width: 220px;
-      margin: 0;
-      padding: 0;
-      border: 0;
-    }
-
-    .brand-mark {
-      width: 28px;
-      height: 28px;
-      margin: 0;
-      border: 1px solid #595348;
-      border-radius: 7px;
-      background: transparent !important;
-      box-shadow: none;
-      clip-path: none;
-    }
-
-    .brand h1 {
-      margin: 0;
-      font-family: var(--sans);
-      font-size: 15px;
-      font-weight: 650;
-      line-height: 1.2;
-      letter-spacing: 0;
-      text-transform: none;
-    }
-
-    .brand p {
-      display: none;
-    }
-
-    .rail-stack {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      min-width: 0;
-      margin: 0 0 0 auto;
-    }
-
-    .rail-section {
-      min-width: 0;
-      padding: 0;
-      border: 0;
-      background: transparent !important;
-      box-shadow: none;
-      clip-path: none;
-    }
-
-    .rail-section:first-child {
-      display: none;
-    }
-
-    .rail-label {
-      margin-bottom: 2px;
-      color: var(--faint);
-      font: 11px/1.2 var(--sans);
-      letter-spacing: 0;
-      text-transform: none;
-    }
-
-    .rail-row {
-      gap: 6px;
-    }
-
-    .rail-value {
-      max-width: min(42vw, 480px);
-      color: var(--muted);
-      font: 11px/1.3 var(--mono);
-      letter-spacing: 0;
-    }
-
-    .icon-button {
-      width: 30px;
-      height: 30px;
-      min-height: 30px;
-      padding: 0;
-      border-radius: 6px;
-    }
-
-    .runtime-banner {
-      margin: 0;
-      padding: 6px 9px;
-      border: 1px solid #4a402e;
-      border-radius: 6px;
-      background: var(--amber-soft) !important;
-      color: var(--amber);
-      font: 11px/1.2 var(--sans);
-      letter-spacing: 0;
-      text-transform: none;
-      animation: none;
-    }
-
-    .main {
-      width: 100%;
-      max-width: 1400px;
-      margin: 0 auto;
-      padding: 24px;
-    }
-
-    header {
-      min-height: 40px;
-      margin-bottom: 16px;
-      padding: 0;
-      border: 0;
-    }
-
-    header h2 {
-      margin: 0;
-      font-family: var(--sans);
-      font-size: 20px;
-      font-weight: 650;
-      line-height: 1.3;
-      letter-spacing: 0;
-      text-transform: none;
-    }
-
-    .summary {
-      margin-top: 3px;
-      color: var(--muted);
-      font: 12px/1.3 var(--sans);
-      letter-spacing: 0;
-      text-transform: none;
-    }
-
-    button {
-      min-height: 32px;
-      padding: 0 11px;
-      border: 1px solid var(--line);
-      border-radius: 6px;
-      background: rgba(255, 255, 255, 0.05) !important;
-      color: var(--ink);
-      font: 12px/1 var(--sans);
-      letter-spacing: 0;
-      text-transform: none;
-      clip-path: none;
-      box-shadow: none;
-      transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease;
-    }
-
-    button:hover:not(:disabled) {
-      border-color: var(--line-strong);
-      background: rgba(255, 255, 255, 0.10) !important;
-      color: var(--ink);
-      transform: none;
-    }
-
-    button:disabled {
-      opacity: 0.34;
-    }
-
-    .toolbar {
-      gap: 8px;
-    }
-
-    .stats {
-      display: flex;
-      align-items: stretch;
-      gap: 0;
-      margin-bottom: 14px;
-      overflow: hidden;
-      border: 1px solid var(--line);
-      border-radius: 7px;
-      background: transparent;
-      backdrop-filter: none;
-    }
-
-    .stat {
-      flex: 1;
-      min-height: 72px;
-      padding: 12px 14px;
-      border: 0;
-      border-right: 1px solid var(--line);
-      border-radius: 0;
-      background: transparent !important;
-      box-shadow: none;
-      clip-path: none;
-      backdrop-filter: none !important;
-    }
-
-    .stat:last-child {
-      border-right: 0;
-    }
-
-    .stat.is-empty {
-      opacity: 0.6;
-    }
-
-    .stat-label {
-      color: var(--muted);
-      font: 11px/1.2 var(--sans);
-      letter-spacing: 0;
-      text-transform: none;
-    }
-
-    .stat-value {
-      margin-top: 6px;
-      color: var(--ink);
-      font-family: var(--sans);
-      font-size: 22px;
-      font-weight: 650;
-      line-height: 1;
-      letter-spacing: 0;
-    }
-
-    .panel {
-      overflow: hidden;
-      border: 1px solid var(--line);
-      border-radius: 7px;
-      background: transparent !important;
-      box-shadow: none;
-      clip-path: none;
-      backdrop-filter: none !important;
-    }
-
-    .panel-head {
-      min-height: 44px;
-      padding: 0 14px;
-      border-bottom: 1px solid var(--line);
-      color: var(--ink);
-      font: 600 13px/1 var(--sans);
-      letter-spacing: 0;
-      text-transform: none;
-      background: transparent;
-    }
-
-    .panel-count {
-      color: var(--muted);
-      font-weight: 400;
-    }
-
-    .row {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) minmax(240px, auto);
-      gap: 18px;
-      align-items: start;
-      padding: 14px;
-      border: 0;
-      border-bottom: 1px solid var(--line);
-      border-radius: 0;
-      background: transparent !important;
-      box-shadow: none;
-      clip-path: none;
-      transition: background-color 140ms ease;
-    }
-
-    .row:last-child {
-      border-bottom: 0;
-    }
-
-    .row:hover {
-      border-color: var(--line);
-      background: rgba(255, 255, 255, 0.05) !important;
-      transform: none;
-      box-shadow: none;
-    }
-
-    .thumb {
-      display: none;
-    }
-
-    .title-row {
-      align-items: center;
-      gap: 8px;
-    }
-
-    .job-title {
-      color: var(--ink);
-      font-family: var(--sans);
-      font-size: 13px;
-      font-weight: 600;
-      letter-spacing: 0;
-    }
-
-    .job-title::after {
-      display: none;
-    }
-
-    .status,
-    .chip {
-      padding: 2px 6px;
-      border-radius: 5px;
-      background: rgba(255, 255, 255, 0.08);
-      color: var(--muted);
-      font: 600 10px/1.5 var(--mono);
-      letter-spacing: 0;
-      text-transform: none;
-      clip-path: none;
-    }
-
-    .progress {
-      margin-top: 7px;
-      color: var(--muted);
-      font: 11px/1.45 var(--mono);
-      letter-spacing: 0;
-    }
-
-    .path {
-      margin-top: 5px;
-      color: var(--faint);
-      font: 11px/1.4 var(--mono);
-      letter-spacing: 0;
-    }
-
-    .meta {
-      gap: 5px;
-      margin-top: 8px;
-    }
-
-    .actions {
-      display: flex;
-      justify-content: flex-end;
-      align-items: flex-start;
-      flex-wrap: wrap;
-      gap: 6px;
-      max-width: 360px;
-      padding: 0;
-      border: 0;
-      background: transparent;
-    }
-
-    .actions button:disabled {
-      display: none;
-    }
-
-    button.danger,
-    .actions button[data-action="remove"] {
-      color: var(--rose);
-    }
+    .empty { margin: 0 24px; padding: 26px 22px; border: 2px dashed var(--line-strong); color: var(--muted); }
+    .empty-title { color: var(--yellow); font: italic 900 22px var(--display); text-transform: uppercase; }
+    .empty-text { max-width: 560px; margin-top: 6px; line-height: 1.5; }
+    .empty.failed { border-color: var(--magenta); color: var(--magenta); font-weight: 700; }
 
     .remove-overlay {
-      position: fixed;
-      z-index: 20;
-      inset: 0;
-      display: grid;
-      place-items: center;
-      padding: 20px;
-      background: rgba(0, 0, 0, 0.38);
+      position: fixed; z-index: 20; inset: 0; display: grid; place-items: center; padding: 16px;
+      background: repeating-linear-gradient(-45deg, rgba(0, 0, 0, 0.82) 0 10px, rgba(0, 0, 0, 0.74) 10px 20px);
     }
-
-    .remove-dialog {
-      width: min(420px, 100%);
-      padding: 16px;
-      border: 1px solid var(--line-strong);
-      border-radius: 8px;
-      background: rgba(14, 13, 11, 0.62);
+    .remove-dialog { width: 100%; max-width: 380px; filter: drop-shadow(6px 6px 0 var(--magenta)); animation: dialog-in 320ms var(--spring); }
+    @keyframes dialog-in { from { opacity: 0; transform: translateY(14px) scale(0.94); } }
+    .remove-dialog h3 { margin: 0; padding: 12px 16px 10px; background: var(--yellow); color: var(--ink); font: italic 900 25px/1.05 var(--display); text-transform: uppercase; }
+    .remove-body { padding: 14px 16px 16px; background: var(--paper); color: var(--ink); clip-path: polygon(0 0, 100% 0, 100% calc(100% - 16px), calc(100% - 16px) 100%, 0 100%); }
+    .remove-name { margin: 0 0 14px; padding: 7px 9px; border-left: 4px solid var(--ink); background: rgba(0, 0, 0, 0.06); font: 700 12px/1.45 var(--mono); overflow-wrap: anywhere; }
+    .remove-dialog-actions { display: grid; gap: 6px; }
+    .remove-dialog-actions button {
+      min-height: 38px; padding: 0 12px; border: 2px solid var(--ink); background: var(--paper); color: var(--ink); text-align: left;
+      box-shadow: 3px 3px 0 var(--ink); font: italic 900 14px var(--display); letter-spacing: 0.06em; text-transform: uppercase;
+      transition: transform 150ms var(--spring), box-shadow 150ms var(--spring);
     }
+    .remove-dialog-actions button:hover { transform: translate(-1px, -1px); box-shadow: 4px 4px 0 var(--ink); }
+    .remove-dialog-actions .danger { border-color: var(--magenta); background: var(--magenta); color: #fff; }
+    .remove-dialog-actions .ghost { border-color: transparent; background: none; box-shadow: none; color: rgba(0, 0, 0, 0.6); text-align: center; }
 
-    .remove-dialog h3 {
-      margin: 0 0 8px;
-      font-size: 15px;
+    @media (max-width: 760px) {
+      .hero { padding: 18px 16px 28px; }
+      .facts { margin-left: 0; }
+      .bar, .stats { padding-left: 16px; padding-right: 16px; }
+      .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .panel-head { padding: 0 16px 10px; }
+      .grid { padding: 0 16px; }
+      .empty { margin: 0 16px; }
     }
-
-    .remove-dialog p {
-      margin: 0;
-      color: var(--muted);
-      font-size: 12px;
-      line-height: 1.5;
-      overflow-wrap: anywhere;
-    }
-
-    .remove-dialog-actions {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 8px;
-      margin-top: 16px;
-    }
-
-    details {
-      margin-top: 8px;
-    }
-
-    summary {
-      color: var(--faint);
-      font: 11px/1.3 var(--sans);
-      letter-spacing: 0;
-    }
-
-    code {
-      display: block;
-      margin-top: 7px;
-      padding: 9px;
-      border: 1px solid var(--line);
-      border-radius: 6px;
-      background: rgba(0, 0, 0, 0.28);
-      color: var(--muted);
-      font: 10px/1.5 var(--mono);
-      overflow-wrap: anywhere;
-    }
-
-    .empty {
-      min-height: 240px;
-    }
-
-    .empty-title {
-      font-size: 15px;
-      letter-spacing: 0;
-    }
-
-    .empty-text {
-      font-size: 13px;
-    }
-
-    @media (max-width: 820px) {
-      .rail {
-        align-items: flex-start;
-        flex-wrap: wrap;
-        padding: 12px 16px;
-      }
-      .rail-stack {
-        width: 100%;
-        margin-left: 38px;
-      }
-      .runtime-banner {
-        margin-left: auto;
-      }
-      .main {
-        padding: 16px;
-      }
-      .row {
-        grid-template-columns: 1fr;
-      }
-      .actions {
-        justify-content: flex-start;
-        max-width: none;
-      }
-    }
-
-    @media (max-width: 520px) {
-      .stats {
-        display: grid;
-        grid-template-columns: repeat(2, 1fr);
-      }
-      .stat {
-        border-right: 0;
-        border-bottom: 1px solid var(--line);
-      }
-      .stat:nth-child(odd) {
-        border-right: 1px solid var(--line);
-      }
-      .stat:nth-last-child(-n + 2) {
-        border-bottom: 0;
-      }
-      .rail-value {
-        max-width: 66vw;
-      }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation: none !important; transition-duration: 0.01ms !important; }
     }
   </style>
 </head>
 <body>
-  <div class="shell">
-    <aside class="rail">
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <symbol id="i-copy" viewBox="0 0 24 24"><path d="M8 8h12v12H8zM16 8V4H4v12h4"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.3-5.7M20 4v5h-5"/></symbol>
+  </svg>
+  <div class="wrap">
+    <header class="hero">
       <div class="brand">
-        <div class="brand-mark" aria-hidden="true"></div>
-        <h1>DS Video Downloader</h1>
-        <p>Local helper dashboard</p>
+        <div class="brand-mark" aria-hidden="true"><i></i></div>
+        <div><h1>Downloads</h1><div class="who">DS Video Downloader · Local helper dashboard</div></div>
       </div>
-      <div class="rail-stack">
-        <div class="rail-section">
-          <div class="rail-label">Service</div>
-          <div class="rail-row">
-            <div class="rail-value">127.0.0.1:${PORT}</div>
-          </div>
-        </div>
-        <div class="rail-section">
-          <div class="rail-label">Downloads</div>
-          <div class="rail-row">
-            <div id="downloadPath" class="rail-value" title="${downloadDir}">${downloadDir}</div>
-            <button id="copyPathButton" class="icon-button" type="button" title="Copy download path" aria-label="Copy download path">
-              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M5.5 5.5H3.75A1.25 1.25 0 0 0 2.5 6.75v5.5c0 .69.56 1.25 1.25 1.25h5.5c.69 0 1.25-.56 1.25-1.25V10.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M6.75 2.5h5.5c.69 0 1.25.56 1.25 1.25v5.5c0 .69-.56 1.25-1.25 1.25h-5.5A1.25 1.25 0 0 1 5.5 9.25v-5.5c0-.69.56-1.25 1.25-1.25Z" stroke="currentColor" stroke-width="1.5"/></svg>
-            </button>
-          </div>
-        </div>
+      <div class="facts">
+        <span class="fact"><small>Service</small><span class="val">127.0.0.1:${PORT}</span></span>
+        <span class="fact"><small>Downloads</small><span id="downloadPath" class="val" title="${safeDir}">${safeDir}</span>
+          <button id="copyPathButton" type="button" title="Copy download path" aria-label="Copy download path"><svg class="icon"><use href="#i-copy"/></svg></button></span>
+        <span class="fact warn">ffmpeg required for stream assembly</span>
       </div>
-      <div class="runtime-banner">ffmpeg required for stream assembly</div>
-    </aside>
-    <main class="main">
-      <header>
-        <div>
-          <h2>Downloads</h2>
-          <div id="summary" class="summary">Checking jobs...</div>
-        </div>
-        <div class="toolbar">
-          <button type="button" onclick="clearMissingJobs()">Clear missing</button>
-          <button id="prevJobsPageButton" type="button" onclick="prevJobsPage()">Prev</button>
-          <span id="jobsPageLabel" style="align-self:center;padding:0 4px;font:11px/1 var(--mono);color:var(--muted)">Page 1</span>
-          <button id="nextJobsPageButton" type="button" onclick="nextJobsPage()">Next</button>
-          <button type="button" onclick="loadJobs(true)">Refresh</button>
-        </div>
-      </header>
-      <section class="stats" aria-label="Download summary">
-        <div id="activeCard" class="stat"><div class="stat-name">Active</div><div id="activeStat" class="stat-value">0</div></div>
-        <div id="completedCard" class="stat"><div class="stat-name">Completed</div><div id="completedStat" class="stat-value">0</div></div>
-        <div id="failedCard" class="stat"><div class="stat-name">Failed</div><div id="failedStat" class="stat-value">0</div></div>
-        <div id="bytesCard" class="stat"><div class="stat-name">Downloaded</div><div id="bytesStat" class="stat-value">0 B</div></div>
-      </section>
-      <section id="jobs" class="panel"><div class="empty">Loading jobs...</div></section>
-    </main>
+    </header>
+
+    <div class="bar">
+      <div id="summary" class="summary">Checking jobs...</div>
+      <div class="toolbar">
+        <button class="slant" type="button" onclick="clearMissingJobs()"><span>Clear missing</span></button>
+        <button id="prevJobsPageButton" class="slant" type="button" onclick="prevJobsPage()"><span>Prev</span></button>
+        <span id="jobsPageLabel" class="page-label">Page 1</span>
+        <button id="nextJobsPageButton" class="slant" type="button" onclick="nextJobsPage()"><span>Next</span></button>
+        <button class="slant" type="button" onclick="loadJobs(true)"><span><svg class="icon"><use href="#i-refresh"/></svg>Refresh</span></button>
+      </div>
+    </div>
+
+    <section class="stats" aria-label="Download summary">
+      <div id="activeCard" class="stat"><div class="stat-name">Active</div><div id="activeStat" class="stat-value">0</div></div>
+      <div id="completedCard" class="stat"><div class="stat-name">Completed</div><div id="completedStat" class="stat-value">0</div></div>
+      <div id="failedCard" class="stat"><div class="stat-name">Failed</div><div id="failedStat" class="stat-value">0</div></div>
+      <div id="bytesCard" class="stat"><div class="stat-name">Downloaded</div><div id="bytesStat" class="stat-value">0 B</div></div>
+    </section>
+
+    <section id="jobs" class="panel"><div class="empty">Loading jobs...</div></section>
   </div>
   <script>
     const JOBS_PAGE_SIZE = 50;
     let jobsPageOffset = 0;
+    // Keyed row cache: id -> { node, signature }. Rows are rebuilt only when the
+    // job's rendered fields change, so the 1s poll no longer re-creates every row
+    // (and an open "ffmpeg args" panel stays open).
+    const rowCache = new Map();
 
     async function loadJobs(resetPage = false) {
       const root = document.querySelector("#jobs");
-      const summary = document.querySelector("#summary");
       if (resetPage) jobsPageOffset = 0;
       try {
         const response = await fetch('/jobs?limit=' + JOBS_PAGE_SIZE + '&offset=' + jobsPageOffset);
@@ -2896,36 +1701,81 @@ function renderHomePage() {
           return;
         }
 
-        document.querySelector("#activeStat").textContent = stats.active;
-        document.querySelector("#completedStat").textContent = stats.completed;
-        document.querySelector("#failedStat").textContent = stats.failed;
-        document.querySelector("#bytesStat").textContent = formatBytes(stats.downloadedBytes);
+        setText("#activeStat", stats.active);
+        setText("#completedStat", stats.completed);
+        setText("#failedStat", stats.failed);
+        setText("#bytesStat", formatBytes(stats.downloadedBytes));
         setCardState("#activeCard", stats.active);
         setCardState("#completedCard", stats.completed);
         setCardState("#failedCard", stats.failed);
         setCardState("#bytesCard", stats.downloadedBytes);
-        summary.textContent = stats.active + ' active, ' + total + ' total job' + (total === 1 ? '' : 's');
+        setText("#summary", stats.active + ' active, ' + total + ' total job' + (total === 1 ? '' : 's'));
 
         const prevButton = document.querySelector("#prevJobsPageButton");
         const nextButton = document.querySelector("#nextJobsPageButton");
         if (prevButton) prevButton.disabled = jobsPageOffset === 0;
         if (nextButton) nextButton.disabled = jobsPageOffset + jobs.length >= total;
-        const pageLabel = document.querySelector("#jobsPageLabel");
-        if (pageLabel) pageLabel.textContent = 'Page ' + (Math.floor(jobsPageOffset / JOBS_PAGE_SIZE) + 1);
+        setText("#jobsPageLabel", 'Page ' + (Math.floor(jobsPageOffset / JOBS_PAGE_SIZE) + 1));
 
         if (!total) {
           jobsPageOffset = 0;
-          root.innerHTML = '<div class="empty"><div class="empty-box"><div class="empty-title">No helper jobs yet</div><div class="empty-text">Start an HLS or DASH download from the extension popup. Jobs will appear here with progress, output path, and file actions.</div></div></div>';
+          rowCache.clear();
+          root.innerHTML = '<div class="empty"><div class="empty-title">No helper jobs yet</div><div class="empty-text">Start an HLS or DASH download from the extension popup. Jobs will appear here with progress, output path, and file actions.</div></div>';
           return;
         }
-        root.innerHTML = '<div class="panel-head"><div>Queue</div><div class="panel-count">' + total + ' item' + (total === 1 ? '' : 's') + '</div></div>' + jobs.map(renderJob).join('');
+        renderJobList(root, jobs, total);
       } catch {
-        summary.textContent = 'Helper offline';
-        document.querySelector("#activeStat").textContent = '0';
-        document.querySelector("#completedStat").textContent = '0';
-        document.querySelector("#failedStat").textContent = '0';
-        document.querySelector("#bytesStat").textContent = '0 B';
+        setText("#summary", 'Helper offline');
+        setText("#activeStat", '0');
+        setText("#completedStat", '0');
+        setText("#failedStat", '0');
+        setText("#bytesStat", '0 B');
+        rowCache.clear();
         root.innerHTML = '<div class="empty failed">Could not read helper jobs.</div>';
+      }
+    }
+    function renderJobList(root, jobs, total) {
+      let head = root.querySelector(".panel-head");
+      let grid = root.querySelector(".grid");
+      if (!head || !grid) {
+        rowCache.clear();
+        root.innerHTML = '<div class="panel-head"><b>Queue</b><span class="panel-count"></span></div><div class="grid"></div>';
+        head = root.querySelector(".panel-head");
+        grid = root.querySelector(".grid");
+      }
+      const count = head.querySelector(".panel-count");
+      const countText = total + ' item' + (total === 1 ? '' : 's');
+      if (count.textContent !== countText) count.textContent = countText;
+
+      const seen = new Set();
+      let cursor = grid.firstElementChild;
+      for (const job of jobs) {
+        seen.add(job.id);
+        const signature = JSON.stringify([job.status, job.error, job.progressText, job.outputPath, job.url, job.sourcePageUrl,
+          job.fileExists, job.totalBytes, job.totalSizeSource, job.downloadedBytes, job.startedAt, job.ffmpegArgs,
+          job.receivedSegments, job.totalSegments, job.downloadedSeconds, job.durationSeconds]);
+        let entry = rowCache.get(job.id);
+        if (!entry || entry.signature !== signature) {
+          const holder = document.createElement('div');
+          holder.innerHTML = renderJob(job);
+          const node = holder.firstElementChild;
+          if (entry) {
+            const wasOpen = entry.node.querySelector('details')?.open;
+            if (wasOpen && node.querySelector('details')) node.querySelector('details').open = true;
+            entry.node.replaceWith(node);
+            if (cursor === entry.node) cursor = node;
+          }
+          entry = { node, signature };
+          rowCache.set(job.id, entry);
+        }
+        if (entry.node !== cursor) grid.insertBefore(entry.node, cursor);
+        else cursor = cursor.nextElementSibling;
+      }
+      for (const [id, entry] of rowCache) {
+        if (!seen.has(id)) {
+          entry.node.remove();
+          rowCache.delete(id);
+        }
       }
     }
     function prevJobsPage() {
@@ -2943,17 +1793,27 @@ function renderHomePage() {
       const title = fileName(job.outputPath || job.url);
       const output = job.outputPath || job.url || '';
       const sourceUrl = job.sourcePageUrl || '';
-      return '<article class="row">'
-        + '<div class="thumb" aria-hidden="true"></div>'
-        + '<div class="job-main">'
-        + '<div class="title-row"><div class="job-title" title="' + escapeHtml(title) + '">' + escapeHtml(title) + '</div><span class="status ' + escapeHtml(job.status) + '">' + humanStatus(job.status) + '</span></div>'
+      const fraction = progressFraction(job);
+      const bar = isActive ? '<div class="bar-track" aria-hidden="true"><i style="width:' + (fraction === null ? 100 : (fraction * 100).toFixed(1)) + '%"></i></div>' : '';
+      return '<article class="row ' + escapeHtml(job.status) + '">'
+        + '<span class="status ' + escapeHtml(job.status) + '">' + escapeHtml(humanStatus(job.status)) + '</span>'
+        + '<div class="job-title" title="' + escapeHtml(title) + '">' + escapeHtml(title) + '</div>'
+        + bar
         + '<div class="progress">' + escapeHtml(humanJobMessage(job)) + '</div>'
         + '<div class="path" title="' + escapeHtml(output) + '">' + escapeHtml(middleTruncate(output, 72)) + '</div>'
         + '<div class="meta"><span class="chip">TOTAL ' + escapeHtml(sizeLabel(job)) + '</span><span class="chip">DOWN ' + escapeHtml(formatBytes(job.downloadedBytes || 0)) + '</span><span class="chip">START ' + escapeHtml(timeLabel(job.startedAt)) + '</span></div>'
         + '<details><summary>ffmpeg args</summary><code>' + escapeHtml((job.ffmpegArgs || []).join(' ')) + '</code></details>'
-        + '</div>'
         + '<div class="actions"><button type="button" data-action="source" data-source-url="' + escapeHtml(sourceUrl) + '" ' + (sourceUrl ? '' : 'disabled') + '>Source</button><button class="warning" type="button" data-action="cancel" data-job-id="' + escapeHtml(job.id) + '" ' + (isActive ? '' : 'disabled') + '>Stop</button><button type="button" data-action="show" data-job-id="' + escapeHtml(job.id) + '" ' + (fileExists ? '' : 'disabled') + '>Open folder</button><button class="danger" type="button" data-action="remove" data-job-id="' + escapeHtml(job.id) + '" data-file-exists="' + fileExists + '" data-title="' + escapeHtml(title) + '" ' + (canForget ? '' : 'disabled') + '>Remove</button></div>'
         + '</article>';
+    }
+    // SYNC-POINT: mirrors jobProgressFraction() in src/shared.js.
+    function progressFraction(job) {
+      let fraction = null;
+      if (Number(job.totalSegments) > 0) fraction = Number(job.receivedSegments || 0) / Number(job.totalSegments);
+      else if (Number(job.durationSeconds) > 0 && Number.isFinite(Number(job.downloadedSeconds))) fraction = Number(job.downloadedSeconds) / Number(job.durationSeconds);
+      else if (Number(job.totalBytes) > 0 && Number.isFinite(Number(job.downloadedBytes))) fraction = Number(job.downloadedBytes) / Number(job.totalBytes);
+      if (fraction === null || !Number.isFinite(fraction)) return null;
+      return Math.min(job.status === 'completed' ? 1 : 0.99, Math.max(0, fraction));
     }
     async function clearMissingJobs() {
       const response = await fetch('/jobs/clear-missing', { method: 'POST' });
@@ -2966,27 +1826,37 @@ function renderHomePage() {
       const response = await fetch('/jobs/' + encodeURIComponent(id) + '/cancel', { method: 'POST' });
       if (response.ok) loadJobs(true);
     }
+    let closeActiveDialog = null;
     function openRemoveDialog(id, fileExists, title) {
       if (!fileExists) {
         removeJob(id, 'record');
         return;
       }
-      document.querySelector('.remove-overlay')?.remove();
+      closeActiveDialog?.();
       const overlay = document.createElement('div');
       overlay.className = 'remove-overlay';
-      overlay.innerHTML = '<div class="remove-dialog"><h3>What would you like to remove?</h3><p class="remove-name"></p><div class="remove-dialog-actions"><button type="button" data-remove-mode="file">Remove file</button><button type="button" data-remove-mode="record">Remove record</button><button class="danger" type="button" data-remove-mode="both">Remove both</button><button type="button" data-remove-mode="cancel">Cancel</button></div></div>';
+      overlay.innerHTML = '<div class="remove-dialog" role="dialog" aria-modal="true"><h3>What would you like to remove?</h3><div class="remove-body"><p class="remove-name"></p><div class="remove-dialog-actions"><button class="danger" type="button" data-remove-mode="both">Remove both</button><button type="button" data-remove-mode="file">Remove file</button><button type="button" data-remove-mode="record">Remove record</button><button class="ghost" type="button" data-remove-mode="cancel">Cancel</button></div></div></div>';
       overlay.querySelector('.remove-name').textContent = title;
+      const close = () => {
+        overlay.remove();
+        document.removeEventListener('keydown', onKey);
+        if (closeActiveDialog === close) closeActiveDialog = null;
+      };
+      closeActiveDialog = close;
+      const onKey = (event) => { if (event.key === 'Escape') close(); };
       overlay.addEventListener('click', event => {
         if (event.target === overlay || event.target.dataset.removeMode === 'cancel') {
-          overlay.remove();
+          close();
           return;
         }
         const mode = event.target.dataset.removeMode;
         if (!mode) return;
-        overlay.remove();
+        close();
         removeJob(id, mode);
       });
+      document.addEventListener('keydown', onKey);
       document.body.appendChild(overlay);
+      overlay.querySelector('.ghost').focus();
     }
     async function removeJob(id, mode) {
       if (mode === 'file' || mode === 'both') {
@@ -2998,6 +1868,11 @@ function renderHomePage() {
         if (!response.ok) return;
       }
       loadJobs(true);
+    }
+    function setText(selector, value) {
+      const node = document.querySelector(selector);
+      const text = String(value);
+      if (node && node.textContent !== text) node.textContent = text;
     }
     function escapeHtml(value) {
       return String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
@@ -3046,8 +1921,11 @@ function renderHomePage() {
       if (button.dataset.action === "remove") openRemoveDialog(button.dataset.jobId, button.dataset.fileExists === 'true', button.dataset.title || 'Download');
       if (button.dataset.action === "source" && button.dataset.sourceUrl) window.open(button.dataset.sourceUrl, '_blank', 'noopener');
     });
-    document.querySelector("#copyPathButton").addEventListener("click", async () => {
-      await navigator.clipboard.writeText(${JSON.stringify(downloadDir)}).catch(() => {});
+    document.querySelector("#copyPathButton").addEventListener("click", async (event) => {
+      const button = event.currentTarget;
+      const ok = await navigator.clipboard.writeText(document.querySelector("#downloadPath").textContent).then(() => true, () => false);
+      button.classList.toggle('copied', ok);
+      if (ok) setTimeout(() => button.classList.remove('copied'), 1200);
     });
     loadJobs();
     setInterval(loadJobs, 1000);

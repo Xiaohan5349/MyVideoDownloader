@@ -298,5 +298,20 @@
   },
   "msgDownloadInProgress": {
     "message": "下载已在进行中。"
+  },
+  "confirmDownloadTitle": {
+    "message": "开始下载"
+  },
+  "labelDirectDownload": {
+    "message": "直接下载"
+  },
+  "labelStreamKind": {
+    "message": "{{kind}} 流媒体"
+  },
+  "msgClickToDownload": {
+    "message": "点击下载 {{name}}"
+  },
+  "statusConnecting": {
+    "message": "正在连接助手..."
   }
 }
