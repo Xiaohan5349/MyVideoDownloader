@@ -57,9 +57,19 @@ function createChromeMock() {
     listeners,
     storage: { local: storage, session: sessionStorage },
     runtime: {
+      id: "ext-id",
       onMessage: {
         addListener(fn) { listeners.onMessage = fn; },
       },
+      // Messages the background sends to the offscreen document.
+      async sendMessage(message) {
+        mock.runtime.sentMessages.push(message);
+        return mock.runtime.offscreenResponse;
+      },
+      async getContexts() { return mock.runtime.contexts; },
+      sentMessages: [],
+      offscreenResponse: { ok: true },
+      contexts: [],
     },
     webRequest: {
       onBeforeSendHeaders: {
@@ -70,6 +80,12 @@ function createChromeMock() {
       },
     },
     tabs: {
+      TAB_ID_NONE: -1,
+      async create(props) {
+        mock.tabs.createCalls.push(props);
+        return { id: 77, ...props };
+      },
+      createCalls: [],
       onRemoved: {
         addListener(fn) { listeners.onTabRemoved = fn; },
       },
@@ -117,6 +133,12 @@ function createChromeMock() {
       for (const key of Object.keys(data)) delete data[key];
       for (const key of Object.keys(sessionData)) delete sessionData[key];
       mock.tabs.updateCalls = [];
+      mock.tabs.createCalls = [];
+      mock.runtime.sentMessages = [];
+      mock.runtime.offscreenResponse = { ok: true };
+      mock.runtime.contexts = [];
+      delete mock.offscreen;
+      delete mock.declarativeNetRequest;
       mock.tabs.queryResult = [];
       mock.tabs.tabsById = {};
       mock.tabs.sendMessageCalls = [];
@@ -768,4 +790,244 @@ test("HELPER_STATUS_GET includes the helper's total job count in stats", async (
 
   assert.equal(response.stats.total, 37);
   assert.equal(response.stats.active, 0);
+});
+
+// ─── Extension mode: offscreen document + header-replay rules ───
+
+function enableOffscreen() {
+  const state = { created: [], rules: [] };
+  mock.offscreen = {
+    Reason: { BLOBS: "BLOBS" },
+    async createDocument(options) {
+      state.created.push(options);
+      mock.runtime.contexts = [{ contextType: "OFFSCREEN_DOCUMENT" }];
+    },
+  };
+  mock.declarativeNetRequest = {
+    async updateSessionRules({ addRules = [], removeRuleIds = [] }) {
+      state.rules = state.rules.filter((rule) => !removeRuleIds.includes(rule.id));
+      state.rules.push(...addRules);
+    },
+    async getSessionRules(filter = {}) {
+      return filter.ruleIds ? state.rules.filter((rule) => filter.ruleIds.includes(rule.id)) : [...state.rules];
+    },
+  };
+  return state;
+}
+
+const HLS_ITEM = {
+  url: "https://cdn.example.com/master.m3u8",
+  sourcePageUrl: "https://site.example",
+  title: "Stream",
+  extension: "m3u8",
+  kind: "hls",
+  frameId: 0,
+  tabId: 10,
+};
+
+function captureHeaders(url, headers) {
+  mock.listeners.onBeforeSendHeaders({
+    requestId: `req-${url}`,
+    url,
+    requestHeaders: Object.entries(headers).map(([name, value]) => ({ name, value })),
+  });
+}
+
+function offscreenStarts() {
+  return mock.runtime.sentMessages.filter((m) => m.type === "offscreen:downloadStream");
+}
+
+test("HLS downloads prefer the offscreen document with a header-replay rule", async () => {
+  const state = enableOffscreen();
+  captureHeaders(HLS_ITEM.url, {
+    Referer: "https://site.example/watch",
+    Origin: "https://site.example",
+    Cookie: "sid=abc",
+  });
+  mock.runtime.offscreenResponse = { ok: true, helperJob: { id: "job-off" } };
+
+  const response = await sendRuntimeMessage({ type: MESSAGE.DOWNLOADS_START, item: HLS_ITEM });
+
+  assert.equal(response.ok, true);
+  assert.equal(response.helperJob.id, "job-off");
+  assert.equal(response.mode, "extension");
+  assert.equal(mock.tabs.sendMessageCalls.length, 0, "page mode is not used");
+  assert.equal(state.created.length, 1);
+  assert.equal(state.created[0].url, "src/offscreen.html");
+
+  const [start] = offscreenStarts();
+  assert.equal(start.target, "offscreen");
+  assert.equal(start.payload.manifestUrl, HLS_ITEM.url);
+  assert.equal(state.rules.length, 1);
+  const [rule] = state.rules;
+  assert.equal(start.payload.ruleId, rule.id);
+  assert.deepEqual(rule.condition.requestDomains, ["cdn.example.com"]);
+  assert.deepEqual(rule.condition.tabIds, [-1], "only requests made outside tabs");
+  const set = Object.fromEntries(rule.action.requestHeaders.map((h) => [h.header, h.value]));
+  assert.deepEqual(set, { referer: "https://site.example/watch", origin: "https://site.example", cookie: "sid=abc" });
+  assert.equal(mock.tabs.updateCalls.length, 0, "the source tab may still be discarded");
+});
+
+test("without captured headers the rule falls back to the source page as referer and origin", async () => {
+  const state = enableOffscreen();
+  mock.runtime.offscreenResponse = { ok: true, helperJob: { id: "job-plain" } };
+
+  await sendRuntimeMessage({
+    type: MESSAGE.DOWNLOADS_START,
+    item: { ...HLS_ITEM, url: "https://other-cdn.example/x/master.m3u8", sourcePageUrl: "https://site.example/watch/9" },
+  });
+
+  const set = Object.fromEntries(state.rules[0].action.requestHeaders.map((h) => [h.header, h.value]));
+  assert.deepEqual(set, { referer: "https://site.example/watch/9", origin: "https://site.example" });
+});
+
+test("a refused offscreen start falls back to the page and drops the rule", async () => {
+  const state = enableOffscreen();
+  mockHelperFetch([]);
+  mock.runtime.offscreenResponse = { ok: false, error: "BROWSER_BLOCKED: HTTP 403", blocked: true };
+  mock.tabs.sendMessageResult = { ok: true, helperJob: { id: "job-page" } };
+
+  const response = await sendRuntimeMessage({ type: MESSAGE.DOWNLOADS_START, item: HLS_ITEM });
+
+  assert.equal(response.ok, true);
+  assert.equal(response.helperJob.id, "job-page");
+  assert.equal(response.mode, "page");
+  assert.equal(mock.tabs.sendMessageCalls.length, 1);
+  assert.equal(state.rules.length, 0);
+});
+
+test("DRM reported by the offscreen document is final", async () => {
+  enableOffscreen();
+  mock.runtime.offscreenResponse = { ok: false, error: "DRM_PROTECTED_UNSUPPORTED" };
+
+  const response = await sendRuntimeMessage({ type: MESSAGE.DOWNLOADS_START, item: HLS_ITEM });
+
+  assert.equal(response.error, "DRM_PROTECTED_UNSUPPORTED");
+  assert.equal(mock.tabs.sendMessageCalls.length, 0);
+});
+
+test("offscreen:allowHosts adds segment hosts to the job's rule", async () => {
+  const state = enableOffscreen();
+  mock.runtime.offscreenResponse = { ok: true, helperJob: { id: "job-hosts" } };
+  await sendRuntimeMessage({ type: MESSAGE.DOWNLOADS_START, item: HLS_ITEM });
+  const ruleId = state.rules[0].id;
+
+  const response = await sendRuntimeMessage({
+    type: "offscreen:allowHosts",
+    ruleId,
+    hosts: ["seg1.example.net", "cdn.example.com"],
+  });
+
+  assert.equal(response.ok, true);
+  assert.equal(state.rules.length, 1);
+  assert.deepEqual([...state.rules[0].condition.requestDomains].sort(), ["cdn.example.com", "seg1.example.net"]);
+});
+
+test("a blocked offscreen download hands the remaining segments to the page", async () => {
+  const state = enableOffscreen();
+  mockHelperFetch([]);
+  mock.runtime.offscreenResponse = { ok: true, helperJob: { id: "job-handoff" } };
+  await sendRuntimeMessage({ type: MESSAGE.DOWNLOADS_START, item: HLS_ITEM });
+  mock.tabs.sendMessageResult = { ok: true, helperJob: { id: "job-handoff" }, resumed: true };
+
+  await sendRuntimeMessage({
+    type: "offscreen:finished",
+    jobId: "job-handoff",
+    outcome: { status: "blocked", error: "BROWSER_BLOCKED: HTTP 403" },
+  });
+
+  assert.equal(state.rules.length, 0);
+  assert.equal(mock.tabs.sendMessageCalls.length, 1);
+  assert.equal(mock.tabs.sendMessageCalls[0].message.type, "page:downloadStream");
+  assert.equal(mock.tabs.sendMessageCalls[0].message.payload.manifestUrl, HLS_ITEM.url);
+  assert.deepEqual(mock.tabs.updateCalls.at(-1), { tabId: 10, props: { autoDiscardable: false } });
+});
+
+test("a completed offscreen download only drops its rule", async () => {
+  const state = enableOffscreen();
+  mock.runtime.offscreenResponse = { ok: true, helperJob: { id: "job-ok" } };
+  await sendRuntimeMessage({ type: MESSAGE.DOWNLOADS_START, item: HLS_ITEM });
+
+  await sendRuntimeMessage({ type: "offscreen:finished", jobId: "job-ok", outcome: { status: "completed" } });
+
+  assert.equal(state.rules.length, 0);
+  assert.equal(mock.tabs.sendMessageCalls.length, 0);
+});
+
+test("closing the source tab does not stop an offscreen download", async () => {
+  const calls = [];
+  mockHelperFetch(calls);
+  enableOffscreen();
+  mock.runtime.offscreenResponse = { ok: true, helperJob: { id: "job-bg" } };
+  await sendRuntimeMessage({ type: MESSAGE.DOWNLOADS_START, item: HLS_ITEM });
+
+  await mock.listeners.onTabRemoved(10);
+
+  assert.equal(failCalls(calls).length, 0);
+});
+
+// ─── Resume button ───
+
+function mockHelperJob(job, calls = []) {
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push({ url: String(url), options });
+    if (String(url).endsWith(`/jobs/${job.id}`)) {
+      return new Response(JSON.stringify(job), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    if (String(url).endsWith("/auth")) {
+      return new Response(JSON.stringify({ ok: true, token: "token-resume" }), {
+        status: 200, headers: { "Content-Type": "application/json" },
+      });
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  };
+}
+
+const RESUMABLE_JOB = {
+  id: "job-r",
+  status: "failed",
+  resumable: true,
+  inputMode: "browser",
+  url: "https://cdn.example.com/v/720.m3u8?token=old",
+  sourcePageUrl: "https://site.example",
+  outputPath: "D:/Videos/Movie-1a2b3c4d.mp4",
+};
+
+test("DOWNLOADS_JOB_RESUME restarts a resumable job from its stored stream", async () => {
+  enableOffscreen();
+  mockHelperJob(RESUMABLE_JOB);
+  mock.runtime.offscreenResponse = { ok: true, helperJob: { id: "job-r" }, resumed: true };
+
+  const response = await sendRuntimeMessage({ type: "downloads:jobResume", jobId: "job-r" });
+
+  assert.equal(response.ok, true);
+  assert.equal(response.resumed, true);
+  const [start] = offscreenStarts();
+  assert.equal(start.payload.manifestUrl, RESUMABLE_JOB.url);
+  assert.equal(start.payload.sourcePageUrl, RESUMABLE_JOB.sourcePageUrl);
+});
+
+test("DOWNLOADS_JOB_RESUME opens the source page when no browser path works, never the helper", async () => {
+  const calls = [];
+  enableOffscreen();
+  mockHelperJob(RESUMABLE_JOB, calls);
+  mock.runtime.offscreenResponse = { ok: false, error: "BROWSER_BLOCKED: HTTP 403", blocked: true };
+  mock.tabs.queryResult = [];
+  mock.tabs.tabsById = {};
+
+  const response = await sendRuntimeMessage({ type: "downloads:jobResume", jobId: "job-r" });
+
+  assert.equal(response.ok, false);
+  assert.equal(response.error, "SOURCE_PAGE_OPENED");
+  assert.deepEqual(mock.tabs.createCalls, [{ url: "https://site.example" }]);
+  assert.equal(calls.filter((c) => c.url.endsWith("/download")).length, 0, "no helper-direct fallback");
+});
+
+test("DOWNLOADS_JOB_RESUME refuses a job that is not resumable", async () => {
+  mockHelperJob({ ...RESUMABLE_JOB, resumable: false });
+
+  const response = await sendRuntimeMessage({ type: "downloads:jobResume", jobId: "job-r" });
+
+  assert.equal(response.ok, false);
+  assert.equal(response.error, "JOB_NOT_RESUMABLE");
 });

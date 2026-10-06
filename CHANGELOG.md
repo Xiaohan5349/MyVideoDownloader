@@ -1,5 +1,21 @@
 # Changelog
 
+## v1.8.0 - 2026-10-06
+
+### Added
+- Extension mode: HLS segments are fetched by an offscreen document instead of the video page, so downloads keep running when the tab is in the background, frozen by Energy Saver, discarded by Memory Saver, or closed. A session rule replays the page's Referer, Origin and Cookie, and applies only to requests made outside tabs to the stream's hosts.
+- Automatic fallback to page mode: if the video server refuses extension mode before the download starts (HTTP 401/403, an HTML page, or bytes that are not media), the page downloads it as before; if it refuses midway, the page continues from the segments already downloaded.
+- Resume button on resumable jobs in the popup. It retries the stored stream; if the link has expired or the site only allows page downloads, it opens the video page so one click on download continues the job.
+- The popup shows whether a running job uses extension mode or page mode.
+
+### Changed
+- Both modes share one HLS download loop (`src/hls-download.js`); the content script no longer carries its own copy.
+- New permissions: `offscreen` and `declarativeNetRequestWithHostAccess`.
+- Stop now pauses browser-fed HLS downloads: the downloaded segments are kept for 24 hours and the job shows Resume. Remove still deletes them immediately.
+
+### Fixed
+- A job interrupted while muxing (for example by a helper restart) could not be resumed, because its stream URL had been replaced by the local playlist path. Resume and re-downloading the same video now pick it up.
+
 ## v1.7.0 - 2026-10-06
 
 ### Added

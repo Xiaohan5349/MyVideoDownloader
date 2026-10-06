@@ -4,7 +4,7 @@ import {
   normalizeMediaItem, parseDashManifest, parseHlsManifest, sanitizeFilename
 } from "./shared.js";
 
-console.log("[ds] Service worker started v1.7.0");
+console.log("[ds] Service worker started v1.8.0");
 
 const SETTINGS_KEY = "settings";
 const TAB_MEDIA_PREFIX = "tabMedia:";
@@ -136,6 +136,18 @@ async function handleMessage(message, sender) {
     await untrackActiveDownload(message.jobId);
     return { ok: true };
   }
+
+  if (message.type === "offscreen:allowHosts") {
+    await allowReplayRuleHosts(message.ruleId, message.hosts);
+    return { ok: true };
+  }
+
+  if (message.type === "offscreen:finished") {
+    await handleOffscreenFinished(message.jobId, message.outcome);
+    return { ok: true };
+  }
+
+  if (message.type === MESSAGE.DOWNLOADS_JOB_RESUME) return resumeHelperJob(message.jobId);
 
   if (message.type === MESSAGE.DOWNLOADS_JOB_GET) return getHelperJob(message.jobId);
   if (message.type === MESSAGE.DOWNLOADS_JOB_SHOW) return showHelperJob(message.jobId);
@@ -425,32 +437,88 @@ async function startDownload(item, variant = null) {
   return { ok: true, downloadId };
 }
 
-async function startStreamDownload(media, variant) {
-  // The content-script path only speaks HLS (m3u8). DASH downloads go
-  // straight to the local helper, which is the only DASH-capable path.
+async function startStreamDownload(media, variant, { allowHelperFallback = true } = {}) {
+  // The browser paths only speak HLS (m3u8). DASH downloads go straight to
+  // the local helper, which is the only DASH-capable path.
   if (media.kind === "dash") {
     console.warn("[ds] startStreamDownload DASH → helper");
     return startHelperDownload(media, variant);
   }
 
+  // Extension mode first: the offscreen document fetches the segments, so
+  // the download survives the source tab being frozen, discarded or closed.
+  const extension = await startOffscreenDownload(media, variant);
+  if (extension.ok || extension.error === "DRM_PROTECTED_UNSUPPORTED") return extension;
+  console.warn("[ds] extension mode unavailable, using page mode:", extension.error);
+  return startPageDownload(media, variant, { allowHelperFallback });
+}
+
+async function startOffscreenDownload(media, variant) {
+  if (!chrome.offscreen || !chrome.declarativeNetRequest) return { ok: false, error: "OFFSCREEN_UNAVAILABLE" };
+  const manifestUrl = variant?.url || media.url;
+  let ruleId = null;
+  try {
+    await ensureOffscreenDocument();
+    ruleId = await addReplayRule(media, manifestUrl);
+    const response = await chrome.runtime.sendMessage({
+      target: "offscreen",
+      type: "offscreen:downloadStream",
+      payload: {
+        helperUrl: HELPER_URL,
+        manifestUrl,
+        quality: variant?.quality || media.quality || "",
+        title: media.title,
+        sourcePageUrl: media.sourcePageUrl,
+        ruleId
+      }
+    });
+    if (!response?.ok || !response.helperJob?.id) {
+      await removeReplayRule(ruleId);
+      return { ok: false, error: response?.error || "OFFSCREEN_FAILED" };
+    }
+    await trackActiveDownload(response.helperJob.id, {
+      mode: "extension",
+      ruleId,
+      tabId: media.tabId,
+      media: handoffMedia(media),
+      variant: variant?.url ? { url: variant.url, quality: variant.quality || "" } : null
+    });
+    return { ok: true, helperJob: response.helperJob, resumed: Boolean(response.resumed), mode: "extension" };
+  } catch (error) {
+    await removeReplayRule(ruleId);
+    return { ok: false, error: error?.message || "OFFSCREEN_FAILED" };
+  }
+}
+
+// Enough of a media item to restart it in page mode after a handoff.
+function handoffMedia(media) {
+  const { url, kind, title, sourcePageUrl, frameId, tabId, quality } = media;
+  return { url, kind, title, sourcePageUrl, frameId, tabId, quality };
+}
+
+async function startPageDownload(media, variant, { allowHelperFallback = true } = {}) {
+  const fallback = () => (allowHelperFallback
+    ? startHelperDownload(media, variant)
+    : { ok: false, error: "SOURCE_PAGE_REQUIRED" });
+
   const authToken = await getHelperToken();
   if (!authToken) {
-    console.warn("[ds] startStreamDownload FALLBACK=helper (no auth token)");
+    console.warn("[ds] startPageDownload FALLBACK=helper (no auth token)");
     return { ok: false, error: "HELPER_OFFLINE", variants: media.variants || [] };
   }
 
-  console.warn("[ds] startStreamDownload tabSearch url=", (media.sourcePageUrl || "").slice(0, 60));
+  console.warn("[ds] startPageDownload tabSearch url=", (media.sourcePageUrl || "").slice(0, 60));
   const tabId = await resolveTabId(media);
-  console.warn("[ds] startStreamDownload tabId=", tabId);
+  console.warn("[ds] startPageDownload tabId=", tabId);
 
   if (typeof tabId !== "number") {
-    console.warn("[ds] startStreamDownload FALLBACK=helper (tab not found)");
-    return startHelperDownload(media, variant);
+    console.warn("[ds] startPageDownload FALLBACK (tab not found)");
+    return fallback();
   }
 
   try {
     const downloadUrl = variant?.url || media.url;
-    console.warn("[ds] startStreamDownload → content script url=", downloadUrl.slice(0, 100));
+    console.warn("[ds] startPageDownload → content script url=", downloadUrl.slice(0, 100));
     const response = await chrome.tabs.sendMessage(tabId, {
       type: "page:downloadStream",
       payload: {
@@ -463,28 +531,162 @@ async function startStreamDownload(media, variant) {
       }
     }, { frameId: media.frameId ?? 0 });
 
-    console.warn("[ds] startStreamDownload contentScriptResult ok=", response?.ok, "error=", response?.error);
+    console.warn("[ds] startPageDownload contentScriptResult ok=", response?.ok, "error=", response?.error);
 
     if (response?.ok) {
       // The content script answers as soon as the helper job exists and keeps
       // downloading afterwards, so a later port closure can no longer trigger
       // a duplicate helper fallback below.
-      if (response.helperJob?.id) await trackActiveDownload(response.helperJob.id, tabId);
-      return { ok: true, helperJob: response.helperJob, resumed: Boolean(response.resumed) };
+      if (response.helperJob?.id) await trackActiveDownload(response.helperJob.id, { mode: "page", tabId });
+      return { ok: true, helperJob: response.helperJob, resumed: Boolean(response.resumed), mode: "page" };
     }
     if (["SERVER_PROTECTED_UNSUPPORTED", "DRM_PROTECTED_UNSUPPORTED", "JOB_CANCELLED", "SEGMENT_DOWNLOAD_FAILED", "SEGMENTS_INCOMPLETE"].includes(response?.error) ||
         response?.error?.startsWith("HELPER_COMPLETE_")) {
       return response;
     }
-    console.warn("[ds] startStreamDownload FALLBACK=helper (content script returned error)");
-    return startHelperDownload(media, variant);
+    console.warn("[ds] startPageDownload FALLBACK (content script returned error)");
+    return fallback();
   } catch (err) {
-    console.warn("[ds] startStreamDownload FALLBACK=helper (exception:", err.message, ")");
-    return startHelperDownload(media, variant);
+    console.warn("[ds] startPageDownload FALLBACK (exception:", err.message, ")");
+    return fallback();
   }
 }
 
-// --- Active browser-fed downloads (jobId -> source tab) ---
+// --- Resume button ---
+
+async function resumeHelperJob(jobId) {
+  const result = await getHelperJob(jobId);
+  if (!result.ok) return result;
+  const job = result.job;
+  if (!job.resumable || job.inputMode !== "browser") return { ok: false, error: "JOB_NOT_RESUMABLE" };
+
+  const media = normalizeMediaItem({
+    url: job.url,
+    kind: "hls",
+    extension: "m3u8",
+    sourcePageUrl: job.sourcePageUrl || "",
+    headers: cachedHeadersForUrl(job.url)
+  });
+  if (!media) return { ok: false, error: "JOB_NOT_RESUMABLE" };
+
+  // Never fall back to a fresh helper-direct job: it would not resume.
+  const started = await startStreamDownload(media, null, { allowHelperFallback: false });
+  if (started.ok || started.error === "DRM_PROTECTED_UNSUPPORTED" || started.error === "HELPER_OFFLINE") return started;
+
+  // Usually an expired CDN token or a page-only site. Clicking download on
+  // the page uses a fresh manifest URL and still resumes this job.
+  if (/^https?:\/\//i.test(job.sourcePageUrl || "")) {
+    await openOrFocusTab(job.sourcePageUrl);
+    return { ok: false, error: "SOURCE_PAGE_OPENED" };
+  }
+  return started;
+}
+
+async function openOrFocusTab(url) {
+  const tabs = await chrome.tabs.query({}).catch(() => []);
+  const existing = tabs.find((tab) => tab.url === url);
+  if (existing?.id != null) {
+    await chrome.tabs.update(existing.id, { active: true }).catch(() => {});
+    return;
+  }
+  await chrome.tabs.create({ url });
+}
+
+// --- Offscreen document and header-replay rules ---
+
+let offscreenCreating = null;
+
+async function ensureOffscreenDocument() {
+  const contexts = await chrome.runtime.getContexts?.({ contextTypes: ["OFFSCREEN_DOCUMENT"] }) ?? [];
+  if (contexts.length) return;
+  if (!offscreenCreating) {
+    offscreenCreating = chrome.offscreen.createDocument({
+      url: "src/offscreen.html",
+      reasons: [chrome.offscreen.Reason?.BLOBS || "BLOBS"],
+      justification: "Fetch HLS segments as binary data and hand them to the local helper"
+    }).catch((error) => {
+      // A concurrent call already created it.
+      if (!/single offscreen document/i.test(error?.message || "")) throw error;
+    }).finally(() => { offscreenCreating = null; });
+  }
+  await offscreenCreating;
+}
+
+// Replays the page's Referer/Origin/Cookie on the offscreen document's
+// requests so the CDN sees them as the page's own. Scoped to requests made
+// outside tabs and to the stream's hosts; page traffic is never modified.
+function replayHeadersFor(media, manifestUrl) {
+  const captured = [media.headers, cachedHeadersForUrl(manifestUrl), cachedHeadersForUrl(media.url)]
+    .find((headers) => headers?.length) || [];
+  const value = (name) => captured.find((h) => h.name?.toLowerCase() === name)?.value || "";
+  return [
+    ["referer", value("referer") || media.sourcePageUrl || ""],
+    ["origin", value("origin") || originForUrl(media.sourcePageUrl)],
+    ["cookie", value("cookie")]
+  ]
+    .filter(([, headerValue]) => headerValue)
+    .map(([header, headerValue]) => ({ header, operation: "set", value: headerValue }));
+}
+
+async function addReplayRule(media, manifestUrl) {
+  const requestHeaders = replayHeadersFor(media, manifestUrl);
+  const host = replayableHost(manifestUrl);
+  if (!requestHeaders.length || !host) return null;
+  const id = 1 + Math.floor(Math.random() * 2_000_000_000);
+  await chrome.declarativeNetRequest.updateSessionRules({
+    addRules: [{
+      id,
+      priority: 1,
+      action: { type: "modifyHeaders", requestHeaders },
+      condition: {
+        requestDomains: [host],
+        tabIds: [chrome.tabs.TAB_ID_NONE ?? -1],
+        resourceTypes: ["xmlhttprequest", "other"]
+      }
+    }]
+  });
+  return id;
+}
+
+async function allowReplayRuleHosts(ruleId, hosts) {
+  if (!Number.isInteger(ruleId) || !Array.isArray(hosts) || !chrome.declarativeNetRequest) return;
+  const [rule] = await chrome.declarativeNetRequest.getSessionRules({ ruleIds: [ruleId] });
+  if (!rule) return;
+  const current = rule.condition.requestDomains || [];
+  const domains = [...new Set([...current, ...hosts.map(replayableHost).filter(Boolean)])];
+  if (domains.length === current.length) return;
+  await chrome.declarativeNetRequest.updateSessionRules({
+    removeRuleIds: [ruleId],
+    addRules: [{ ...rule, condition: { ...rule.condition, requestDomains: domains } }]
+  });
+}
+
+async function removeReplayRule(ruleId) {
+  if (!Number.isInteger(ruleId) || !chrome.declarativeNetRequest) return;
+  await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: [ruleId] }).catch(() => {});
+}
+
+// Accepts a URL or a bare host; never rewrites traffic to the local helper.
+function replayableHost(value) {
+  let host = "";
+  try { host = new URL(value).hostname; } catch { host = String(value || ""); }
+  host = host.toLowerCase();
+  if (!/^[a-z0-9.-]+$/.test(host) || host === "localhost" || host === "127.0.0.1") return "";
+  return host;
+}
+
+// Session rules survive service-worker restarts; drop any whose job is no
+// longer tracked (e.g. the extension reloaded mid-download).
+async function cleanupOrphanReplayRules() {
+  if (!chrome.declarativeNetRequest?.getSessionRules) return;
+  const rules = await chrome.declarativeNetRequest.getSessionRules();
+  const stored = await chrome.storage.session.get(ACTIVE_DOWNLOADS_KEY);
+  const live = new Set(Object.values(stored[ACTIVE_DOWNLOADS_KEY] || {}).map((entry) => entry.ruleId));
+  const stale = rules.map((rule) => rule.id).filter((id) => !live.has(id));
+  if (stale.length) await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: stale });
+}
+
+// --- Active browser-fed downloads (jobId -> mode, source tab, rule) ---
 // Kept in session storage so a service-worker restart does not forget them.
 
 const ACTIVE_DOWNLOADS_KEY = "activeBrowserDownloads";
@@ -503,30 +705,46 @@ function mutateActiveDownloads(mutator) {
   return next;
 }
 
-async function trackActiveDownload(jobId, tabId) {
-  await mutateActiveDownloads((active) => { active[jobId] = { tabId }; });
-  // Memory Saver would otherwise discard the tab and kill the download loop.
-  await chrome.tabs.update(tabId, { autoDiscardable: false }).catch(() => {});
+async function trackActiveDownload(jobId, entry) {
+  await mutateActiveDownloads((active) => { active[jobId] = entry; });
+  // Page mode: Memory Saver would otherwise discard the tab and kill the
+  // download loop. Extension mode does not depend on the tab.
+  if (entry.mode === "page") await chrome.tabs.update(entry.tabId, { autoDiscardable: false }).catch(() => {});
 }
 
 async function untrackActiveDownload(jobId) {
-  const { tabId, tabStillBusy } = await mutateActiveDownloads((active) => {
-    const tabId = active[jobId]?.tabId;
+  const { entry, tabStillBusy } = await mutateActiveDownloads((active) => {
+    const entry = active[jobId];
     delete active[jobId];
-    return { tabId, tabStillBusy: Object.values(active).some((entry) => entry.tabId === tabId) };
+    const tabStillBusy = Object.values(active)
+      .some((other) => other.mode === "page" && other.tabId === entry?.tabId);
+    return { entry, tabStillBusy };
   });
-  if (typeof tabId === "number" && !tabStillBusy) {
-    await chrome.tabs.update(tabId, { autoDiscardable: true }).catch(() => {});
+  await removeReplayRule(entry?.ruleId);
+  if (entry?.mode === "page" && typeof entry.tabId === "number" && !tabStillBusy) {
+    await chrome.tabs.update(entry.tabId, { autoDiscardable: true }).catch(() => {});
   }
+  return entry || null;
 }
 
 async function failActiveDownloadsForTab(tabId, error) {
   const jobIds = await mutateActiveDownloads((active) => {
-    const ids = Object.keys(active).filter((jobId) => active[jobId].tabId === tabId);
+    const ids = Object.keys(active).filter((jobId) => active[jobId].mode === "page" && active[jobId].tabId === tabId);
     for (const jobId of ids) delete active[jobId];
     return ids;
   });
   await Promise.all(jobIds.map((jobId) => reportBrowserDownloadFailure(jobId, error)));
+}
+
+// The offscreen document finished a job. If the CDN blocked it (or it
+// failed), the helper has kept the segments, so page mode resumes the rest.
+async function handleOffscreenFinished(jobId, outcome) {
+  const entry = await untrackActiveDownload(jobId);
+  const status = outcome?.status;
+  if (entry?.mode !== "extension" || !entry.media) return;
+  if (status !== "blocked" && status !== "failed") return;
+  console.warn("[ds] extension mode stopped (", outcome?.error, "), handing off to page mode");
+  await startPageDownload(entry.media, entry.variant, { allowHelperFallback: false });
 }
 
 async function reportBrowserDownloadFailure(jobId, error) {
@@ -840,3 +1058,6 @@ async function updateBadge(tabId, items) {
   await chrome.action.setBadgeText({ tabId, text: count ? String(count) : "" }).catch(() => {});
   await chrome.action.setBadgeBackgroundColor({ tabId, color: "#2f6f5e" }).catch(() => {});
 }
+
+// Runs once per service-worker start, after every declaration above.
+cleanupOrphanReplayRules().catch(() => {});

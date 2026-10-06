@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "__MSG_brandName__",
   "short_name": "__MSG_brandShortName__",
-  "version": "1.7.0",
+  "version": "1.8.0",
   "description": "__MSG_brandDescription__",
   "action": {
     "default_icon": {
@@ -35,7 +35,7 @@
   ],
   "web_accessible_resources": [
     {
-      "resources": ["src/hls-browser.js"],
+      "resources": ["src/hls-browser.js", "src/hls-download.js"],
       "matches": ["<all_urls>"]
     }
   ],
@@ -51,6 +51,6 @@
     "open_in_tab": true
   },
   "default_locale": "en",
-  "permissions": ["tabs", "storage", "webRequest"],
+  "permissions": ["tabs", "storage", "webRequest", "offscreen", "declarativeNetRequestWithHostAccess"],
   "optional_permissions": ["downloads"]
 }

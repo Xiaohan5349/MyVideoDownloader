@@ -892,7 +892,39 @@ it("a different duration does not resume an old job, but a sub-second drift does
   assert.equal(drift.body.job.id, id);
 });
 
-it("a cancelled browser job is not resumable and its temp files are removed", async () => {
+it("BROWSER_BLOCKED failures are resumable and the resume records the new download mode", async () => {
+  const body = {
+    url: "https://cdn.example.com/resume/mode.m3u8",
+    title: "Resume Mode",
+    totalSegments: 2,
+    sourcePageUrl: "https://site.example/watch/mode",
+    downloadMode: "extension"
+  };
+  const first = await startBrowserJob(body);
+  assert.equal(first.body.job.downloadMode, "extension");
+  await fetchJson(`/browser-downloads/${encodeURIComponent(first.body.job.id)}/fail`, {
+    method: "POST",
+    body: { error: "BROWSER_BLOCKED: HTTP 403" }
+  });
+  assert.equal(jobs.get(first.body.job.id).resumable, true);
+
+  const second = await startBrowserJob({ ...body, downloadMode: "page" });
+
+  assert.equal(second.body.resumed, true);
+  assert.equal(second.body.job.downloadMode, "page");
+});
+
+it("an unknown download mode is not stored", async () => {
+  const res = await startBrowserJob({
+    url: "https://cdn.example.com/resume/badmode.m3u8",
+    title: "Bad Mode",
+    totalSegments: 1,
+    downloadMode: "<script>"
+  });
+  assert.equal(res.body.job.downloadMode, null);
+});
+
+it("stopping a browser job keeps its segments so it can be resumed", async () => {
   const body = {
     url: "https://cdn.example.com/resume/cancel.m3u8",
     title: "Resume Cancel",
@@ -904,10 +936,36 @@ it("a cancelled browser job is not resumable and its temp files are removed", as
   await uploadSegment(id, "seg-000000.ts");
   await fetchJson(`/jobs/${encodeURIComponent(id)}/cancel`, { method: "POST" });
 
-  assert.ok(!jobs.get(id).resumable);
-  assert.ok(!existsSync(jobs.get(id).tempDir));
+  const stopped = jobs.get(id);
+  assert.equal(stopped.status, "cancelled");
+  assert.equal(stopped.resumable, true);
+  assert.ok(existsSync(path.join(stopped.tempDir, "seg-000000.ts")));
+
   const second = await startBrowserJob(body);
-  assert.equal(second.body.resumed, false);
+  assert.equal(second.body.resumed, true);
+  assert.equal(second.body.job.id, id);
+  assert.equal(second.body.job.status, "running");
+  assert.deepEqual(second.body.receivedFiles, ["seg-000000.ts"]);
+});
+
+it("a browser job keeps its stream URL while muxing, so a restart mid-mux can still resume", async () => {
+  const start = await startBrowserJob({
+    url: "https://cdn.example.com/resume/mux.m3u8",
+    title: "Resume Mux",
+    totalSegments: 1,
+    sourcePageUrl: "https://site.example/watch/mux"
+  });
+  const id = start.body.job.id;
+  await uploadSegment(id, "seg-000000.ts");
+
+  const complete = await fetchJson(`/browser-downloads/${encodeURIComponent(id)}/complete`, {
+    method: "POST",
+    body: { playlistText: "#EXTM3U\n#EXTINF:4,\nseg-000000.ts\n#EXT-X-ENDLIST" }
+  });
+
+  assert.equal(complete.status, 202);
+  assert.equal(complete.body.job.url, "https://cdn.example.com/resume/mux.m3u8");
+  assert.ok(complete.body.job.localPlaylistPath.endsWith("input.m3u8"));
 });
 
 it("resumable temp files expire after the retention window", async () => {

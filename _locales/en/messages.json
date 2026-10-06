@@ -255,7 +255,7 @@
     "message": "The source page was closed or reloaded, so the download stopped."
   },
   "msgDownloadResumable": {
-    "message": "Click download on the same video again to resume from where it stopped."
+    "message": "Click Resume, or download the same video again, to continue from where it stopped."
   },
   "msgHelperRestarted": {
     "message": "Download was interrupted when the helper stopped."
@@ -319,5 +319,26 @@
   },
   "statusConnecting": {
     "message": "Connecting to helper..."
+  },
+  "btnResume": {
+    "message": "Resume"
+  },
+  "msgResumeStarted": {
+    "message": "Download resumed."
+  },
+  "msgResumeOpenPage": {
+    "message": "Opened the video page. Click download there to continue from where it stopped."
+  },
+  "msgResumeFailed": {
+    "message": "Could not resume this download."
+  },
+  "msgBrowserBlocked": {
+    "message": "The video server refused the download from this context."
+  },
+  "labelModeExtension": {
+    "message": "Extension mode"
+  },
+  "labelModePage": {
+    "message": "Page mode"
   }
 }

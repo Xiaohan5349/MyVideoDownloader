@@ -246,6 +246,7 @@ function renderHelperJobs(jobs) {
       const meta = existing.querySelector(".helper-job-meta");
       const pathEl = existing.querySelector(".helper-job-path");
       const sourceBtn = existing.querySelector(".source-button");
+      const resumeBtn = existing.querySelector(".resume-button");
       const cancelBtn = existing.querySelector(".cancel-button");
       const showBtn = existing.querySelector(".show-button");
       const removeBtn = existing.querySelector(".remove-button");
@@ -261,6 +262,7 @@ function renderHelperJobs(jobs) {
       const fileExists = job.fileExists !== false && Boolean(job.outputPath);
       sourceBtn.disabled = !job.sourcePageUrl;
       sourceBtn.dataset.sourceUrl = job.sourcePageUrl || "";
+      resumeBtn.disabled = !job.resumable;
       cancelBtn.disabled = !isActive;
       showBtn.disabled = !fileExists;
       removeBtn.disabled = isActive;
@@ -283,6 +285,7 @@ function renderHelperJobs(jobs) {
       node.querySelector(".helper-job-path").textContent = job.outputPath || job.url;
 
       const sourceButton = node.querySelector(".source-button");
+      const resumeButton = node.querySelector(".resume-button");
       const cancelButton = node.querySelector(".cancel-button");
       const showButton = node.querySelector(".show-button");
       const removeButton = node.querySelector(".remove-button");
@@ -290,11 +293,13 @@ function renderHelperJobs(jobs) {
       const fileExists = job.fileExists !== false && Boolean(job.outputPath);
       sourceButton.disabled = !job.sourcePageUrl;
       sourceButton.dataset.sourceUrl = job.sourcePageUrl || "";
+      resumeButton.disabled = !job.resumable;
       cancelButton.disabled = !isActive;
       showButton.disabled = !fileExists;
       removeButton.disabled = isActive;
       removeButton.dataset.fileExists = String(fileExists);
       sourceButton.addEventListener("click", () => openSourcePage(sourceButton.dataset.sourceUrl));
+      resumeButton.addEventListener("click", () => resumeJob(job.id, resumeButton));
       cancelButton.addEventListener("click", () => cancelJob(job.id));
       showButton.addEventListener("click", () => showJobInFolder(job.id));
       removeButton.addEventListener("click", () => openRemoveDialog(job.id, removeButton.dataset.fileExists === "true", jobTitle(job)));
@@ -718,6 +723,20 @@ async function cancelJob(jobId) {
   await loadHelperStatus();
 }
 
+async function resumeJob(jobId, button) {
+  button.disabled = true;
+  const response = await chrome.runtime.sendMessage({ type: MESSAGE.DOWNLOADS_JOB_RESUME, jobId }).catch(() => null);
+  if (response?.ok) {
+    showNotice(getMessage("msgResumeStarted"));
+  } else if (response?.error === "SOURCE_PAGE_OPENED") {
+    showNotice(getMessage("msgResumeOpenPage"));
+  } else {
+    button.disabled = false;
+    showNotice(response?.error || getMessage("msgResumeFailed"), true);
+  }
+  await loadHelperStatus();
+}
+
 function openSourcePage(url) {
   if (!/^https?:\/\//i.test(url || "")) return;
   chrome.tabs.create({ url });
@@ -834,13 +853,17 @@ function humanStatus(value) {
 
 function humanJobMessage(job) {
   const message = baseJobMessage(job);
-  return job.resumable ? `${message} ${getMessage("msgDownloadResumable")}` : message;
+  if (job.resumable) return `${message} ${getMessage("msgDownloadResumable")}`;
+  const isActive = job.status === "queued" || job.status === "running";
+  const mode = { extension: "labelModeExtension", page: "labelModePage" }[job.downloadMode];
+  return isActive && mode ? `${getMessage(mode)} · ${message}` : message;
 }
 
 function baseJobMessage(job) {
   if (job.error === "DOWNLOAD_STALLED") return job.progressText || getMessage("msgDownloadStalled");
   if (job.error === "HELPER_RESTARTED") return getMessage("msgHelperRestarted");
   if (job.error === "SOURCE_PAGE_CLOSED") return getMessage("msgSourcePageClosed");
+  if (String(job.error || "").startsWith("BROWSER_BLOCKED")) return getMessage("msgBrowserBlocked");
   return job.error || job.progressText || sizeLabel(job);
 }
 

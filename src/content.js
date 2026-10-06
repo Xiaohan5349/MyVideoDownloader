@@ -20,9 +20,8 @@ function rememberUrl(url) {
 let scanTimer = null;
 let currentUrl = location.href;
 const SEGMENT_FETCH_TIMEOUT_MS = 30_000;
-const SEGMENT_FETCH_RETRIES = 5;
 const DIRECT_SIZE_PROBE_TIMEOUT_MS = 7_000;
-let hlsBrowserModulePromise = null;
+let hlsDownloadModulePromise = null;
 // Helper job ids whose download loop runs in this frame.
 const activeStreamJobIds = new Set();
 
@@ -212,341 +211,42 @@ function isSameOrigin(url) {
 }
 
 // --- Full stream download from page context ---
+// Page mode: segments are fetched with this page's network identity. The
+// download loop itself lives in src/hls-download.js, shared with the
+// offscreen document (extension mode).
 async function handleStreamDownload(payload) {
   const { helperUrl, manifestUrl, quality, title, sourcePageUrl, authToken } = payload;
-  const authHeaders = authToken ? { "X-DS-Token": authToken } : {};
   console.warn("[ds-content] handleStreamDownload start manifestUrl=", manifestUrl?.slice(0, 80));
-  if (!helperUrl || !manifestUrl) throw new Error("INVALID_DOWNLOAD_REQUEST");
-
-  // Step 1: Fetch master playlist
-  const masterText = await fetchTextFromPage(manifestUrl);
-  console.warn("[ds-content] master playlist fetched, length=", masterText.length);
-
-  // Step 2: Parse with simple inline parser
-  const master = parseHlsMaster(masterText, manifestUrl);
-  if (master.hasDrm) throw new Error("DRM_PROTECTED_UNSUPPORTED");
-
-  // Step 3: Pick variant
-  let variantUrl = manifestUrl;
-  if (master.variants.length) {
-    const picked = pickVariant(master.variants, quality);
-    variantUrl = picked.url;
-  }
-
-  // Step 4: Fetch media playlist
-  const mediaText = await fetchTextFromPage(variantUrl);
-
-  // Step 5: Build a complete local asset plan, including accessible AES-128 keys and init maps.
-  const {
-    buildHlsAssetPlan,
-    parseHlsMediaPlaylist
-  } = await getHlsBrowserModule();
-  const mediaPlaylist = parseHlsMediaPlaylist(mediaText, variantUrl);
-  if (mediaPlaylist.hasDrm) throw new Error("DRM_PROTECTED_UNSUPPORTED");
-  if (!mediaPlaylist.segments.length) throw new Error("HLS_NO_SEGMENTS");
-  const plan = buildHlsAssetPlan(mediaPlaylist);
-
-  // Step 6: Create helper job
-  const startRes = await fetch(`${helperUrl}/browser-downloads/start`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...authHeaders },
-    body: JSON.stringify({
-      url: variantUrl,
-      title: title || "video",
-      totalSegments: plan.segmentAssetCount,
-      durationSeconds: mediaPlaylist.durationSeconds,
-      sourcePageUrl: sourcePageUrl || location.href
-    })
+  const { startHlsDownload } = await getHlsDownloadModule();
+  const handle = await startHlsDownload({
+    helperUrl,
+    authHeaders: authToken ? { "X-DS-Token": authToken } : {},
+    manifestUrl,
+    quality,
+    title,
+    sourcePageUrl: sourcePageUrl || location.href,
+    downloadMode: "page"
   });
-  const startPayload = await startRes.json().catch(() => ({}));
-  if (!startRes.ok) throw new Error(startPayload.error || `HELPER_${startRes.status}`);
-  const job = startPayload.job;
 
   // Answer the background as soon as the job exists: the download can take
   // longer than the service worker is allowed to wait for a reply.
-  const alreadyReceived = new Set(startPayload.receivedFiles || []);
-  const context = { helperUrl, authHeaders, job, plan, mediaText, variantUrl, alreadyReceived };
-  activeStreamJobIds.add(job.id);
-  runStreamDownload(context)
-    .catch((error) => {
-      console.warn("[ds-content] stream download failed", error?.message);
-      return reportStreamFailure(context, error?.message || "BROWSER_HLS_FAILED");
-    })
+  const jobId = handle.job.id;
+  activeStreamJobIds.add(jobId);
+  handle.done
+    .then((outcome) => console.warn("[ds-content] stream download", outcome.status, outcome.error || ""))
     .finally(() => {
-      activeStreamJobIds.delete(job.id);
-      chrome.runtime.sendMessage({ type: "page:streamFinished", jobId: job.id }).catch(() => {});
+      activeStreamJobIds.delete(jobId);
+      chrome.runtime.sendMessage({ type: "page:streamFinished", jobId }).catch(() => {});
     });
 
-  return { ok: true, helperJob: job, resumed: Boolean(startPayload.resumed) };
+  return { ok: true, helperJob: handle.job, resumed: handle.resumed };
 }
 
-async function runStreamDownload({ helperUrl, authHeaders, job, plan, mediaText, variantUrl, alreadyReceived }) {
-  // Step 7: Fetch and upload segments in parallel.
-  // Keep ArrayBuffer memory bounded, but allow faster devices to use more
-  // workers (3-6). Segment size is unknown until fetched, so this is driven
-  // by available device memory rather than per-segment size.
-  const concurrency = chooseConcurrency();
-  const assets = plan.assets;
-
-  let completed = 0;
-  const total = assets.length;
-  let cancelled = false;
-
-  async function processOne(asset) {
-    // Check whether the helper job is still running before fetching
-    try {
-      const checkRes = await fetch(`${helperUrl}/jobs/${encodeURIComponent(job.id)}`, {
-        headers: authHeaders
-      });
-      if (checkRes.ok) {
-        const j = await checkRes.json().catch(() => ({}));
-        if (j.status === "cancelled" || j.status === "failed") {
-          cancelled = true;
-          return;
-        }
-      }
-    } catch (_) {}
-
-    const data = await fetchSegmentWithRetry(asset.url, asset.byteRange || null);
-
-    // Upload to helper
-    const upRes = await fetchWithTimeout(
-      `${helperUrl}/browser-downloads/${encodeURIComponent(job.id)}/files/${encodeURIComponent(asset.name)}`,
-      { method: "POST", headers: { "Content-Type": "application/octet-stream", ...authHeaders }, body: data },
-      SEGMENT_FETCH_TIMEOUT_MS
-    );
-    if (!upRes.ok) throw new Error(`UPLOAD_${upRes.status}`);
-
-    completed += 1;
+function getHlsDownloadModule() {
+  if (!hlsDownloadModulePromise) {
+    hlsDownloadModulePromise = import(chrome.runtime.getURL("src/hls-download.js"));
   }
-
-  async function runAssetBatch(batch) {
-    const failed = [];
-    let cursor = 0;
-    const workers = [];
-    for (let i = 0; i < Math.min(concurrency, batch.length); i += 1) {
-      workers.push((async () => {
-        while (cursor < batch.length && !cancelled) {
-          const entry = batch[cursor];
-          cursor += 1;
-          try {
-            await processOne(entry.asset);
-          } catch (error) {
-            console.warn("[ds-video-downloader] segment failed", entry.index, error.message);
-            failed.push({ index: entry.index, error: error.message });
-          }
-        }
-      })());
-    }
-    await Promise.all(workers);
-    return failed;
-  }
-
-  // On resume, skip files the helper already has from the previous attempt.
-  let batch = assets
-    .map((asset, index) => ({ index, asset }))
-    .filter((entry) => !alreadyReceived.has(entry.asset.name));
-  let failed = await runAssetBatch(batch);
-
-  // Retry transient segment failures twice before giving up
-  let retryRound = 0;
-  while (!cancelled && failed.length && retryRound < 2) {
-    retryRound += 1;
-    console.warn(`[ds-video-downloader] retrying ${failed.length} failed segments, round ${retryRound}`);
-    const retryBatch = failed.map((entry) => ({ index: entry.index, asset: assets[entry.index] }));
-    failed = await runAssetBatch(retryBatch);
-  }
-
-  if (cancelled) return;
-  if (failed.length) {
-    await reportStreamFailure({ helperUrl, authHeaders, job }, `SEGMENT_DOWNLOAD_FAILED: ${failed.length}/${total}`);
-    return;
-  }
-
-  // Step 8: Build local playlist and complete
-  const { buildLocalHlsPlaylist } = await getHlsBrowserModule();
-  const localPlaylist = buildLocalHlsPlaylist(mediaText, variantUrl, plan.assetNameByUrl);
-  const completeRes = await fetch(
-    `${helperUrl}/browser-downloads/${encodeURIComponent(job.id)}/complete`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...authHeaders },
-      body: JSON.stringify({ playlistText: localPlaylist })
-    }
-  );
-  if (!completeRes.ok) {
-    const completePayload = await completeRes.json().catch(() => ({}));
-    const errorCode = completePayload.error === "SEGMENTS_INCOMPLETE"
-      ? "SEGMENTS_INCOMPLETE"
-      : `HELPER_COMPLETE_${completeRes.status}`;
-    // Mark the helper job failed so it cannot sit in "running" until the
-    // stall sweeper kills it with a misleading DOWNLOAD_STALLED error.
-    await reportStreamFailure({ helperUrl, authHeaders, job }, errorCode);
-    return;
-  }
-  console.warn(`[ds-content] stream uploaded ${completed} new files of ${total}`);
-}
-
-function reportStreamFailure({ helperUrl, authHeaders, job }, error) {
-  return fetch(`${helperUrl}/browser-downloads/${encodeURIComponent(job.id)}/fail`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...authHeaders },
-    body: JSON.stringify({ error })
-  }).catch(() => {});
-}
-
-function chooseConcurrency() {
-  try {
-    const memoryGB = Number(navigator.deviceMemory || 4);
-    if (memoryGB >= 8) return 6;
-    if (memoryGB >= 4) return 4;
-    return 3;
-  } catch {
-    return 4;
-  }
-}
-
-function getHlsBrowserModule() {
-  if (!hlsBrowserModulePromise) {
-    hlsBrowserModulePromise = import(chrome.runtime.getURL("src/hls-browser.js"));
-  }
-  return hlsBrowserModulePromise;
-}
-
-async function fetchSegmentWithRetry(url, byteRange = null) {
-  let lastError;
-  const headers = byteRange
-    ? { Range: `bytes=${byteRange.offset}-${byteRange.offset + byteRange.length - 1}` }
-    : undefined;
-
-  for (let attempt = 1; attempt <= SEGMENT_FETCH_RETRIES; attempt += 1) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), SEGMENT_FETCH_TIMEOUT_MS);
-    try {
-      const response = await fetch(url, {
-        cache: "no-store",
-        signal: controller.signal,
-        ...(headers ? { headers } : {})
-      });
-      if (!response.ok) throw new Error(`SEGMENT_${response.status}`);
-
-      if (byteRange) {
-        const expectedStart = byteRange.offset;
-        const expectedEnd = byteRange.offset + byteRange.length - 1;
-
-        if (response.status === 206) {
-          const range = response.headers.get("content-range") || "";
-          const match = range.match(/bytes\s+(\d+)-(\d+)\//i);
-          if (!match || Number(match[1]) !== expectedStart || Number(match[2]) !== expectedEnd) {
-            throw new Error("SEGMENT_RANGE_MISMATCH");
-          }
-          const buffer = await response.arrayBuffer();
-          if (buffer.byteLength !== byteRange.length) throw new Error("SEGMENT_RANGE_MISMATCH");
-          return buffer;
-        }
-
-        if (response.status === 200) {
-          // Some CDNs ignore Range and return the whole resource. Slice the
-          // requested bytes locally instead of writing a corrupt oversized file.
-          const full = await response.arrayBuffer();
-          if (expectedStart >= full.byteLength || full.byteLength < expectedEnd + 1) {
-            throw new Error("SEGMENT_RANGE_OUT_OF_BOUNDS");
-          }
-          return full.slice(expectedStart, expectedEnd + 1);
-        }
-
-        throw new Error(`SEGMENT_${response.status}`);
-      }
-
-      return await response.arrayBuffer();
-    } catch (error) {
-      lastError = error?.name === "AbortError" ? new Error("SEGMENT_TIMEOUT") : error;
-      if (attempt < SEGMENT_FETCH_RETRIES) {
-        const backoff = Math.min(1000 * 2 ** (attempt - 1), 8000) + Math.floor(Math.random() * 500);
-        await new Promise((resolve) => setTimeout(resolve, backoff));
-      }
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-  throw lastError || new Error("SEGMENT_DOWNLOAD_FAILED");
-}
-
-async function fetchWithTimeout(url, options, timeoutMs) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetch(url, { ...options, signal: controller.signal });
-  } catch (error) {
-    if (error?.name === "AbortError") throw new Error("HELPER_TIMEOUT");
-    throw error;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-// --- Inline HLS parsing (no ES module imports in content scripts) ---
-
-function parseHlsMaster(text, baseUrl) {
-  const lines = String(text).split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-  const variants = [];
-  let hasDrm = false;
-  let pending = null;
-
-  for (const line of lines) {
-    if (line.startsWith("#EXT-X-KEY")) {
-      if (/METHOD=SAMPLE-AES/i.test(line) || /KEYFORMAT=/i.test(line) || /URI=["']?skd:\/\//i.test(line)) {
-        hasDrm = true;
-      }
-      continue;
-    }
-    if (line.startsWith("#EXT-X-STREAM-INF")) {
-      const bandwidth = readAttr(line, "BANDWIDTH");
-      const resolution = readAttr(line, "RESOLUTION");
-      pending = { bandwidth: Number(bandwidth) || null, resolution };
-      continue;
-    }
-    if (!line.startsWith("#") && pending) {
-      const quality = qualityFromResolution(pending.resolution);
-      variants.push({
-        url: resolveUrl(line, baseUrl),
-        quality,
-        bandwidth: pending.bandwidth
-      });
-      pending = null;
-    }
-  }
-
-  return { hasDrm, variants };
-}
-
-function pickVariant(variants, targetQuality) {
-  if (targetQuality) {
-    const found = variants.find((v) => v.quality === targetQuality);
-    if (found) return found;
-  }
-  // Pick highest quality
-  return [...variants].sort((a, b) => variantScore(b) - variantScore(a))[0];
-}
-
-function variantScore(v) {
-  const h = Number((v.quality || "").match(/(\d+)p/)?.[1] || 0);
-  return h + (v.bandwidth || 0) / 10000000;
-}
-
-function qualityFromResolution(resolution) {
-  if (!resolution) return "";
-  const m = String(resolution).match(/(\d{2,5})x(\d{2,5})/i);
-  return m?.[2] ? `${m[2]}p` : "";
-}
-
-function readAttr(line, key) {
-  const m = line.match(new RegExp(`${key}=([^,]+)`, "i"));
-  return m?.[1]?.replace(/^"|"$/g, "") || "";
-}
-
-function resolveUrl(url, base) {
-  try { return new URL(url, base).href; } catch { return url; }
+  return hlsDownloadModulePromise;
 }
 
 // --- DOM scanning (original logic, unchanged) ---

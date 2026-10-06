@@ -6,7 +6,7 @@ A Chrome MV3 extension for downloading HLS/DASH streaming videos and direct medi
 
 ## How It Works
 
-The extension detects media on pages you visit and sends download requests to a local Node.js helper server. For HLS (`.m3u8`) and DASH (`.mpd`) streams, the helper invokes `ffmpeg` to download and remux the video. For direct files (`.mp4`, `.webm`, etc.), it uses Chrome's built-in download API.
+The extension detects media on pages you visit and sends download requests to a local Node.js helper server. For HLS (`.m3u8`) streams, the browser fetches the segments and the helper remuxes them with `ffmpeg`: first from a background offscreen document that replays the page's Referer, Origin and Cookie, and from the page itself if the video server refuses that. For DASH (`.mpd`) streams, the helper invokes `ffmpeg` to download and remux the video. For direct files (`.mp4`, `.webm`, etc.), it uses Chrome's built-in download API.
 
 ## Requirements
 
@@ -55,7 +55,7 @@ npm run helper:autostart:remove   # Disable auto-start
 3. The popup lists all detected media — click a file to download it
 4. For HLS streams, pick a quality variant (1080p, 720p, etc.)
 5. Monitor progress on the helper dashboard or in the popup
-6. Keep the video page open while an HLS download runs. If it stops (page closed or reloaded, stalled, helper restarted), click download on the same video again within 24 hours to resume from the segments already downloaded
+6. HLS downloads keep running when you switch tabs or close the video page. If one stops (you pressed Stop, stalled, refused by the server, helper restarted), click **Resume** on the job in the popup, or download the same video again within 24 hours, to continue from the segments already downloaded
 
 ## Configuration
 

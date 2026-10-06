@@ -255,7 +255,7 @@
     "message": "视频网页被关闭或刷新，下载已停止。"
   },
   "msgDownloadResumable": {
-    "message": "在同一个视频上再次点击下载，即可从中断处继续。"
+    "message": "点击「继续下载」，或在同一个视频上再次点击下载，即可从中断处继续。"
   },
   "msgHelperRestarted": {
     "message": "助手停止时下载被中断。"
@@ -319,5 +319,26 @@
   },
   "statusConnecting": {
     "message": "正在连接助手..."
+  },
+  "btnResume": {
+    "message": "继续下载"
+  },
+  "msgResumeStarted": {
+    "message": "已继续下载。"
+  },
+  "msgResumeOpenPage": {
+    "message": "已打开视频页面，请在页面中点击下载，即可从中断处继续。"
+  },
+  "msgResumeFailed": {
+    "message": "无法继续这个下载。"
+  },
+  "msgBrowserBlocked": {
+    "message": "视频服务器拒绝了这次下载请求。"
+  },
+  "labelModeExtension": {
+    "message": "扩展模式"
+  },
+  "labelModePage": {
+    "message": "网页模式"
   }
 }

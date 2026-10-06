@@ -32,8 +32,12 @@ const RESUMABLE_BROWSER_ERRORS = [
   "HELPER_RESTARTED",
   "SEGMENTS_INCOMPLETE",
   "SEGMENT_DOWNLOAD_FAILED",
-  "BROWSER_HLS_FAILED"
+  "BROWSER_HLS_FAILED",
+  "BROWSER_BLOCKED"
 ];
+// Which browser context fetches the segments: the offscreen document
+// ("extension") or the source page's content script ("page").
+const DOWNLOAD_MODES = new Set(["extension", "page"]);
 const JOBS_PAGE_SIZE_DEFAULT = 50;
 const JOBS_PAGE_SIZE_MAX = 500;
 const jobs = new Map();
@@ -351,7 +355,7 @@ async function startBrowserDownload(payload) {
 
   const resumable = findResumableJob({ ...payload, url, totalSegments, durationSeconds });
   if (resumable) {
-    const receivedFiles = await reopenResumableJob(resumable, url);
+    const receivedFiles = await reopenResumableJob(resumable, url, payload.downloadMode);
     await persistJobsNow();
     return { ok: true, job: resumable, resumed: true, receivedFiles };
   }
@@ -366,6 +370,7 @@ async function startBrowserDownload(payload) {
     id,
     ok: true,
     inputMode: "browser",
+    downloadMode: normalizeDownloadMode(payload.downloadMode),
     status: "running",
     url,
     sourcePageUrl: validateUrl(payload?.sourcePageUrl) || "",
@@ -402,7 +407,8 @@ async function startBrowserDownload(payload) {
 function findResumableJob(payload) {
   // Newest first, so a retry picks up the most recent attempt.
   for (const job of Array.from(jobs.values()).reverse()) {
-    if (job.inputMode !== "browser" || job.status !== "failed" || !job.resumable) continue;
+    if (job.inputMode !== "browser" || !job.resumable) continue;
+    if (job.status !== "failed" && job.status !== "cancelled") continue;
     if (!job.tempDir || !existsSync(job.tempDir)) continue;
     if (isSameDownload(job, payload)) return job;
   }
@@ -438,7 +444,11 @@ function urlPath(value) {
   }
 }
 
-async function reopenResumableJob(job, url) {
+function normalizeDownloadMode(value) {
+  return DOWNLOAD_MODES.has(value) ? value : null;
+}
+
+async function reopenResumableJob(job, url, downloadMode) {
   const receivedFiles = [];
   let receivedBytes = 0;
   for (const name of await readdir(job.tempDir)) {
@@ -450,6 +460,7 @@ async function reopenResumableJob(job, url) {
   }
 
   job.url = url;
+  job.downloadMode = normalizeDownloadMode(downloadMode);
   job.status = "running";
   job.error = null;
   job.exitCode = null;
@@ -525,8 +536,9 @@ async function completeBrowserDownload(id, payload) {
 
   const playlistPath = path.join(job.tempDir, "input.m3u8");
   await writeFile(playlistPath, playlistText, "utf8");
+  // Keep job.url as the stream URL: a resume after a restart mid-mux still
+  // needs it to match the stream and refetch the playlist.
   job.localPlaylistPath = playlistPath;
-  job.url = playlistPath;
   job.status = "queued";
   job.progressText = "Muxing local segments";
   job.lastActivityAt = Date.now();
@@ -682,7 +694,7 @@ function runFfmpeg(job, headers) {
 
   if (!isLocal && userAgent) args.push("-user_agent", userAgent);
   if (!isLocal && headerText) args.push("-headers", `${headerText}\r\n`);
-  args.push("-i", job.url, "-map", "0:v:0?", "-map", "0:a:0?", "-c", "copy", "-bsf:a", "aac_adtstoasc", "-movflags", "+faststart", job.outputPath);
+  args.push("-i", isLocal ? job.localPlaylistPath : job.url, "-map", "0:v:0?", "-map", "0:a:0?", "-c", "copy", "-bsf:a", "aac_adtstoasc", "-movflags", "+faststart", job.outputPath);
   job.ffmpegArgs = redactArgs(args);
 
   job.status = "running";
@@ -1050,11 +1062,13 @@ async function cancelJob(id) {
 
   job.status = "cancelled";
   job.error = null;
-  job.resumable = false;
+  // Stop works as pause for browser-fed jobs: keep the uploaded segments so
+  // Resume (or downloading the same video again) continues from here.
+  job.resumable = job.inputMode === "browser";
   job.progressText = "Stopped by user";
   job.finishedAt = new Date().toISOString();
   job.etaSeconds = null;
-  await cleanupBrowserTemp(job);
+  if (!job.resumable) await cleanupBrowserTemp(job);
   await persistJobsNow();
 
   terminateJobProcess(id);
@@ -1981,7 +1995,7 @@ function renderHomePage() {
     }
     function humanJobMessage(job) {
       const message = baseJobMessage(job);
-      return job.resumable ? message + ' Click download on the same video again to resume.' : message;
+      return job.resumable ? message + ' Use Resume in the extension popup, or download the same video again, to continue.' : message;
     }
     function baseJobMessage(job) {
       if (job.error === 'DOWNLOAD_STALLED') return job.progressText || 'No data received. The task was stopped.';

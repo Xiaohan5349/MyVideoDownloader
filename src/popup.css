@@ -783,6 +783,16 @@ span.variant-chip {
   display: none;
 }
 
+.helper-job-actions .resume-button {
+  border-color: var(--cyan);
+  color: var(--cyan);
+}
+
+.helper-job-actions .resume-button:hover:not(:disabled) {
+  background: var(--cyan);
+  color: var(--ink);
+}
+
 .helper-job-actions .cancel-button {
   border-color: var(--yellow);
   color: var(--yellow);
