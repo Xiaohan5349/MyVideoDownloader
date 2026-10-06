@@ -1,6 +1,7 @@
 import { describe, before, after, it } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
+import { existsSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -35,6 +36,12 @@ describe("server.js HTTP API", () => {
 
   after(async () => {
     await new Promise((resolve) => server.close(resolve));
+    // Browser-fed jobs stage segments under the OS temp dir, not DOWNLOAD_DIR.
+    for (const job of jobs.values()) {
+      if (job.tempDir && path.basename(job.tempDir).startsWith("ds-video-browser-")) {
+        await rm(job.tempDir, { recursive: true, force: true });
+      }
+    }
     await rm(process.env.DOWNLOAD_DIR, { recursive: true, force: true });
   });
 
@@ -729,6 +736,221 @@ it("isSafeDownloadPath: falsy value returns false", () => {
 it("isSafeDownloadPath: case-different path is outside on case-sensitive filesystems", () => {
   if (process.platform === "win32") return;
   assert.equal(isSafeDownloadPath("/tmp/ABC/video.mp4", "/tmp/abc"), false);
+});
+
+// ─── Resumable browser downloads ───
+
+function startBrowserJob(body) {
+  return fetchJson("/browser-downloads/start", { method: "POST", body });
+}
+
+function uploadSegment(jobId, name, bytes = [0x47, 1, 2, 3]) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(`/browser-downloads/${encodeURIComponent(jobId)}/files/${encodeURIComponent(name)}`, baseUrl);
+    const req = http.request(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream" },
+    }, (res) => {
+      let body = "";
+      res.on("data", (chunk) => { body += chunk; });
+      res.on("end", () => resolve({ status: res.statusCode, body: JSON.parse(body) }));
+    });
+    req.on("error", reject);
+    req.write(Buffer.from(bytes));
+    req.end();
+  });
+}
+
+it("a stalled browser job keeps its segments and becomes resumable", async () => {
+  const start = await startBrowserJob({
+    url: "https://cdn.example.com/resume/stall.m3u8",
+    title: "Resume Stall",
+    totalSegments: 3,
+    sourcePageUrl: "https://site.example/watch/stall"
+  });
+  const id = start.body.job.id;
+  await uploadSegment(id, "seg-000000.ts");
+  jobs.get(id).lastActivityAt = 1;
+
+  await sweepStalledJobs(10 * 60_000 + 2, 1);
+
+  const job = jobs.get(id);
+  assert.equal(job.status, "failed");
+  assert.equal(job.error, "DOWNLOAD_STALLED");
+  assert.equal(job.resumable, true);
+  assert.ok(existsSync(path.join(job.tempDir, "seg-000000.ts")));
+});
+
+it("starting the same stream again resumes the failed job and lists received files", async () => {
+  const body = {
+    url: "https://cdn.example.com/resume/same.m3u8",
+    title: "Resume Same",
+    totalSegments: 3,
+    durationSeconds: 30,
+    sourcePageUrl: "https://site.example/watch/same"
+  };
+  const first = await startBrowserJob(body);
+  const id = first.body.job.id;
+  assert.equal(first.body.resumed, false);
+  assert.deepEqual(first.body.receivedFiles, []);
+  await uploadSegment(id, "seg-000000.ts");
+  await uploadSegment(id, "seg-000001.ts");
+  await fetchJson(`/browser-downloads/${encodeURIComponent(id)}/fail`, {
+    method: "POST",
+    body: { error: "SEGMENT_DOWNLOAD_FAILED: 1/3" }
+  });
+  assert.equal(jobs.get(id).resumable, true);
+
+  const second = await startBrowserJob(body);
+
+  assert.equal(second.status, 202);
+  assert.equal(second.body.resumed, true);
+  assert.equal(second.body.job.id, id);
+  assert.equal(second.body.job.status, "running");
+  assert.equal(second.body.job.error, null);
+  assert.equal(second.body.job.resumable, false);
+  assert.equal(second.body.job.receivedSegments, 2);
+  assert.deepEqual(second.body.receivedFiles.sort(), ["seg-000000.ts", "seg-000001.ts"]);
+});
+
+it("a stream with a different segment count does not resume an old job", async () => {
+  const body = {
+    url: "https://cdn.example.com/resume/count.m3u8",
+    title: "Resume Count",
+    totalSegments: 3,
+    sourcePageUrl: "https://site.example/watch/count"
+  };
+  const first = await startBrowserJob(body);
+  await fetchJson(`/browser-downloads/${encodeURIComponent(first.body.job.id)}/fail`, {
+    method: "POST",
+    body: { error: "SOURCE_PAGE_CLOSED" }
+  });
+
+  const second = await startBrowserJob({ ...body, totalSegments: 4 });
+
+  assert.equal(second.body.resumed, false);
+  assert.notEqual(second.body.job.id, first.body.job.id);
+});
+
+async function failedBrowserJob(body) {
+  const start = await startBrowserJob(body);
+  await fetchJson(`/browser-downloads/${encodeURIComponent(start.body.job.id)}/fail`, {
+    method: "POST",
+    body: { error: "SOURCE_PAGE_CLOSED" }
+  });
+  return start.body.job.id;
+}
+
+it("a refreshed CDN token in the manifest query still resumes", async () => {
+  const body = {
+    url: "https://cdn.example.com/resume/token.m3u8?token=old&expires=1",
+    title: "Resume Token",
+    totalSegments: 3,
+    durationSeconds: 30,
+    sourcePageUrl: "https://site.example/watch?v=token"
+  };
+  const id = await failedBrowserJob(body);
+
+  const second = await startBrowserJob({ ...body, url: "https://cdn.example.com/resume/token.m3u8?token=new&expires=2" });
+
+  assert.equal(second.body.resumed, true);
+  assert.equal(second.body.job.id, id);
+  assert.equal(second.body.job.url, "https://cdn.example.com/resume/token.m3u8?token=new&expires=2");
+});
+
+it("a different source page does not resume an old job", async () => {
+  const body = {
+    url: "https://cdn.example.com/resume/page.m3u8",
+    title: "Resume Page",
+    totalSegments: 3,
+    sourcePageUrl: "https://site.example/watch?v=one"
+  };
+  const id = await failedBrowserJob(body);
+
+  const second = await startBrowserJob({ ...body, sourcePageUrl: "https://site.example/watch?v=two" });
+
+  assert.equal(second.body.resumed, false);
+  assert.notEqual(second.body.job.id, id);
+});
+
+it("a different duration does not resume an old job, but a sub-second drift does", async () => {
+  const body = {
+    url: "https://cdn.example.com/resume/duration.m3u8",
+    title: "Resume Duration",
+    totalSegments: 3,
+    durationSeconds: 30,
+    sourcePageUrl: "https://site.example/watch/duration"
+  };
+  const id = await failedBrowserJob(body);
+
+  const longer = await startBrowserJob({ ...body, durationSeconds: 45 });
+  assert.equal(longer.body.resumed, false);
+  await fetchJson(`/jobs/${encodeURIComponent(longer.body.job.id)}/cancel`, { method: "POST" });
+
+  const drift = await startBrowserJob({ ...body, durationSeconds: 30.4 });
+  assert.equal(drift.body.resumed, true);
+  assert.equal(drift.body.job.id, id);
+});
+
+it("a cancelled browser job is not resumable and its temp files are removed", async () => {
+  const body = {
+    url: "https://cdn.example.com/resume/cancel.m3u8",
+    title: "Resume Cancel",
+    totalSegments: 2,
+    sourcePageUrl: "https://site.example/watch/cancel"
+  };
+  const first = await startBrowserJob(body);
+  const id = first.body.job.id;
+  await uploadSegment(id, "seg-000000.ts");
+  await fetchJson(`/jobs/${encodeURIComponent(id)}/cancel`, { method: "POST" });
+
+  assert.ok(!jobs.get(id).resumable);
+  assert.ok(!existsSync(jobs.get(id).tempDir));
+  const second = await startBrowserJob(body);
+  assert.equal(second.body.resumed, false);
+});
+
+it("resumable temp files expire after the retention window", async () => {
+  const start = await startBrowserJob({
+    url: "https://cdn.example.com/resume/expire.m3u8",
+    title: "Resume Expire",
+    totalSegments: 2,
+    sourcePageUrl: "https://site.example/watch/expire"
+  });
+  const id = start.body.job.id;
+  await uploadSegment(id, "seg-000000.ts");
+  await fetchJson(`/browser-downloads/${encodeURIComponent(id)}/fail`, {
+    method: "POST",
+    body: { error: "SOURCE_PAGE_CLOSED" }
+  });
+  const job = jobs.get(id);
+  job.finishedAt = new Date(Date.now() - 25 * 60 * 60_000).toISOString();
+
+  await sweepStalledJobs();
+
+  assert.equal(job.resumable, false);
+  assert.ok(!existsSync(job.tempDir));
+});
+
+it("forgetting a resumable job removes its temp files", async () => {
+  const start = await startBrowserJob({
+    url: "https://cdn.example.com/resume/forget.m3u8",
+    title: "Resume Forget",
+    totalSegments: 2,
+    sourcePageUrl: "https://site.example/watch/forget"
+  });
+  const id = start.body.job.id;
+  const tempDir = start.body.job.tempDir;
+  await uploadSegment(id, "seg-000000.ts");
+  await fetchJson(`/browser-downloads/${encodeURIComponent(id)}/fail`, {
+    method: "POST",
+    body: { error: "SOURCE_PAGE_CLOSED" }
+  });
+
+  await fetchJson(`/jobs/${encodeURIComponent(id)}/history`, { method: "DELETE" });
+
+  assert.ok(!jobs.has(id));
+  assert.ok(!existsSync(tempDir));
 });
 
 }); // close describe

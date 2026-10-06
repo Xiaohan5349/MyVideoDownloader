@@ -4,7 +4,7 @@ import {
   normalizeMediaItem, parseDashManifest, parseHlsManifest, sanitizeFilename
 } from "./shared.js";
 
-console.log("[ds] Service worker started v1.6.9");
+console.log("[ds] Service worker started v1.7.0");
 
 const SETTINGS_KEY = "settings";
 const TAB_MEDIA_PREFIX = "tabMedia:";
@@ -52,6 +52,8 @@ chrome.webRequest.onHeadersReceived.addListener(
 // Cleanup stale tab data
 chrome.tabs.onRemoved.addListener((tabId) => {
   enqueueTabMediaMutation(tabId, () => chrome.storage.local.remove(tabKey(tabId))).catch(() => {});
+  // The download loop lives in this tab's content script, so it is gone now.
+  return failActiveDownloadsForTab(tabId, "SOURCE_PAGE_CLOSED").catch(() => {});
 });
 
 // Full-page navigation destroys the old content script before it can send
@@ -120,6 +122,19 @@ async function handleMessage(message, sender) {
 
   if (message.type === MESSAGE.DOWNLOADS_START) {
     return startDownload(message.item, message.variant);
+  }
+
+  // The page hosting a download loop is going away (navigation, reload,
+  // bfcache). Fail the job now instead of waiting for the stall sweeper.
+  if (message.type === "page:streamInterrupted") {
+    await untrackActiveDownload(message.jobId);
+    await reportBrowserDownloadFailure(message.jobId, "SOURCE_PAGE_CLOSED");
+    return { ok: true };
+  }
+
+  if (message.type === "page:streamFinished") {
+    await untrackActiveDownload(message.jobId);
+    return { ok: true };
   }
 
   if (message.type === MESSAGE.DOWNLOADS_JOB_GET) return getHelperJob(message.jobId);
@@ -451,7 +466,11 @@ async function startStreamDownload(media, variant) {
     console.warn("[ds] startStreamDownload contentScriptResult ok=", response?.ok, "error=", response?.error);
 
     if (response?.ok) {
-      return { ok: true, helperJob: response.helperJob };
+      // The content script answers as soon as the helper job exists and keeps
+      // downloading afterwards, so a later port closure can no longer trigger
+      // a duplicate helper fallback below.
+      if (response.helperJob?.id) await trackActiveDownload(response.helperJob.id, tabId);
+      return { ok: true, helperJob: response.helperJob, resumed: Boolean(response.resumed) };
     }
     if (["SERVER_PROTECTED_UNSUPPORTED", "DRM_PROTECTED_UNSUPPORTED", "JOB_CANCELLED", "SEGMENT_DOWNLOAD_FAILED", "SEGMENTS_INCOMPLETE"].includes(response?.error) ||
         response?.error?.startsWith("HELPER_COMPLETE_")) {
@@ -463,6 +482,60 @@ async function startStreamDownload(media, variant) {
     console.warn("[ds] startStreamDownload FALLBACK=helper (exception:", err.message, ")");
     return startHelperDownload(media, variant);
   }
+}
+
+// --- Active browser-fed downloads (jobId -> source tab) ---
+// Kept in session storage so a service-worker restart does not forget them.
+
+const ACTIVE_DOWNLOADS_KEY = "activeBrowserDownloads";
+let activeDownloadsChain = Promise.resolve();
+
+function mutateActiveDownloads(mutator) {
+  const next = activeDownloadsChain.then(async () => {
+    const stored = await chrome.storage.session.get(ACTIVE_DOWNLOADS_KEY);
+    const active = stored[ACTIVE_DOWNLOADS_KEY] || {};
+    const result = mutator(active);
+    await chrome.storage.session.set({ [ACTIVE_DOWNLOADS_KEY]: active });
+    return result;
+  });
+  // One failed storage call must not poison every later mutation.
+  activeDownloadsChain = next.catch(() => {});
+  return next;
+}
+
+async function trackActiveDownload(jobId, tabId) {
+  await mutateActiveDownloads((active) => { active[jobId] = { tabId }; });
+  // Memory Saver would otherwise discard the tab and kill the download loop.
+  await chrome.tabs.update(tabId, { autoDiscardable: false }).catch(() => {});
+}
+
+async function untrackActiveDownload(jobId) {
+  const { tabId, tabStillBusy } = await mutateActiveDownloads((active) => {
+    const tabId = active[jobId]?.tabId;
+    delete active[jobId];
+    return { tabId, tabStillBusy: Object.values(active).some((entry) => entry.tabId === tabId) };
+  });
+  if (typeof tabId === "number" && !tabStillBusy) {
+    await chrome.tabs.update(tabId, { autoDiscardable: true }).catch(() => {});
+  }
+}
+
+async function failActiveDownloadsForTab(tabId, error) {
+  const jobIds = await mutateActiveDownloads((active) => {
+    const ids = Object.keys(active).filter((jobId) => active[jobId].tabId === tabId);
+    for (const jobId of ids) delete active[jobId];
+    return ids;
+  });
+  await Promise.all(jobIds.map((jobId) => reportBrowserDownloadFailure(jobId, error)));
+}
+
+async function reportBrowserDownloadFailure(jobId, error) {
+  if (!jobId) return;
+  await fetch(`${HELPER_URL}/browser-downloads/${encodeURIComponent(jobId)}/fail`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ error })
+  }).catch(() => {});
 }
 
 async function startHelperDownload(media, variant) {
@@ -546,7 +619,8 @@ async function getHelperStatus() {
       online: healthRes.ok,
       health,
       jobs: jobsList,
-      stats: jobs.stats || null
+      // /jobs reports the total at the top level, not inside stats.
+      stats: jobs.stats ? { ...jobs.stats, total: Number.isInteger(jobs.total) ? jobs.total : jobsList.length } : null
     };
   } catch {
     const cached = await chrome.storage.local.get("recentJobs").catch(() => ({}));

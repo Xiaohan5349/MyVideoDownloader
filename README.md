@@ -55,6 +55,7 @@ npm run helper:autostart:remove   # Disable auto-start
 3. The popup lists all detected media — click a file to download it
 4. For HLS streams, pick a quality variant (1080p, 720p, etc.)
 5. Monitor progress on the helper dashboard or in the popup
+6. Keep the video page open while an HLS download runs. If it stops (page closed or reloaded, stalled, helper restarted), click download on the same video again within 24 hours to resume from the segments already downloaded
 
 ## Configuration
 
@@ -71,7 +72,7 @@ Default: `helper/downloads/` in the project directory.
 ## What It Supports
 
 - Direct media: `.mp4`, `.webm`, `.mkv`, `.avi`, `.mov`, `.mp3`, `.m4a`, `.flac`, and more
-- HLS streams: `.m3u8` playlists with variant selection
+- HLS streams: `.m3u8` playlists with variant selection and resumable downloads
 - DASH streams: `.mpd` manifests
 - Automatic media detection from `<video>`, `<audio>`, `<source>`, and `<a>` elements
 - Cookie/header forwarding for authenticated streams

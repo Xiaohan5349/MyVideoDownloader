@@ -833,8 +833,14 @@ function humanStatus(value) {
 }
 
 function humanJobMessage(job) {
+  const message = baseJobMessage(job);
+  return job.resumable ? `${message} ${getMessage("msgDownloadResumable")}` : message;
+}
+
+function baseJobMessage(job) {
   if (job.error === "DOWNLOAD_STALLED") return job.progressText || getMessage("msgDownloadStalled");
   if (job.error === "HELPER_RESTARTED") return getMessage("msgHelperRestarted");
+  if (job.error === "SOURCE_PAGE_CLOSED") return getMessage("msgSourcePageClosed");
   return job.error || job.progressText || sizeLabel(job);
 }
 

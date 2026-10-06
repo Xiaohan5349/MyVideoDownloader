@@ -23,9 +23,22 @@ const SEGMENT_FETCH_TIMEOUT_MS = 30_000;
 const SEGMENT_FETCH_RETRIES = 5;
 const DIRECT_SIZE_PROBE_TIMEOUT_MS = 7_000;
 let hlsBrowserModulePromise = null;
+// Helper job ids whose download loop runs in this frame.
+const activeStreamJobIds = new Set();
 
 scanDocument().catch(() => {});
 observePageChanges();
+
+// Navigation, reload, tab close and bfcache all end this frame's download
+// loop. Tell the background right away so the job fails (and can be resumed)
+// immediately instead of after the helper's 10-minute stall timeout.
+window.addEventListener("pagehide", () => {
+  for (const jobId of activeStreamJobIds) {
+    try {
+      chrome.runtime.sendMessage({ type: "page:streamInterrupted", jobId }).catch(() => {});
+    } catch (_) {}
+  }
+});
 
 // Listen for stream URLs found by inject-main.js (MAIN world)
 document.addEventListener("ds-video-downloader-found", (event) => {
@@ -226,7 +239,6 @@ async function handleStreamDownload(payload) {
   // Step 5: Build a complete local asset plan, including accessible AES-128 keys and init maps.
   const {
     buildHlsAssetPlan,
-    buildLocalHlsPlaylist,
     parseHlsMediaPlaylist
   } = await getHlsBrowserModule();
   const mediaPlaylist = parseHlsMediaPlaylist(mediaText, variantUrl);
@@ -250,6 +262,25 @@ async function handleStreamDownload(payload) {
   if (!startRes.ok) throw new Error(startPayload.error || `HELPER_${startRes.status}`);
   const job = startPayload.job;
 
+  // Answer the background as soon as the job exists: the download can take
+  // longer than the service worker is allowed to wait for a reply.
+  const alreadyReceived = new Set(startPayload.receivedFiles || []);
+  const context = { helperUrl, authHeaders, job, plan, mediaText, variantUrl, alreadyReceived };
+  activeStreamJobIds.add(job.id);
+  runStreamDownload(context)
+    .catch((error) => {
+      console.warn("[ds-content] stream download failed", error?.message);
+      return reportStreamFailure(context, error?.message || "BROWSER_HLS_FAILED");
+    })
+    .finally(() => {
+      activeStreamJobIds.delete(job.id);
+      chrome.runtime.sendMessage({ type: "page:streamFinished", jobId: job.id }).catch(() => {});
+    });
+
+  return { ok: true, helperJob: job, resumed: Boolean(startPayload.resumed) };
+}
+
+async function runStreamDownload({ helperUrl, authHeaders, job, plan, mediaText, variantUrl, alreadyReceived }) {
   // Step 7: Fetch and upload segments in parallel.
   // Keep ArrayBuffer memory bounded, but allow faster devices to use more
   // workers (3-6). Segment size is unknown until fetched, so this is driven
@@ -311,7 +342,10 @@ async function handleStreamDownload(payload) {
     return failed;
   }
 
-  let batch = assets.map((asset, index) => ({ index, asset }));
+  // On resume, skip files the helper already has from the previous attempt.
+  let batch = assets
+    .map((asset, index) => ({ index, asset }))
+    .filter((entry) => !alreadyReceived.has(entry.asset.name));
   let failed = await runAssetBatch(batch);
 
   // Retry transient segment failures twice before giving up
@@ -323,17 +357,14 @@ async function handleStreamDownload(payload) {
     failed = await runAssetBatch(retryBatch);
   }
 
-  if (cancelled) return { ok: false, error: "JOB_CANCELLED" };
+  if (cancelled) return;
   if (failed.length) {
-    await fetch(`${helperUrl}/browser-downloads/${encodeURIComponent(job.id)}/fail`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...authHeaders },
-      body: JSON.stringify({ error: `SEGMENT_DOWNLOAD_FAILED: ${failed.length}/${total}` })
-    }).catch(() => {});
-    return { ok: false, error: "SEGMENT_DOWNLOAD_FAILED" };
+    await reportStreamFailure({ helperUrl, authHeaders, job }, `SEGMENT_DOWNLOAD_FAILED: ${failed.length}/${total}`);
+    return;
   }
 
   // Step 8: Build local playlist and complete
+  const { buildLocalHlsPlaylist } = await getHlsBrowserModule();
   const localPlaylist = buildLocalHlsPlaylist(mediaText, variantUrl, plan.assetNameByUrl);
   const completeRes = await fetch(
     `${helperUrl}/browser-downloads/${encodeURIComponent(job.id)}/complete`,
@@ -350,15 +381,18 @@ async function handleStreamDownload(payload) {
       : `HELPER_COMPLETE_${completeRes.status}`;
     // Mark the helper job failed so it cannot sit in "running" until the
     // stall sweeper kills it with a misleading DOWNLOAD_STALLED error.
-    await fetch(`${helperUrl}/browser-downloads/${encodeURIComponent(job.id)}/fail`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...authHeaders },
-      body: JSON.stringify({ error: errorCode })
-    }).catch(() => {});
-    throw new Error(errorCode);
+    await reportStreamFailure({ helperUrl, authHeaders, job }, errorCode);
+    return;
   }
+  console.warn(`[ds-content] stream uploaded ${completed} new files of ${total}`);
+}
 
-  return { ok: true, helperJob: job, completed, total };
+function reportStreamFailure({ helperUrl, authHeaders, job }, error) {
+  return fetch(`${helperUrl}/browser-downloads/${encodeURIComponent(job.id)}/fail`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders },
+    body: JSON.stringify({ error })
+  }).catch(() => {});
 }
 
 function chooseConcurrency() {

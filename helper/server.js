@@ -2,7 +2,7 @@ import http from "node:http";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { createWriteStream, existsSync } from "node:fs";
-import { mkdir, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Transform } from "node:stream";
@@ -23,6 +23,17 @@ const SIZE_PROBE_CONCURRENCY = Number(process.env.SIZE_PROBE_CONCURRENCY || 8);
 const SIZE_PROBE_TIMEOUT_MS = Number(process.env.SIZE_PROBE_TIMEOUT_MS || 5000);
 const JOB_STALL_TIMEOUT_MS = Number(process.env.JOB_STALL_TIMEOUT_MS || 120_000);
 const MAX_JOB_HISTORY = 5000;
+// Failed browser-fed jobs keep their uploaded segments this long so a retry
+// can resume instead of starting over.
+const BROWSER_RESUME_TTL_MS = 24 * 60 * 60_000;
+const RESUMABLE_BROWSER_ERRORS = [
+  "DOWNLOAD_STALLED",
+  "SOURCE_PAGE_CLOSED",
+  "HELPER_RESTARTED",
+  "SEGMENTS_INCOMPLETE",
+  "SEGMENT_DOWNLOAD_FAILED",
+  "BROWSER_HLS_FAILED"
+];
 const JOBS_PAGE_SIZE_DEFAULT = 50;
 const JOBS_PAGE_SIZE_MAX = 500;
 const jobs = new Map();
@@ -37,13 +48,9 @@ async function loadJobsFromDisk() {
       for (const job of data) {
         if (!job.id) continue;
         if (job.status === "running" || job.status === "queued") {
-          job.status = "failed";
-          job.error = "HELPER_RESTARTED";
-          job.progressText = "Download interrupted when the helper stopped";
-          job.finishedAt = new Date().toISOString();
-          job.etaSeconds = null;
-          await cleanupBrowserTemp(job).catch(() => {});
+          await failJob(job, "HELPER_RESTARTED", "Download interrupted when the helper stopped").catch(() => {});
         }
+        if (job.resumable && !existsSync(job.tempDir || "")) job.resumable = false;
         reconcileJobFileState(job);
         jobs.set(job.id, job);
       }
@@ -342,6 +349,13 @@ async function startBrowserDownload(payload) {
     return { ok: false, status: 400, error: "INVALID_TOTAL_SEGMENTS" };
   }
 
+  const resumable = findResumableJob({ ...payload, url, totalSegments, durationSeconds });
+  if (resumable) {
+    const receivedFiles = await reopenResumableJob(resumable, url);
+    await persistJobsNow();
+    return { ok: true, job: resumable, resumed: true, receivedFiles };
+  }
+
   const id = randomUUID();
   const filename = buildFilename(payload.title || "video", url);
   const outputPath = await uniqueOutputPath(path.join(downloadDir, filename));
@@ -382,7 +396,79 @@ async function startBrowserDownload(payload) {
   jobs.set(id, job);
   enforceJobHistoryCap();
   await persistJobsToDisk();
-  return { ok: true, job };
+  return { ok: true, job, resumed: false, receivedFiles: [] };
+}
+
+function findResumableJob(payload) {
+  // Newest first, so a retry picks up the most recent attempt.
+  for (const job of Array.from(jobs.values()).reverse()) {
+    if (job.inputMode !== "browser" || job.status !== "failed" || !job.resumable) continue;
+    if (!job.tempDir || !existsSync(job.tempDir)) continue;
+    if (isSameDownload(job, payload)) return job;
+  }
+  return null;
+}
+
+// Decides whether a new browser download request is the same stream as a
+// failed, resumable job. Segment files are named by playlist position
+// (seg-000000.ts, seg-000001.ts, ...), so a false match would splice segments
+// from two different videos into one file; a false miss only means the
+// download starts over.
+//
+// job:     the old job record (url, sourcePageUrl, totalSegments, durationSeconds)
+// payload: the new request (same fields; url is already validated)
+function isSameDownload(job, payload) {
+  if (job.totalSegments !== payload.totalSegments) return false;
+  // Ignore the query string: CDN tokens usually change between attempts.
+  if (urlPath(job.url) !== urlPath(payload.url)) return false;
+  // The page URL keeps its query (e.g. watch?v=...), which often names the video.
+  if ((job.sourcePageUrl || "") !== (validateUrl(payload.sourcePageUrl) || "")) return false;
+  const oldDuration = Number(job.durationSeconds);
+  const newDuration = Number(payload.durationSeconds);
+  if (oldDuration > 0 && newDuration > 0 && Math.abs(oldDuration - newDuration) > 1) return false;
+  return true;
+}
+
+function urlPath(value) {
+  try {
+    const url = new URL(value);
+    return `${url.origin}${url.pathname}`;
+  } catch {
+    return "";
+  }
+}
+
+async function reopenResumableJob(job, url) {
+  const receivedFiles = [];
+  let receivedBytes = 0;
+  for (const name of await readdir(job.tempDir)) {
+    if (!safeBrowserFileName(name) || name === "input.m3u8") continue;
+    const info = await stat(path.join(job.tempDir, name)).catch(() => null);
+    if (!info?.isFile()) continue;
+    receivedFiles.push(name);
+    receivedBytes += info.size;
+  }
+
+  job.url = url;
+  job.status = "running";
+  job.error = null;
+  job.exitCode = null;
+  job.finishedAt = null;
+  job.resumable = false;
+  job.localPlaylistPath = null;
+  job.receivedSegments = receivedFiles.filter((name) => /^seg-/i.test(name)).length;
+  job.downloadedBytes = receivedBytes;
+  job.lastProgressBytes = receivedBytes;
+  job.lastProgressAt = null;
+  job.transferRateBytesPerSecond = 0;
+  job.etaSeconds = null;
+  job.lastActivityAt = Date.now();
+  job.resumeCount = (job.resumeCount || 0) + 1;
+  job.progressText = `Resuming: ${job.receivedSegments}/${job.totalSegments} segments already downloaded`;
+  // Move to the end so job lists (newest first) show the resumed job on top.
+  jobs.delete(job.id);
+  jobs.set(job.id, job);
+  return receivedFiles;
 }
 
 async function uploadBrowserDownloadFile(id, fileName, req) {
@@ -432,12 +518,7 @@ async function completeBrowserDownload(id, payload) {
   if (playlistText.length > 20 * 1024 * 1024) return { ok: false, status: 413, error: "PLAYLIST_TOO_LARGE" };
 
   if (Number.isInteger(job.totalSegments) && job.receivedSegments < job.totalSegments) {
-    job.status = "failed";
-    job.error = "SEGMENTS_INCOMPLETE";
-    job.progressText = `Expected ${job.totalSegments} segments but received ${job.receivedSegments}`;
-    job.finishedAt = new Date().toISOString();
-    job.etaSeconds = null;
-    await cleanupBrowserTemp(job);
+    await failJob(job, "SEGMENTS_INCOMPLETE", `Expected ${job.totalSegments} segments but received ${job.receivedSegments}`);
     await persistJobsNow();
     return { ok: false, status: 409, error: "SEGMENTS_INCOMPLETE" };
   }
@@ -458,15 +539,30 @@ async function failBrowserDownload(id, payload) {
   const job = jobs.get(id);
   if (!job || job.inputMode !== "browser") return { ok: false, status: 404, error: "JOB_NOT_FOUND" };
   if (job.status === "completed" || job.status === "cancelled") return { ok: true, job };
+  // A late failure report (e.g. a page closing after the stall sweeper already
+  // gave up) must not overwrite the first, more accurate failure.
+  if (job.status === "failed") return { ok: true, job };
 
-  job.status = "failed";
-  job.error = String(payload?.error || "BROWSER_HLS_FAILED").slice(0, 500);
-  job.progressText = job.error;
-  job.finishedAt = new Date().toISOString();
-  job.etaSeconds = null;
-  await cleanupBrowserTemp(job);
+  const error = String(payload?.error || "BROWSER_HLS_FAILED").slice(0, 500);
+  await failJob(job, error, error);
   await persistJobsToDisk();
   return { ok: true, job };
+}
+
+function isResumableBrowserError(error = "") {
+  return RESUMABLE_BROWSER_ERRORS.some((code) => error === code || error.startsWith(`${code}:`));
+}
+
+// Marks a job failed. Browser-fed jobs that failed for a recoverable reason
+// keep their uploaded segments so the next attempt can resume.
+async function failJob(job, error, progressText, now = Date.now()) {
+  job.status = "failed";
+  job.error = error;
+  job.finishedAt = new Date(now).toISOString();
+  job.etaSeconds = null;
+  job.resumable = job.inputMode === "browser" && isResumableBrowserError(error);
+  job.progressText = progressText;
+  if (!job.resumable) await cleanupBrowserTemp(job);
 }
 
 async function inspectForUi(payload) {
@@ -829,6 +925,7 @@ async function forgetJobRecord(id) {
     return { ok: false, status: 409, error: "JOB_HISTORY_NOT_REMOVABLE" };
   }
 
+  await cleanupBrowserTemp(job);
   jobs.delete(id);
   await persistJobsToDisk();
   return { ok: true };
@@ -912,6 +1009,12 @@ function reconcileJobFileState(job) {
 async function sweepStalledJobs(now = Date.now(), timeoutMs = JOB_STALL_TIMEOUT_MS) {
   let changed = false;
   for (const job of jobs.values()) {
+    if (job.resumable && now - Date.parse(job.finishedAt || 0) >= BROWSER_RESUME_TTL_MS) {
+      job.resumable = false;
+      await cleanupBrowserTemp(job);
+      changed = true;
+      continue;
+    }
     if (job.status !== "running") continue;
     // Browser-fed HLS jobs can pause between uploads while the content
     // script fetches and retries segments, so use a much more lenient timeout.
@@ -922,12 +1025,7 @@ async function sweepStalledJobs(now = Date.now(), timeoutMs = JOB_STALL_TIMEOUT_
     const lastActivityAt = Number(job.lastActivityAt || job.lastByteProgressAt || Date.parse(job.startedAt) || now);
     if (now - lastActivityAt < stallTimeout) continue;
 
-    job.status = "failed";
-    job.error = "DOWNLOAD_STALLED";
-    job.progressText = `No download progress for ${Math.round(stallTimeout / 60000)} minutes; task stopped`;
-    job.finishedAt = new Date(now).toISOString();
-    job.etaSeconds = null;
-    await cleanupBrowserTemp(job);
+    await failJob(job, "DOWNLOAD_STALLED", `No download progress for ${Math.round(stallTimeout / 60000)} minutes; task stopped`, now);
     terminateJobProcess(job.id);
     changed = true;
   }
@@ -952,6 +1050,7 @@ async function cancelJob(id) {
 
   job.status = "cancelled";
   job.error = null;
+  job.resumable = false;
   job.progressText = "Stopped by user";
   job.finishedAt = new Date().toISOString();
   job.etaSeconds = null;
@@ -1881,8 +1980,13 @@ function renderHomePage() {
       return ({ queued: 'Queued', running: 'Downloading', completed: 'Completed', failed: 'Failed', cancelled: 'Stopped', missing: 'File missing' })[value] || value;
     }
     function humanJobMessage(job) {
+      const message = baseJobMessage(job);
+      return job.resumable ? message + ' Click download on the same video again to resume.' : message;
+    }
+    function baseJobMessage(job) {
       if (job.error === 'DOWNLOAD_STALLED') return job.progressText || 'No data received. The task was stopped.';
       if (job.error === 'HELPER_RESTARTED') return 'Download was interrupted when the helper stopped.';
+      if (job.error === 'SOURCE_PAGE_CLOSED') return 'The source page was closed or reloaded, so the download stopped.';
       return job.error || job.progressText || 'Waiting';
     }
     function fileName(value) {

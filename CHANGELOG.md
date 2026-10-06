@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.7.0 - 2026-10-06
+
+### Added
+- Browser-fed HLS downloads can now resume. A job that fails for a recoverable reason (stall, source page closed, helper restart, failed segments) keeps its downloaded segments for 24 hours. Clicking download on the same video again picks up the same job and fetches only the missing segments.
+- A retry counts as the same video when the manifest path (query string ignored, so refreshed CDN tokens still match), the source page URL, the segment count, and the duration (within 1 second) all match.
+
+### Fixed
+- Closing, reloading, or navigating the source page now fails the download immediately as `SOURCE_PAGE_CLOSED` instead of after the 10-minute stall timeout.
+- The source tab is marked non-discardable while a download runs, so Memory Saver no longer kills the download loop.
+- The content script replies to the background as soon as the helper job exists, so a long download no longer keeps the service worker waiting, and a dropped message port no longer starts a duplicate helper-direct download.
+- Server tests no longer leave `ds-video-browser-*` folders in the system temp directory.
+- The popup job summary showed "undefined jobs" because it read the total job count from the wrong field.
+
 ## v1.6.9 - 2026-08-16
 
 ### Fixed

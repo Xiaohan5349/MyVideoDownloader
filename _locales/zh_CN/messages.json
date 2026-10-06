@@ -251,6 +251,12 @@
   "msgDownloadStalled": {
     "message": "未收到新数据，任务已停止。"
   },
+  "msgSourcePageClosed": {
+    "message": "视频网页被关闭或刷新，下载已停止。"
+  },
+  "msgDownloadResumable": {
+    "message": "在同一个视频上再次点击下载，即可从中断处继续。"
+  },
   "msgHelperRestarted": {
     "message": "助手停止时下载被中断。"
   },

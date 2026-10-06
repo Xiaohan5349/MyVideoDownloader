@@ -35,10 +35,27 @@ function createChromeMock() {
     },
   };
 
+  const sessionData = {};
+  const sessionStorage = {
+    async get(keys = null) {
+      if (keys === null || keys === undefined) return { ...sessionData };
+      const result = {};
+      for (const key of [].concat(keys)) result[key] = sessionData[key];
+      return result;
+    },
+    async set(obj) {
+      Object.assign(sessionData, obj);
+    },
+    async remove(keys) {
+      for (const key of [].concat(keys)) delete sessionData[key];
+    },
+  };
+
   const mock = {
     data,
+    sessionData,
     listeners,
-    storage: { local: storage },
+    storage: { local: storage, session: sessionStorage },
     runtime: {
       onMessage: {
         addListener(fn) { listeners.onMessage = fn; },
@@ -65,6 +82,10 @@ function createChromeMock() {
         if (!tab) throw new Error("TAB_NOT_FOUND");
         return tab;
       },
+      async update(tabId, props) {
+        mock.tabs.updateCalls.push({ tabId, props });
+        return { id: tabId, ...props };
+      },
       async sendMessage(tabId, message, options) {
         mock.tabs.sendMessageCalls.push({ tabId, message, options });
         if (mock.tabs.sendMessageError) throw mock.tabs.sendMessageError;
@@ -76,6 +97,7 @@ function createChromeMock() {
       tabsById: {},
       queryResult: [],
       sendMessageCalls: [],
+      updateCalls: [],
       sendMessageResult: { ok: true },
       sendMessageError: null,
       sendMessageDeferred: null,
@@ -93,6 +115,8 @@ function createChromeMock() {
     },
     reset() {
       for (const key of Object.keys(data)) delete data[key];
+      for (const key of Object.keys(sessionData)) delete sessionData[key];
+      mock.tabs.updateCalls = [];
       mock.tabs.queryResult = [];
       mock.tabs.tabsById = {};
       mock.tabs.sendMessageCalls = [];
@@ -626,4 +650,122 @@ test("DOWNLOADS_START for DASH goes directly to the helper", async () => {
   assert.equal(response.ok, true);
   assert.equal(response.helperJob.id, "dash-job-1");
   assert.equal(mock.tabs.sendMessageCalls.length, 0);
+});
+
+// ─── Active browser downloads: source-tab lifecycle ───
+
+function mockHelperFetch(calls) {
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push({ url: String(url), options });
+    if (String(url).endsWith("/auth")) {
+      return new Response(JSON.stringify({ ok: true, token: "token-life" }), {
+        status: 200, headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (/\/browser-downloads\/[^/]+\/fail$/.test(String(url))) {
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200, headers: { "Content-Type": "application/json" },
+      });
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  };
+}
+
+async function startTrackedHlsDownload(jobId) {
+  mock.tabs.sendMessageResult = { ok: true, helperJob: { id: jobId } };
+  return sendRuntimeMessage({
+    type: MESSAGE.DOWNLOADS_START,
+    item: {
+      url: "https://cdn.example.com/master.m3u8",
+      sourcePageUrl: "https://site.example",
+      title: "Tracked",
+      extension: "m3u8",
+      kind: "hls",
+      frameId: 0,
+      tabId: 10,
+    },
+  });
+}
+
+function failCalls(calls) {
+  return calls.filter((call) => /\/browser-downloads\/[^/]+\/fail$/.test(call.url));
+}
+
+test("a started HLS download keeps its source tab from being discarded", async () => {
+  mockHelperFetch([]);
+  const response = await startTrackedHlsDownload("job-keep");
+
+  assert.equal(response.ok, true);
+  assert.deepEqual(mock.tabs.updateCalls, [{ tabId: 10, props: { autoDiscardable: false } }]);
+});
+
+test("closing the source tab fails its active download as SOURCE_PAGE_CLOSED", async () => {
+  const calls = [];
+  mockHelperFetch(calls);
+  await startTrackedHlsDownload("job-closed");
+
+  await mock.listeners.onTabRemoved(99);
+  assert.equal(failCalls(calls).length, 0, "other tabs must not affect the download");
+
+  await mock.listeners.onTabRemoved(10);
+  const fails = failCalls(calls);
+  assert.equal(fails.length, 1);
+  assert.ok(fails[0].url.endsWith("/browser-downloads/job-closed/fail"));
+  assert.equal(JSON.parse(fails[0].options.body).error, "SOURCE_PAGE_CLOSED");
+});
+
+test("page:streamInterrupted reports SOURCE_PAGE_CLOSED for that job", async () => {
+  const calls = [];
+  mockHelperFetch(calls);
+  await startTrackedHlsDownload("job-hidden");
+
+  const response = await sendRuntimeMessage(
+    { type: "page:streamInterrupted", jobId: "job-hidden" },
+    { tab: { id: 10 }, frameId: 0 }
+  );
+
+  assert.equal(response.ok, true);
+  const fails = failCalls(calls);
+  assert.equal(fails.length, 1);
+  assert.ok(fails[0].url.endsWith("/browser-downloads/job-hidden/fail"));
+  assert.equal(JSON.parse(fails[0].options.body).error, "SOURCE_PAGE_CLOSED");
+});
+
+test("page:streamFinished restores discarding and stops tracking the job", async () => {
+  const calls = [];
+  mockHelperFetch(calls);
+  await startTrackedHlsDownload("job-done");
+
+  await sendRuntimeMessage(
+    { type: "page:streamFinished", jobId: "job-done" },
+    { tab: { id: 10 }, frameId: 0 }
+  );
+  await mock.listeners.onTabRemoved(10);
+
+  assert.deepEqual(mock.tabs.updateCalls.at(-1), { tabId: 10, props: { autoDiscardable: true } });
+  assert.equal(failCalls(calls).length, 0);
+});
+
+test("HELPER_STATUS_GET includes the helper's total job count in stats", async () => {
+  globalThis.fetch = async (url) => {
+    if (String(url).endsWith("/health")) {
+      return new Response(JSON.stringify({ ok: true, downloadDir: "D:/Videos" }), {
+        status: 200, headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (String(url).includes("/jobs?")) {
+      return new Response(JSON.stringify({
+        ok: true,
+        jobs: [{ id: "a", status: "completed" }],
+        total: 37,
+        stats: { active: 0, completed: 30, failed: 7, downloadedBytes: 1 },
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  };
+
+  const response = await sendRuntimeMessage({ type: "helper:statusGet" });
+
+  assert.equal(response.stats.total, 37);
+  assert.equal(response.stats.active, 0);
 });
