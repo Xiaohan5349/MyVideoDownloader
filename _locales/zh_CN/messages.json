@@ -340,5 +340,8 @@
   },
   "labelModePage": {
     "message": "网页模式"
+  },
+  "labelDetected": {
+    "message": "已检测"
   }
 }

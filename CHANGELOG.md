@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.9.0 - 2026-10-07
+
+### Changed
+- New "Bento Grid" look for the popup, the settings page and the helper dashboard: content sits on tiles of different sizes in a grid, status is shown as a coloured dot plus a word, and file names, paths and progress logs use a monospaced font.
+- Light and dark themes. They follow the browser's appearance setting (System, Light or Dark in Chrome); there is no separate switch.
+- Popup Media tab: the number of detected items is shown large; quality options list bitrate and size on two lines; media with quality options, a running download, or a lock take a full-width tile.
+- Popup Helper tab: the newest active download is shown at the top with its percentage.
+- Unknown progress is shown as a sliding bar instead of a full striped bar.
+- Text contrast is at least 4.5:1 in both themes.
+
 ## v1.8.0 - 2026-10-06
 
 ### Added

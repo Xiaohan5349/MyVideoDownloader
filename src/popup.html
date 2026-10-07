@@ -10,47 +10,58 @@
     <svg width="0" height="0" class="icon-sprite" aria-hidden="true">
       <symbol id="i-down" viewBox="0 0 24 24"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></symbol>
       <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.3-5.7M20 4v5h-5"/></symbol>
-      <symbol id="i-lock" viewBox="0 0 24 24"><path d="M5 11h14v9H5zM8 11V8a4 4 0 0 1 8 0v3"/></symbol>
+      <symbol id="i-lock" viewBox="0 0 24 24"><path d="M6 11h12v9H6zM9 11V8a3 3 0 0 1 6 0v3"/></symbol>
     </svg>
     <main class="popup">
       <header class="topbar">
-        <div class="brand-mark" aria-hidden="true"><i></i></div>
+        <span class="brand-mark" aria-hidden="true"><svg class="icon"><use href="#i-down"/></svg></span>
         <h1 data-i18n="brandName">DS Video Downloader</h1>
-        <button id="rescanButton" class="slant-button" type="button" data-i18n-title="btnRescanTitle">
-          <span><svg class="icon"><use href="#i-refresh"/></svg><span data-i18n="btnRescan">Rescan</span></span>
+        <div id="helperSummary" class="helper-summary" data-i18n="statusCheckingHelper">Checking helper...</div>
+        <button id="rescanButton" class="ghost-button" type="button" data-i18n-title="btnRescanTitle">
+          <svg class="icon"><use href="#i-refresh"/></svg><span data-i18n="btnRescan">Rescan</span>
         </button>
       </header>
-      <div id="helperSummary" class="helper-summary" data-i18n="statusCheckingHelper">Checking helper...</div>
 
       <nav class="tabs" data-i18n-aria="tabsMedia">
-        <button class="tab-button is-active" type="button" data-panel="mediaPanel"><span><span data-i18n="tabsMedia">Media</span><em id="mediaTabCount" class="tab-count" hidden></em></span></button>
-        <button class="tab-button" type="button" data-panel="helperPanel"><span><span data-i18n="tabsHelper">Helper</span><em id="helperTabCount" class="tab-count" hidden></em></span></button>
-        <button class="tab-button" type="button" data-panel="settingsPanel"><span><span data-i18n="tabsSettings">Settings</span></span></button>
+        <button class="tab-button is-active" type="button" data-panel="mediaPanel"><span data-i18n="tabsMedia">Media</span><em id="mediaTabCount" class="tab-count" hidden></em></button>
+        <button class="tab-button" type="button" data-panel="helperPanel"><span data-i18n="tabsHelper">Helper</span><em id="helperTabCount" class="tab-count" hidden></em></button>
+        <button class="tab-button" type="button" data-panel="settingsPanel"><span data-i18n="tabsSettings">Settings</span></button>
       </nav>
 
-      <section id="notice" class="notice" role="status" hidden></section>
+      <section id="notice" class="notice tile" role="status" hidden></section>
 
-      <section id="mediaPanel" class="panel">
-        <div class="section-bar">
-          <span id="mediaCount" class="section-title">0 detected</span>
-          <span id="filterSummary" class="muted"></span>
+      <section id="mediaPanel" class="panel bento">
+        <div class="tile count-tile">
+          <b id="mediaCountNum" class="big-num" aria-hidden="true">0</b>
+          <span class="tile-text" aria-hidden="true" data-i18n="labelDetected">detected</span>
+          <span id="mediaCount" class="visually-hidden">0 detected</span>
+        </div>
+        <div class="tile filter-tile">
+          <span id="filterSummary" class="tile-text"></span>
         </div>
         <section id="mediaList" class="media-list" aria-live="polite"></section>
       </section>
 
-      <section id="helperPanel" class="panel" hidden>
-        <div id="helperStatus" class="helper-status"></div>
-        <div class="section-bar toolbar">
-          <span class="section-title" data-i18n="tabsHelper">Helper jobs</span>
-          <button id="openDashboardButton" class="slant-button is-small" type="button"><span data-i18n="btnOpenDashboard">Dashboard</span></button>
-          <button id="refreshHelperButton" class="slant-button is-small" type="button"><span data-i18n="btnRefresh">Refresh</span></button>
-          <button id="clearMissingButton" class="slant-button is-small" type="button"><span data-i18n="btnClearMissing">Clear missing</span></button>
+      <section id="helperPanel" class="panel bento" hidden>
+        <div id="runTile" class="tile run-tile" hidden>
+          <span id="runTitle" class="tile-cap"></span>
+          <b id="runValue" class="big-num"></b>
+          <div class="progress-bar" aria-hidden="true"><i></i></div>
         </div>
-        <section id="helperJobs" class="job-list" aria-live="polite"></section>
+        <div id="helperStatus" class="helper-status tile"></div>
+        <section class="tile jobs-tile">
+          <div class="toolbar">
+            <span class="section-title" data-i18n="tabsHelper">Helper jobs</span>
+            <button id="openDashboardButton" class="small-button" type="button" data-i18n="btnOpenDashboard">Dashboard</button>
+            <button id="refreshHelperButton" class="small-button" type="button" data-i18n="btnRefresh">Refresh</button>
+            <button id="clearMissingButton" class="small-button" type="button" data-i18n="btnClearMissing">Clear missing</button>
+          </div>
+          <section id="helperJobs" class="job-list" aria-live="polite"></section>
+        </section>
       </section>
 
-      <section id="settingsPanel" class="panel" hidden>
-        <label class="setting-row">
+      <section id="settingsPanel" class="panel bento" hidden>
+        <label class="setting-row tile half">
           <span class="setting-label" data-i18n="settingsFilterLabel">Ignore direct media smaller than</span>
           <select id="minSizeSelect">
             <option value="0" data-i18n="settingsNoFilter">Do not filter</option>
@@ -60,30 +71,30 @@
             <option value="10485760">10 MB</option>
           </select>
         </label>
-        <label class="check-row">
-          <input id="showUnsupportedInput" type="checkbox">
-          <span data-i18n="settingsShowUnsupported">Show unsupported or protected media</span>
+        <label class="check-row tile half">
+          <span class="setting-label" data-i18n="settingsShowUnsupported">Show unsupported or protected media</span>
+          <input id="showUnsupportedInput" class="switch" type="checkbox">
         </label>
-        <div class="setting-row">
+        <div class="setting-row tile">
           <label class="setting-label" for="downloadDirInput" data-i18n="settingsDownloadDirLabel">Helper download directory</label>
           <input id="downloadDirInput" type="text" data-i18n-placeholder="settingsDownloadDirPlaceholder" placeholder="C:\Users\you\Videos">
           <div class="setting-actions">
-            <button id="pickDownloadDirButton" class="outline-button" type="button" data-i18n="btnSelectFolder">Select folder</button>
-            <button id="saveDownloadDirButton" class="outline-button is-primary" type="button" data-i18n="btnSaveHelperFolder">Save helper folder</button>
+            <button id="pickDownloadDirButton" class="ghost-button" type="button" data-i18n="btnSelectFolder">Select folder</button>
+            <button id="saveDownloadDirButton" class="ghost-button is-primary" type="button" data-i18n="btnSaveHelperFolder">Save helper folder</button>
           </div>
         </div>
-        <label class="setting-row">
+        <label class="setting-row tile half">
           <span class="setting-label" data-i18n="settingsLanguageLabel">Language</span>
           <select id="langSelector" class="lang-select">
             <option value="en" data-i18n="settingsLanguageEn">English</option>
             <option value="zh_CN" data-i18n="settingsLanguageZh">简体中文</option>
           </select>
         </label>
-        <p class="settings-note" data-i18n="settingsNote">The size filter only applies when the browser reports a direct file size. HLS/DASH playlists stay visible.</p>
+        <p class="settings-note tile half" data-i18n="settingsNote">The size filter only applies when the browser reports a direct file size. HLS/DASH playlists stay visible.</p>
       </section>
 
       <template id="mediaItemTemplate">
-        <article class="media-item">
+        <article class="media-item tile">
           <div class="media-kind"></div>
           <div class="media-main">
             <div class="media-title-row">
@@ -103,15 +114,13 @@
 
       <template id="helperJobTemplate">
         <article class="helper-job">
-          <div class="helper-job-state"></div>
-          <div class="helper-job-main">
-            <div class="helper-job-title-row">
-              <div class="helper-job-title"></div>
-            </div>
-            <div class="progress-bar" aria-hidden="true"><i></i></div>
-            <div class="helper-job-meta"></div>
-            <div class="helper-job-path"></div>
+          <div class="helper-job-title-row">
+            <div class="helper-job-state"></div>
+            <div class="helper-job-title"></div>
           </div>
+          <div class="progress-bar" aria-hidden="true"><i></i></div>
+          <div class="helper-job-meta"></div>
+          <div class="helper-job-path"></div>
           <div class="helper-job-actions">
             <button class="source-button" type="button" data-i18n="btnSource">Source</button>
             <button class="resume-button" type="button" data-i18n="btnResume">Resume</button>
@@ -123,5 +132,6 @@
       </template>
     </main>
     <script type="module" src="popup.js"></script>
+    <script src="spotlight.js"></script>
   </body>
 </html>

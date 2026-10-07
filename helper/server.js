@@ -1594,7 +1594,7 @@ function escapeHtmlText(value) {
 }
 
 // Local dashboard served at "/". Self-contained (no external fonts or scripts) so it
-// works offline. Visual language matches the extension popup ("Cipher Pop").
+// works offline. Visual language matches the extension popup ("Bento Grid").
 function renderHomePage() {
   const safeDir = escapeHtmlText(downloadDir);
   return `<!doctype html>
@@ -1604,145 +1604,142 @@ function renderHomePage() {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>DS Video Downloader</title>
   <style>
+    /* SYNC-POINT: tokens mirror :root in src/popup.css (Bento Grid, dark + derived light). */
     :root {
       color-scheme: dark;
-      --bg: #111113; --panel: #1a1a1e; --ink: #0b0b0b; --paper: #f3f0e7; --text: #f3f0e7;
-      --muted: #a6a39c; --faint: #6c6a65; --line: #2e2e35; --line-strong: #4a4a52;
-      --yellow: #ffd21f; --magenta: #ff2e7e; --cyan: #28e0ff; --cyan-deep: #0a6a7a;
-      --display: "Avenir Next Condensed", "Bahnschrift Condensed", "Bahnschrift", "DIN Condensed", "Arial Narrow", system-ui, sans-serif;
-      --sans: "Avenir Next", "Segoe UI Variable Text", "Segoe UI", system-ui, "Microsoft YaHei UI", "PingFang SC", sans-serif;
-      --mono: ui-monospace, "SF Mono", "Cascadia Mono", "Cascadia Code", Menlo, Consolas, monospace;
-      --spring: cubic-bezier(0.34, 1.56, 0.64, 1);
-      --cut: polygon(0 0, calc(100% - 16px) 0, 100% 16px, 100% 100%, 0 100%);
+      --page: #0c0d10; --tile: #141519; --tile-2: #1b1c21; --inset: #0f1013;
+      --edge: rgba(255, 255, 255, 0.08); --edge-hi: rgba(255, 255, 255, 0.18); --edge-max: rgba(255, 255, 255, 0.32);
+      --tx: #f1f2f4; --tx-2: #a3a6ad; --tx-3: #8d9098;
+      --blue: #6b97ff; --teal: #3cc8b4; --amber: #f2b84b; --coral: #ff7d6e; --on-blue: #0c0d10;
+      --blue-wash: rgba(107, 151, 255, 0.14); --amber-wash: rgba(242, 184, 75, 0.13); --coral-wash: rgba(255, 125, 110, 0.13);
+      --hover: rgba(255, 255, 255, 0.05); --spot: rgba(107, 151, 255, 0.1); --scrim: rgba(5, 6, 8, 0.74);
+      --lift: 0 30px 60px -20px rgba(0, 0, 0, 0.8);
+      --r1: 18px; --r2: 12px; --r3: 9px; --r4: 6px;
+      --sans: "Segoe UI Variable Display", "Segoe UI Variable Text", "Segoe UI", "SF Pro Display", system-ui, "Microsoft YaHei UI", "PingFang SC", sans-serif;
+      --mono: "Cascadia Mono", Consolas, "SF Mono", ui-monospace, Menlo, monospace;
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        color-scheme: light;
+        --page: #eceef2; --tile: #ffffff; --tile-2: #f5f6f8; --inset: #f0f2f5;
+        --edge: rgba(20, 26, 38, 0.1); --edge-hi: rgba(20, 26, 38, 0.2); --edge-max: rgba(20, 26, 38, 0.36);
+        --tx: #14161b; --tx-2: #4d525b; --tx-3: #646973;
+        --blue: #2c5bd0; --teal: #0b7666; --amber: #7a4e00; --coral: #c2372a; --on-blue: #ffffff;
+        --blue-wash: rgba(44, 91, 208, 0.1); --amber-wash: rgba(196, 132, 0, 0.11); --coral-wash: rgba(194, 55, 42, 0.09);
+        --hover: rgba(20, 26, 38, 0.05); --spot: rgba(44, 91, 208, 0.06); --scrim: rgba(24, 28, 36, 0.42);
+        --lift: 0 24px 50px -22px rgba(20, 26, 38, 0.35);
+      }
     }
     * { box-sizing: border-box; }
     html, body { margin: 0; }
-    body {
-      min-height: 100vh; color: var(--text); font: 13px/1.4 var(--sans); -webkit-font-smoothing: antialiased;
-      background: repeating-linear-gradient(-45deg, rgba(255, 255, 255, 0.018) 0 10px, transparent 10px 20px), var(--bg);
-    }
+    body { min-height: 100vh; background: var(--page); color: var(--tx); font: 13px/1.45 var(--sans); -webkit-font-smoothing: antialiased; }
     button { font: inherit; color: inherit; cursor: pointer; }
     button:disabled { cursor: default; opacity: 0.4; }
-    :focus-visible { outline: 2px solid var(--yellow); outline-offset: 2px; }
-    .icon { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2.4; stroke-linecap: square; }
-    .wrap { max-width: 1280px; margin: 0 auto; padding-bottom: 32px; }
+    :focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+    .icon { width: 15px; height: 15px; flex: none; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+    .wrap { padding: 24px clamp(16px, 3vw, 40px) 40px; }
 
-    .hero {
-      position: relative; display: flex; flex-wrap: wrap; align-items: center; gap: 14px 24px;
-      padding: 22px 24px 30px; background: var(--yellow); color: var(--ink);
-      clip-path: polygon(0 0, 100% 0, 100% calc(100% - 22px), calc(100% - 60px) 100%, 0 100%);
-    }
-    .hero::after {
-      content: ""; position: absolute; top: 0; right: 0; bottom: 0; width: 38%; pointer-events: none;
-      background: repeating-linear-gradient(-45deg, rgba(0, 0, 0, 0.1) 0 8px, transparent 8px 16px);
-    }
-    .brand { display: flex; align-items: center; gap: 16px; min-width: 0; }
-    .brand-mark { flex: none; display: grid; place-items: center; width: 44px; height: 44px; background: var(--ink); transform: skewX(-12deg); }
-    .brand-mark i { width: 18px; height: 18px; border: 4px solid var(--yellow); border-top-color: transparent; border-radius: 50%; transform: skewX(12deg); }
-    h1 { margin: 0; font: italic 900 clamp(40px, 7vw, 64px)/0.85 var(--display); letter-spacing: -0.01em; text-transform: uppercase; }
-    .who { margin-top: 6px; font: italic 800 12px var(--display); letter-spacing: 0.2em; text-transform: uppercase; }
-    .facts { position: relative; z-index: 1; display: flex; flex-wrap: wrap; gap: 6px; margin-left: auto; max-width: 100%; }
-    .fact { display: flex; align-items: center; gap: 8px; min-width: 0; max-width: 100%; padding: 6px 10px; background: var(--ink); color: var(--paper); font: 700 11.5px var(--mono); }
-    .fact small { flex: none; color: var(--yellow); font: italic 800 10.5px var(--display); letter-spacing: 0.14em; text-transform: uppercase; }
+    .tile { position: relative; min-width: 0; padding: 12px 14px; border: 1px solid var(--edge); border-radius: var(--r1); background: var(--tile); transition: border-color 250ms; }
+    .tile:hover { border-color: var(--edge-hi); background: radial-gradient(220px circle at var(--mx, 50%) var(--my, 50%), var(--spot), transparent 70%) no-repeat, var(--tile); }
+
+    .hero { display: flex; flex-wrap: wrap; align-items: center; gap: 14px 20px; margin-bottom: 18px; }
+    .brand { display: flex; align-items: center; gap: 14px; min-width: 0; }
+    .brand-mark { flex: none; display: grid; place-items: center; width: 44px; height: 44px; border: 1px solid var(--edge-hi); border-radius: 13px; background: var(--tile-2); color: var(--blue); }
+    .brand-mark .icon { width: 22px; height: 22px; }
+    h1 { margin: 0; font-size: 26px; font-weight: 650; letter-spacing: -0.01em; line-height: 1.15; }
+    .who { color: var(--tx-2); font-size: 12.5px; }
+    .facts { display: flex; flex-wrap: wrap; gap: 6px; margin-left: auto; min-width: 0; max-width: 100%; }
+    .fact { display: inline-flex; align-items: center; gap: 8px; min-width: 0; max-width: 100%; height: 32px; padding: 0 11px; border: 1px solid var(--edge); border-radius: 10px; background: var(--tile); font: 12px var(--mono); }
+    .fact:has(button) { max-width: min(480px, 100%); padding-right: 5px; }
+    .fact small { flex: none; color: var(--tx-3); font: 11px var(--mono); }
     .fact .val { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .fact.warn { background: var(--magenta); color: #fff; }
-    .fact button { flex: none; display: grid; place-items: center; width: 22px; height: 22px; padding: 0; border: 0; background: none; color: var(--yellow); }
-    .fact button.copied { color: var(--cyan); }
+    .fact.warn { border-color: transparent; background: var(--amber-wash); color: var(--amber); }
+    .fact button { flex: none; display: grid; place-items: center; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 7px; background: none; color: var(--tx-2); }
+    .fact button:hover { background: var(--hover); color: var(--tx); }
+    .fact button.copied { color: var(--teal); }
+    .fact button .icon { width: 14px; height: 14px; }
 
-    .bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 18px 24px 8px; }
-    .summary { margin-right: auto; color: var(--muted); font-weight: 700; }
+    .stats { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 10px; }
+    .stat { grid-column: span 2; }
+    #bytesCard { grid-column: span 6; }
+    .stat-name { display: flex; align-items: center; gap: 6px; color: var(--tx-3); font: 600 11.5px var(--mono); }
+    .stat-name::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+    #bytesCard .stat-name::before { display: none; }
+    #activeCard .stat-name { color: var(--blue); }
+    #completedCard .stat-name { color: var(--teal); }
+    #failedCard .stat-name { color: var(--coral); }
+    .stat-value { margin-top: 6px; overflow: hidden; font-size: 24px; font-weight: 650; line-height: 1.1; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
+    #bytesCard .stat-value { font-size: 44px; line-height: 1; letter-spacing: -0.02em; }
+    #activeCard .stat-value { color: var(--blue); }
+    #completedCard .stat-value { color: var(--teal); }
+    #failedCard .stat-value { color: var(--coral); }
+    .stat.is-empty .stat-value { color: var(--tx-3); }
+
+    .bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin: 22px 0 10px; }
+    .q-title { font-size: 16px; font-weight: 650; }
+    .panel-count { color: var(--tx-3); font: 12px var(--mono); }
+    .summary { margin-right: auto; color: var(--tx-2); font-size: 12.5px; }
     .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
-    .slant { height: 28px; padding: 0 11px; border: 2px solid var(--line-strong); background: none; transform: skewX(-12deg); transition: transform 160ms var(--spring), border-color 120ms; }
-    .slant > span { display: inline-flex; align-items: center; gap: 6px; transform: skewX(12deg); font: italic 800 12.5px var(--display); letter-spacing: 0.06em; text-transform: uppercase; white-space: nowrap; }
-    .slant:hover:not(:disabled) { border-color: var(--paper); transform: skewX(-12deg) translateY(-1px); }
-    .page-label { padding: 0 6px; color: var(--muted); font: italic 800 12.5px var(--display); letter-spacing: 0.08em; text-transform: uppercase; }
+    .small, .actions button { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 9px; border: 1px solid var(--edge-hi); border-radius: 8px; background: none; color: var(--tx); font-size: 11.5px; font-weight: 600; white-space: nowrap; transition: background-color 120ms; }
+    .small:hover:not(:disabled), .actions button:hover:not(:disabled) { background: var(--hover); }
+    .small .icon { width: 13px; height: 13px; }
+    .page-label { padding: 0 4px; color: var(--tx-2); font: 12px var(--mono); }
 
-    .stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; padding: 8px 24px 18px; }
-    .stat { padding: 10px 14px 12px; border: 2px solid var(--line); background: var(--panel); clip-path: var(--cut); }
-    .stat-name { color: var(--muted); font: italic 800 12px var(--display); letter-spacing: 0.16em; text-transform: uppercase; }
-    .stat-value { overflow: hidden; font: italic 900 clamp(34px, 4.4vw, 54px)/0.95 var(--display); text-overflow: ellipsis; white-space: nowrap; }
-    #activeCard .stat-value { color: var(--cyan); }
-    #completedCard .stat-value { color: var(--yellow); }
-    #failedCard .stat-value { color: var(--magenta); }
-    .stat.is-empty .stat-value { color: var(--faint); }
-
-    .panel-head { display: flex; align-items: baseline; gap: 10px; padding: 0 24px 10px; }
-    .panel-head b { color: var(--yellow); font: italic 900 22px var(--display); letter-spacing: 0.04em; text-transform: uppercase; }
-    .panel-head span { color: var(--muted); font: 700 11px var(--mono); }
-    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 380px), 1fr)); gap: 12px; padding: 0 24px; }
-
-    .row { position: relative; min-width: 0; padding: 0 14px 12px; border: 2px solid var(--line); background: var(--panel); clip-path: var(--cut); }
-    .status {
-      display: inline-block; margin: 0 0 8px -14px; padding: 3px 14px 3px 14px; background: var(--faint); color: var(--ink);
-      font: italic 900 12px/1.2 var(--display); letter-spacing: 0.14em; text-transform: uppercase;
-      clip-path: polygon(0 0, 100% 0, calc(100% - 8px) 100%, 0 100%);
-    }
-    .status.running, .status.queued { background: var(--cyan); }
-    .status.completed { background: var(--yellow); }
-    .status.failed { background: var(--magenta); color: #fff; }
-    .status.missing { background: transparent; box-shadow: inset 0 0 0 2px var(--yellow); color: var(--yellow); }
-    .job-title { overflow: hidden; font-size: 14.5px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
-    .progress { margin-top: 3px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
-    .row.failed .progress { color: var(--magenta); }
-    .path { margin-top: 3px; overflow: hidden; color: var(--faint); font: 11px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
-    .bar-track { position: relative; height: 10px; margin-top: 8px; overflow: hidden; border: 2px solid var(--paper); }
-    .bar-track i { position: absolute; top: 0; bottom: 0; left: 0; overflow: hidden; }
-    .bar-track i::before {
-      content: ""; position: absolute; top: 0; bottom: 0; left: -34px; right: -34px;
-      background: repeating-linear-gradient(-45deg, var(--cyan) 0 6px, var(--cyan-deep) 6px 12px);
-      animation: stripe 700ms linear infinite;
-    }
-    @keyframes stripe { to { transform: translateX(16.97px); } }
-    .meta { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
-    .chip { padding: 0 7px; border: 1px solid var(--line); background: var(--ink); color: var(--muted); font: 700 10.5px/18px var(--mono); }
-    details { margin-top: 7px; color: var(--faint); font: 11px var(--mono); }
-    summary { cursor: pointer; }
-    summary:hover { color: var(--text); }
-    code { display: block; margin-top: 5px; padding: 8px; background: var(--ink); color: var(--muted); word-break: break-all; }
-    .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
-    .actions button {
-      height: 28px; padding: 0 11px; border: 2px solid var(--paper); background: none; color: var(--paper);
-      font: italic 800 12.5px var(--display); letter-spacing: 0.05em; text-transform: uppercase; transition: background-color 120ms, color 120ms;
-    }
-    .actions button:hover:not(:disabled) { background: var(--paper); color: var(--ink); }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 380px), 1fr)); gap: 10px; }
+    @media (min-width: 900px) { .row.running { grid-column: span 2; } }
+    .jh { display: flex; align-items: center; gap: 10px; min-width: 0; }
+    .status { display: inline-flex; flex: none; align-items: center; gap: 6px; color: var(--tx-2); font: 600 11.5px var(--mono); white-space: nowrap; }
+    .status::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--tx-3); }
+    .status.running, .status.queued { color: var(--blue); }
+    .status.running::before { background: var(--blue); }
+    .status.queued::before { background: none; box-shadow: inset 0 0 0 1.5px var(--blue); }
+    .status.completed { color: var(--teal); }
+    .status.completed::before { background: var(--teal); }
+    .status.failed { color: var(--coral); }
+    .status.failed::before { background: var(--coral); }
+    .status.missing { color: var(--amber); }
+    .status.missing::before { background: none; box-shadow: inset 0 0 0 1.5px var(--amber); }
+    .job-title { flex: 1; min-width: 0; overflow: hidden; font-size: 14.5px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+    .progress { margin-top: 6px; color: var(--tx-2); font-size: 12px; overflow-wrap: anywhere; }
+    .row.failed .progress { color: var(--coral); }
+    .path { margin-top: 3px; overflow: hidden; color: var(--tx-3); font: 10.5px/1.45 var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+    .bar-track { position: relative; height: 6px; margin-top: 12px; overflow: hidden; border-radius: 3px; background: var(--inset); }
+    .bar-track i { position: absolute; top: 0; bottom: 0; left: 0; border-radius: 3px; background: var(--blue); }
+    .bar-track.is-indeterminate i { animation: indeterminate 1.6s ease-in-out infinite; }
+    @keyframes indeterminate { from { transform: translateX(-100%); } to { transform: translateX(400%); } }
+    .meta { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 10px; }
+    .chip { padding: 1px 7px; border: 1px solid var(--edge); border-radius: var(--r4); color: var(--tx-2); font: 11px/18px var(--mono); }
+    details { margin-top: 9px; color: var(--tx-3); font: 11px var(--mono); }
+    summary { width: max-content; cursor: pointer; }
+    summary:hover { color: var(--tx); }
+    code { display: block; margin-top: 6px; padding: 9px 10px; border: 1px solid var(--edge); border-radius: 10px; background: var(--inset); color: var(--tx-2); font: 11px/1.5 var(--mono); word-break: break-all; }
+    .actions { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 10px; }
     .actions button:disabled { display: none; }
-    .actions .warning { border-color: var(--yellow); color: var(--yellow); }
-    .actions .warning:hover:not(:disabled) { background: var(--yellow); }
-    .actions .danger { border-color: var(--magenta); color: var(--magenta); }
-    .actions .danger:hover:not(:disabled) { background: var(--magenta); color: #fff; }
+    .actions .warning { border-color: transparent; background: var(--amber-wash); color: var(--amber); }
+    .actions .danger { border-color: transparent; color: var(--coral); }
 
-    .empty { margin: 0 24px; padding: 26px 22px; border: 2px dashed var(--line-strong); color: var(--muted); }
-    .empty-title { color: var(--yellow); font: italic 900 22px var(--display); text-transform: uppercase; }
+    .empty { padding: 22px; border: 1px dashed var(--edge-hi); border-radius: var(--r1); color: var(--tx-2); }
+    .empty-title { color: var(--tx); font-size: 16px; font-weight: 650; }
     .empty-text { max-width: 560px; margin-top: 6px; line-height: 1.5; }
-    .empty.failed { border-color: var(--magenta); color: var(--magenta); font-weight: 700; }
+    .empty.failed { border-color: var(--coral); color: var(--coral); font-weight: 600; }
 
-    .remove-overlay {
-      position: fixed; z-index: 20; inset: 0; display: grid; place-items: center; padding: 16px;
-      background: repeating-linear-gradient(-45deg, rgba(0, 0, 0, 0.82) 0 10px, rgba(0, 0, 0, 0.74) 10px 20px);
-    }
-    .remove-dialog { width: 100%; max-width: 380px; filter: drop-shadow(6px 6px 0 var(--magenta)); animation: dialog-in 320ms var(--spring); }
-    @keyframes dialog-in { from { opacity: 0; transform: translateY(14px) scale(0.94); } }
-    .remove-dialog h3 { margin: 0; padding: 12px 16px 10px; background: var(--yellow); color: var(--ink); font: italic 900 25px/1.05 var(--display); text-transform: uppercase; }
-    .remove-body { padding: 14px 16px 16px; background: var(--paper); color: var(--ink); clip-path: polygon(0 0, 100% 0, 100% calc(100% - 16px), calc(100% - 16px) 100%, 0 100%); }
-    .remove-name { margin: 0 0 14px; padding: 7px 9px; border-left: 4px solid var(--ink); background: rgba(0, 0, 0, 0.06); font: 700 12px/1.45 var(--mono); overflow-wrap: anywhere; }
+    .remove-overlay { position: fixed; z-index: 20; inset: 0; display: grid; place-items: center; padding: 20px; background: var(--scrim); }
+    .remove-dialog { width: 100%; max-width: 380px; padding: 18px; border: 1px solid var(--edge-hi); border-radius: var(--r1); background: var(--tile); box-shadow: var(--lift); animation: dialog-in 200ms ease-out; }
+    @keyframes dialog-in { from { opacity: 0; transform: translateY(8px) scale(0.98); } }
+    .remove-dialog h3 { margin: 0 0 10px; font-size: 16px; font-weight: 650; }
+    .remove-name { margin: 0 0 14px; padding: 9px 10px; border: 1px solid var(--edge); border-radius: 10px; background: var(--inset); color: var(--tx-2); font: 11.5px/1.5 var(--mono); overflow-wrap: anywhere; }
     .remove-dialog-actions { display: grid; gap: 6px; }
-    .remove-dialog-actions button {
-      min-height: 38px; padding: 0 12px; border: 2px solid var(--ink); background: var(--paper); color: var(--ink); text-align: left;
-      box-shadow: 3px 3px 0 var(--ink); font: italic 900 14px var(--display); letter-spacing: 0.06em; text-transform: uppercase;
-      transition: transform 150ms var(--spring), box-shadow 150ms var(--spring);
-    }
-    .remove-dialog-actions button:hover { transform: translate(-1px, -1px); box-shadow: 4px 4px 0 var(--ink); }
-    .remove-dialog-actions .danger { border-color: var(--magenta); background: var(--magenta); color: #fff; }
-    .remove-dialog-actions .ghost { border-color: transparent; background: none; box-shadow: none; color: rgba(0, 0, 0, 0.6); text-align: center; }
+    .remove-dialog-actions button { min-height: 38px; padding: 0 14px; border: 1px solid var(--edge-hi); border-radius: 10px; background: var(--tile-2); color: var(--tx); font-size: 13px; font-weight: 600; text-align: left; transition: border-color 120ms; }
+    .remove-dialog-actions button:hover { border-color: var(--edge-max); }
+    .remove-dialog-actions .danger { border-color: transparent; background: var(--coral-wash); color: var(--coral); }
+    .remove-dialog-actions .ghost { border-color: transparent; background: none; color: var(--tx-2); text-align: center; }
 
-    @media (max-width: 760px) {
-      .hero { padding: 18px 16px 28px; }
+    @media (max-width: 1100px) {
+      #bytesCard { grid-column: span 12; }
+      .stat { grid-column: span 4; }
+    }
+    @media (max-width: 560px) {
       .facts { margin-left: 0; }
-      .bar, .stats { padding-left: 16px; padding-right: 16px; }
-      .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .panel-head { padding: 0 16px 10px; }
-      .grid { padding: 0 16px; }
-      .empty { margin: 0 16px; }
     }
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after { animation: none !important; transition-duration: 0.01ms !important; }
@@ -1751,40 +1748,43 @@ function renderHomePage() {
 </head>
 <body>
   <svg width="0" height="0" style="position:absolute" aria-hidden="true">
-    <symbol id="i-copy" viewBox="0 0 24 24"><path d="M8 8h12v12H8zM16 8V4H4v12h4"/></symbol>
+    <symbol id="i-down" viewBox="0 0 24 24"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><path d="M9 9h11v11H9zM15 9V4H4v11h5"/></symbol>
     <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.3-5.7M20 4v5h-5"/></symbol>
   </svg>
   <div class="wrap">
     <header class="hero">
       <div class="brand">
-        <div class="brand-mark" aria-hidden="true"><i></i></div>
+        <span class="brand-mark" aria-hidden="true"><svg class="icon"><use href="#i-down"/></svg></span>
         <div><h1>Downloads</h1><div class="who">DS Video Downloader · Local helper dashboard</div></div>
       </div>
       <div class="facts">
-        <span class="fact"><small>Service</small><span class="val">127.0.0.1:${PORT}</span></span>
-        <span class="fact"><small>Downloads</small><span id="downloadPath" class="val" title="${safeDir}">${safeDir}</span>
+        <span class="fact"><small>service</small><span class="val">127.0.0.1:${PORT}</span></span>
+        <span class="fact"><small>downloads</small><span id="downloadPath" class="val" title="${safeDir}">${safeDir}</span>
           <button id="copyPathButton" type="button" title="Copy download path" aria-label="Copy download path"><svg class="icon"><use href="#i-copy"/></svg></button></span>
         <span class="fact warn">ffmpeg required for stream assembly</span>
       </div>
     </header>
 
+    <section class="stats" aria-label="Download summary">
+      <div id="bytesCard" class="stat tile"><div class="stat-name">downloaded</div><div id="bytesStat" class="stat-value">0 B</div></div>
+      <div id="activeCard" class="stat tile"><div class="stat-name">active</div><div id="activeStat" class="stat-value">0</div></div>
+      <div id="completedCard" class="stat tile"><div class="stat-name">completed</div><div id="completedStat" class="stat-value">0</div></div>
+      <div id="failedCard" class="stat tile"><div class="stat-name">failed</div><div id="failedStat" class="stat-value">0</div></div>
+    </section>
+
     <div class="bar">
+      <b class="q-title">Queue</b>
+      <span id="queueCount" class="panel-count"></span>
       <div id="summary" class="summary">Checking jobs...</div>
       <div class="toolbar">
-        <button class="slant" type="button" onclick="clearMissingJobs()"><span>Clear missing</span></button>
-        <button id="prevJobsPageButton" class="slant" type="button" onclick="prevJobsPage()"><span>Prev</span></button>
+        <button class="small" type="button" onclick="clearMissingJobs()">Clear missing</button>
+        <button id="prevJobsPageButton" class="small" type="button" onclick="prevJobsPage()">Prev</button>
         <span id="jobsPageLabel" class="page-label">Page 1</span>
-        <button id="nextJobsPageButton" class="slant" type="button" onclick="nextJobsPage()"><span>Next</span></button>
-        <button class="slant" type="button" onclick="loadJobs(true)"><span><svg class="icon"><use href="#i-refresh"/></svg>Refresh</span></button>
+        <button id="nextJobsPageButton" class="small" type="button" onclick="nextJobsPage()">Next</button>
+        <button class="small" type="button" onclick="loadJobs(true)"><svg class="icon"><use href="#i-refresh"/></svg>Refresh</button>
       </div>
     </div>
-
-    <section class="stats" aria-label="Download summary">
-      <div id="activeCard" class="stat"><div class="stat-name">Active</div><div id="activeStat" class="stat-value">0</div></div>
-      <div id="completedCard" class="stat"><div class="stat-name">Completed</div><div id="completedStat" class="stat-value">0</div></div>
-      <div id="failedCard" class="stat"><div class="stat-name">Failed</div><div id="failedStat" class="stat-value">0</div></div>
-      <div id="bytesCard" class="stat"><div class="stat-name">Downloaded</div><div id="bytesStat" class="stat-value">0 B</div></div>
-    </section>
 
     <section id="jobs" class="panel"><div class="empty">Loading jobs...</div></section>
   </div>
@@ -1832,6 +1832,7 @@ function renderHomePage() {
 
         if (!total) {
           jobsPageOffset = 0;
+          setText("#queueCount", '');
           rowCache.clear();
           root.innerHTML = '<div class="empty"><div class="empty-title">No helper jobs yet</div><div class="empty-text">Start an HLS or DASH download from the extension popup. Jobs will appear here with progress, output path, and file actions.</div></div>';
           return;
@@ -1839,6 +1840,7 @@ function renderHomePage() {
         renderJobList(root, jobs, total);
       } catch {
         setText("#summary", 'Helper offline');
+        setText("#queueCount", '');
         setText("#activeStat", '0');
         setText("#completedStat", '0');
         setText("#failedStat", '0');
@@ -1848,15 +1850,13 @@ function renderHomePage() {
       }
     }
     function renderJobList(root, jobs, total) {
-      let head = root.querySelector(".panel-head");
       let grid = root.querySelector(".grid");
-      if (!head || !grid) {
+      if (!grid) {
         rowCache.clear();
-        root.innerHTML = '<div class="panel-head"><b>Queue</b><span class="panel-count"></span></div><div class="grid"></div>';
-        head = root.querySelector(".panel-head");
+        root.innerHTML = '<div class="grid"></div>';
         grid = root.querySelector(".grid");
       }
-      const count = head.querySelector(".panel-count");
+      const count = document.querySelector("#queueCount");
       const countText = total + ' item' + (total === 1 ? '' : 's');
       if (count.textContent !== countText) count.textContent = countText;
 
@@ -1907,10 +1907,10 @@ function renderHomePage() {
       const output = job.outputPath || job.url || '';
       const sourceUrl = job.sourcePageUrl || '';
       const fraction = progressFraction(job);
-      const bar = isActive ? '<div class="bar-track" aria-hidden="true"><i style="width:' + (fraction === null ? 100 : (fraction * 100).toFixed(1)) + '%"></i></div>' : '';
-      return '<article class="row ' + escapeHtml(job.status) + '">'
-        + '<span class="status ' + escapeHtml(job.status) + '">' + escapeHtml(humanStatus(job.status)) + '</span>'
-        + '<div class="job-title" title="' + escapeHtml(title) + '">' + escapeHtml(title) + '</div>'
+      const bar = isActive ? '<div class="bar-track' + (fraction === null ? ' is-indeterminate' : '') + '" aria-hidden="true"><i style="width:' + (fraction === null ? 25 : (fraction * 100).toFixed(1)) + '%"></i></div>' : '';
+      return '<article class="tile row ' + escapeHtml(job.status) + '">'
+        + '<div class="jh"><span class="status ' + escapeHtml(job.status) + '">' + escapeHtml(humanStatus(job.status)) + '</span>'
+        + '<div class="job-title" title="' + escapeHtml(title) + '">' + escapeHtml(title) + '</div></div>'
         + bar
         + '<div class="progress">' + escapeHtml(humanJobMessage(job)) + '</div>'
         + '<div class="path" title="' + escapeHtml(output) + '">' + escapeHtml(middleTruncate(output, 72)) + '</div>'
@@ -2045,6 +2045,14 @@ function renderHomePage() {
       button.classList.toggle('copied', ok);
       if (ok) setTimeout(() => button.classList.remove('copied'), 1200);
     });
+    // Bento hover light: keeps the hovered tile's --mx / --my at the pointer position.
+    document.addEventListener("pointermove", (event) => {
+      const tile = event.target.closest?.(".tile");
+      if (!tile) return;
+      const box = tile.getBoundingClientRect();
+      tile.style.setProperty("--mx", (event.clientX - box.left) + "px");
+      tile.style.setProperty("--my", (event.clientY - box.top) + "px");
+    }, { passive: true });
     loadJobs();
     setInterval(loadJobs, 1000);
   </script>

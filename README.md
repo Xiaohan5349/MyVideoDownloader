@@ -1,6 +1,6 @@
 # DS Video Downloader
 
-A Chrome MV3 extension for downloading HLS/DASH streaming videos and direct media files. Anime-themed UI with tactical HUD aesthetics inspired by Honkai: Star Rail and Zenless Zone Zero.
+A Chrome MV3 extension for downloading HLS/DASH streaming videos and direct media files. Tile-based ("bento") interface with automatic light and dark themes.
 
 > [中文版](README_zh.md)
 

@@ -22,6 +22,10 @@ const pickDownloadDirButton = document.querySelector("#pickDownloadDirButton");
 const langSelector = document.querySelector("#langSelector");
 const mediaTabCount = document.querySelector("#mediaTabCount");
 const helperTabCount = document.querySelector("#helperTabCount");
+const mediaCountNum = document.querySelector("#mediaCountNum");
+const runTile = document.querySelector("#runTile");
+const runTitle = document.querySelector("#runTitle");
+const runValue = document.querySelector("#runValue");
 
 let activeTab = null;
 let settings = null;
@@ -153,7 +157,8 @@ async function loadHelperStatus() {
         ? getMessage("msgActiveJobs", { active: String(activeCount), total: String(totalCount), plural: totalCount === 1 ? "" : "s" })
         : getMessage("statusHelperOffline");
       setTabCount(helperTabCount, online ? activeCount : 0);
-      helperStatus.className = `helper-status ${online ? "is-online" : "is-offline"}`;
+      helperSummary.classList.toggle("is-offline", !online);
+      helperStatus.className = `helper-status tile ${online ? "is-online" : "is-offline"}`;
       helperStatus.textContent = online
         ? getMessage("msgHelperRunning", { dir: downloadDir || getMessage("labelDefaultFolder") })
         : getMessage("msgHelperEmpty");
@@ -166,6 +171,7 @@ async function loadHelperStatus() {
     }
 
     renderHelperJobs(merged);
+    renderRunTile(merged);
   } catch (error) {
     console.error("[ds-video-downloader] loadHelperStatus failed", error);
   } finally {
@@ -180,6 +186,7 @@ async function loadHelperStatus() {
 function renderMedia(items) {
   list.textContent = "";
   mediaCount.textContent = getMessage("msgCountDetected", { count: String(items.length) });
+  mediaCountNum.textContent = String(items.length);
   setTabCount(mediaTabCount, items.length);
 
   if (!items.length) {
@@ -524,13 +531,15 @@ function renderVariants(container, variants, item = null) {
     const quality = document.createElement("b");
     quality.textContent = variant.quality || getMessage("labelStream");
     const detail = document.createElement("small");
-    detail.textContent = [
+    const details = [
       variant.bandwidth ? `${Math.round(variant.bandwidth / 1000)} kbps` : "",
       variantSizeLabel(variant)
-    ].filter(Boolean).join(" · ");
+    ].filter(Boolean);
+    // One fact per line inside the narrow ticket (CSS white-space: pre-line).
+    detail.textContent = details.join("\n");
     chip.appendChild(quality);
     if (detail.textContent) chip.appendChild(detail);
-    chip.title = [quality.textContent, detail.textContent].filter(Boolean).join(" - ");
+    chip.title = [quality.textContent, ...details].join(" - ");
     container.appendChild(chip);
   }
   container.hidden = false;
@@ -891,11 +900,25 @@ function setTabCount(element, count) {
 }
 
 // Progress bars read a --p custom property. Unknown progress leaves it unset,
-// which the CSS renders as a full, animated "working" stripe.
+// and adds is-indeterminate, which the CSS renders as a sliding "working" bar.
 function setProgress(element, job) {
   const fraction = jobProgressFraction(job);
+  element.classList.toggle("is-indeterminate", fraction === null);
   if (fraction === null) element.style.removeProperty("--p");
   else element.style.setProperty("--p", `${(fraction * 100).toFixed(1)}%`);
+}
+
+// Helper panel headline tile: the newest queued/running job and its progress.
+// Hidden when nothing is active, so the helper status tile takes the full row.
+function renderRunTile(jobs) {
+  const job = jobs.find((entry) => entry.status === "running" || entry.status === "queued");
+  runTile.hidden = !job;
+  if (!job) return;
+  const fraction = jobProgressFraction(job);
+  runTitle.textContent = jobTitle(job);
+  runValue.textContent = fraction === null ? humanStatus(job.status) : String(Math.floor(fraction * 100));
+  runValue.classList.toggle("is-word", fraction === null);
+  setProgress(runTile, job);
 }
 
 // Template clones never pass through applyLanguageUI, so translate them here.
