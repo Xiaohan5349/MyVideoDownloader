@@ -293,6 +293,71 @@ test("MEDIA_GET_FOR_TAB falls back to helper for unknown direct media size", asy
   assert.equal(response.items[0].sizeSource, "exact");
 });
 
+test("MEDIA_GET_FOR_TAB asks the helper for the resolution of unlabeled direct media", async () => {
+  await mock.storage.local.set({
+    "tabMedia:10": [{
+      id: "https://site.example::https://cdn.example.com/clip.mp4",
+      url: "https://cdn.example.com/clip.mp4",
+      sourcePageUrl: "https://site.example",
+      pageUrl: "https://site.example",
+      title: "Direct",
+      extension: "mp4",
+      kind: "direct",
+      tabId: 10,
+      frameId: 0,
+      size: 456789012,
+      quality: "",
+      detectedAt: 5,
+      headers: [{ name: "Referer", value: "https://site.example/" }],
+      variants: []
+    }]
+  });
+  const probes = [];
+  globalThis.fetch = async (url, options) => {
+    assert.equal(String(url), "http://127.0.0.1:8765/probe-quality");
+    probes.push(JSON.parse(options.body));
+    return Response.json({ ok: true, width: 1920, height: 1080, quality: "1080p" });
+  };
+
+  const response = await sendRuntimeMessage({ type: "media:getForTab", tabId: 10 });
+  assert.equal(response.items[0].quality, "1080p");
+  assert.equal(probes.length, 1);
+  assert.equal(probes[0].url, "https://cdn.example.com/clip.mp4");
+  assert.ok(probes[0].headers.some((header) => header.name.toLowerCase() === "referer"));
+
+  // Once labeled, the item is not probed again.
+  await sendRuntimeMessage({ type: "media:getForTab", tabId: 10 });
+  assert.equal(probes.length, 1);
+});
+
+test("a probed HLS playlist also gets a size estimate from its quality", async () => {
+  await mock.storage.local.set({
+    "tabMedia:10": [{
+      id: "https://site.example::https://cdn.example.com/single.m3u8",
+      url: "https://cdn.example.com/single.m3u8",
+      sourcePageUrl: "https://site.example",
+      pageUrl: "https://site.example",
+      title: "Single",
+      extension: "m3u8",
+      kind: "hls",
+      tabId: 10,
+      frameId: 0,
+      quality: "",
+      detectedAt: 5,
+      headers: [],
+      variants: []
+    }]
+  });
+  // 100 s media playlist without RESOLUTION.
+  mock.tabs.sendMessageResult = { ok: true, text: "#EXTM3U\n#EXTINF:100,\na.ts\n#EXT-X-ENDLIST" };
+  globalThis.fetch = async () => Response.json({ ok: true, width: 1280, height: 720, quality: "720p" });
+
+  const response = await sendRuntimeMessage({ type: "media:getForTab", tabId: 10 });
+  assert.equal(response.items[0].quality, "720p");
+  assert.equal(response.items[0].estimatedSize, 35_000_000); // 100 s × 2.8 Mbps
+  assert.equal(response.items[0].sizeSource, "estimated");
+});
+
 test("MEDIA_GET_FOR_TAB keeps same-title direct media with different URLs", async () => {
   await mock.storage.local.set({
     "tabMedia:10": [
@@ -646,15 +711,16 @@ test("DOWNLOADS_JOBS_CLEAR_MISSING calls the helper clear-missing endpoint", asy
   assert.equal(response.removedCount, 2);
 });
 
-test("DOWNLOADS_START for DASH goes directly to the helper", async () => {
-  globalThis.fetch = async (url, options) => {
-    if (String(url).endsWith("/download")) {
-      return new Response(JSON.stringify({ ok: true, job: { id: "dash-job-1" } }), {
-        status: 202, headers: { "Content-Type": "application/json" },
+test("DOWNLOADS_START for DASH uses the browser download path like HLS", async () => {
+  globalThis.fetch = async (url) => {
+    if (String(url).endsWith("/auth")) {
+      return new Response(JSON.stringify({ ok: true, token: "token-dash" }), {
+        status: 200, headers: { "Content-Type": "application/json" },
       });
     }
     throw new Error(`unexpected fetch ${url}`);
   };
+  mock.tabs.sendMessageResult = { ok: true, helperJob: { id: "dash-job-1" } };
 
   const response = await sendRuntimeMessage({
     type: MESSAGE.DOWNLOADS_START,
@@ -671,7 +737,9 @@ test("DOWNLOADS_START for DASH goes directly to the helper", async () => {
 
   assert.equal(response.ok, true);
   assert.equal(response.helperJob.id, "dash-job-1");
-  assert.equal(mock.tabs.sendMessageCalls.length, 0);
+  assert.equal(mock.tabs.sendMessageCalls.length, 1);
+  assert.equal(mock.tabs.sendMessageCalls[0].message.type, "page:downloadStream");
+  assert.equal(mock.tabs.sendMessageCalls[0].message.payload.manifestUrl, "https://cdn.example.com/video.mpd");
 });
 
 // ─── Active browser downloads: source-tab lifecycle ───

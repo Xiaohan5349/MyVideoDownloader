@@ -1,4 +1,4 @@
-import { MESSAGE, jobProgressFraction, sanitizeFilename } from "./shared.js";
+import { MESSAGE, jobProgressFraction, sanitizeFilename, sortMediaByQuality } from "./shared.js";
 import { getMessage, getUserLanguage, setUserLanguage, applyLanguageUI } from "./i18n.js";
 
 const list = document.querySelector("#mediaList");
@@ -26,6 +26,8 @@ const mediaCountNum = document.querySelector("#mediaCountNum");
 const runTile = document.querySelector("#runTile");
 const runTitle = document.querySelector("#runTitle");
 const runValue = document.querySelector("#runValue");
+const mediaPanel = document.querySelector("#mediaPanel");
+const scanLabel = document.querySelector("#scanLabel");
 
 let activeTab = null;
 let settings = null;
@@ -34,8 +36,9 @@ const pendingDownloads = new Set();
 const helperJobNodes = new Map();
 let statusLoading = false;
 let statusPending = false;
+let scansRunning = 0;
 
-rescanButton.addEventListener("click", async () => {
+rescanButton.addEventListener("click", () => whileScanning(async () => {
   if (!activeTab?.id) return;
   // Clear first so rescan replaces the previous page results instead of merging.
   await chrome.runtime.sendMessage({ type: "page:clearMedia", tabId: activeTab.id, keepNetwork: true }).catch(() => {});
@@ -45,7 +48,7 @@ rescanButton.addEventListener("click", async () => {
     return;
   }
   await loadMedia();
-});
+}));
 
 refreshHelperButton.addEventListener("click", loadHelperStatus);
 clearMissingButton.addEventListener("click", clearMissingJobs);
@@ -102,24 +105,46 @@ async function updateSettings(patch) {
   await loadMedia();
 }
 
-async function loadMedia() {
-  [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!activeTab?.id) {
-    showNotice(getMessage("msgNoActiveTab"), true);
-    return;
+// The background reads manifests and probes sizes/resolutions before it
+// answers, which can take several seconds; show that the scan is running.
+async function whileScanning(task) {
+  scansRunning += 1;
+  setScanning(true);
+  try {
+    return await task();
+  } finally {
+    scansRunning -= 1;
+    if (!scansRunning) setScanning(false);
   }
+}
 
-  const response = await chrome.runtime.sendMessage({
-    type: MESSAGE.MEDIA_GET_FOR_TAB,
-    tabId: activeTab.id
+function setScanning(active) {
+  mediaPanel.classList.toggle("is-scanning", active);
+  mediaPanel.ariaBusy = String(active);
+  rescanButton.disabled = active;
+  scanLabel.textContent = getMessage(active ? "labelScanning" : "labelDetected");
+}
+
+function loadMedia() {
+  return whileScanning(async () => {
+    [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!activeTab?.id) {
+      showNotice(getMessage("msgNoActiveTab"), true);
+      return;
+    }
+
+    const response = await chrome.runtime.sendMessage({
+      type: MESSAGE.MEDIA_GET_FOR_TAB,
+      tabId: activeTab.id
+    });
+
+    if (!response?.ok) {
+      showNotice(response?.error || getMessage("msgCouldNotReadMedia"), true);
+      return;
+    }
+
+    renderMedia(sortMediaByQuality(response.items || []));
   });
-
-  if (!response?.ok) {
-    showNotice(response?.error || getMessage("msgCouldNotReadMedia"), true);
-    return;
-  }
-
-  renderMedia(response.items || []);
 }
 
 async function loadHelperStatus() {

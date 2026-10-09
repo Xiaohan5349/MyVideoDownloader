@@ -178,3 +178,34 @@ test("rescan clears background media and waits for the content scan", async () =
   assert.ok(runtimeMessages.some((message) => message.type === "media:getForTab"));
   assert.equal(timers.setTimeoutCalls.length, 0);
 });
+
+test("the media panel shows a scanning state until the media list arrives", async () => {
+  const original = chromeMock.runtime.sendMessage;
+  let answer;
+  chromeMock.runtime.sendMessage = async (message) => {
+    if (message?.type === "media:getForTab") return new Promise((resolve) => { answer = resolve; });
+    return original(message);
+  };
+  const panel = getElement("#mediaPanel");
+  const label = getElement("#scanLabel");
+  try {
+    assert.equal(panel.classList.className.includes("is-scanning"), false);
+    assert.equal(label.textContent, "detected");
+
+    getElement("#rescanButton").click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.ok(panel.classList.className.includes("is-scanning"));
+    assert.equal(panel.ariaBusy, "true");
+    assert.equal(label.textContent, "scanning…");
+    assert.equal(getElement("#rescanButton").disabled, true);
+
+    answer({ ok: true, items: [] });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(panel.classList.className.includes("is-scanning"), false);
+    assert.equal(panel.ariaBusy, "false");
+    assert.equal(label.textContent, "detected");
+    assert.equal(getElement("#rescanButton").disabled, false);
+  } finally {
+    chromeMock.runtime.sendMessage = original;
+  }
+});

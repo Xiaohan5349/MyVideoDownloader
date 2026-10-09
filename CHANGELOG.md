@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.10.0 - 2026-10-09
+
+### Added
+- DASH (`.mpd`) downloads now run in the browser like HLS: extension mode first, then page mode, with Stop/Resume. The best video track (or the quality you pick) is paired with an audio track and muxed into one MP4. Supports SegmentTemplate (`$Number$` / `$Time$` / SegmentTimeline), SegmentList and SegmentBase (sidx) layouts. Live, multi-period and WebM-only MPDs fall back to the helper's ffmpeg download; DRM-protected MPDs are refused.
+- Resolution for media that does not state one: direct files and single-quality HLS playlists are read with `ffprobe` by the helper (new `POST /probe-quality`, results cached for 10 minutes) and labelled like `1080p` (short side, so portrait and landscape compare directly). HLS playlists labelled this way also get an estimated size.
+
+- The popup shows "scanning…" with a sliding bar on the count tile, and disables Rescan, while it reads the page's media; it switches back to "detected" when the list is complete.
+
+### Changed
+- Detected media is sorted by quality, highest first, then by size, largest first. A stream counts as its best quality option; items with unknown quality go last.
+- DASH quality options list only video qualities, best first, instead of every representation including audio.
+- Resuming a DASH job only reuses segments downloaded for the same video/audio tracks.
+
 ## v1.9.0 - 2026-10-07
 
 ### Changed

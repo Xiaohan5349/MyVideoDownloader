@@ -343,5 +343,8 @@
   },
   "labelDetected": {
     "message": "已检测"
+  },
+  "labelScanning": {
+    "message": "扫描中…"
   }
 }

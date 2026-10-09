@@ -22,6 +22,8 @@ const SIZE_PROBE_LIMIT = Number(process.env.SIZE_PROBE_LIMIT || 1500);
 const SIZE_PROBE_CONCURRENCY = Number(process.env.SIZE_PROBE_CONCURRENCY || 8);
 const SIZE_PROBE_TIMEOUT_MS = Number(process.env.SIZE_PROBE_TIMEOUT_MS || 5000);
 const JOB_STALL_TIMEOUT_MS = Number(process.env.JOB_STALL_TIMEOUT_MS || 120_000);
+const QUALITY_PROBE_TIMEOUT_MS = Number(process.env.QUALITY_PROBE_TIMEOUT_MS || 6000);
+const QUALITY_PROBE_CACHE_MS = 10 * 60_000;
 const MAX_JOB_HISTORY = 5000;
 // Failed browser-fed jobs keep their uploaded segments this long so a retry
 // can resume instead of starting over.
@@ -278,6 +280,13 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === "POST" && req.url === "/probe-quality") {
+      const payload = await readJson(req);
+      const result = await probeQualityForUi(payload);
+      writeJson(res, result.ok ? 200 : result.status || 400, result);
+      return;
+    }
+
     writeJson(res, 404, { ok: false, error: "NOT_FOUND" });
   } catch (error) {
     writeJson(res, error.status || 500, { ok: false, error: error.message || String(error) });
@@ -374,10 +383,15 @@ async function startBrowserDownload(payload) {
     status: "running",
     url,
     sourcePageUrl: validateUrl(payload?.sourcePageUrl) || "",
+    // DASH jobs need the chosen tracks to resume: one MPD URL serves every quality.
+    streamKind: payload.kind === "dash" ? "dash" : "hls",
+    quality: String(payload.quality || "").slice(0, 32),
+    trackKey: String(payload.trackKey || "").slice(0, 300),
     outputPath,
     downloadDir,
     tempDir,
     localPlaylistPath: null,
+    localAudioPlaylistPath: null,
     startedAt: new Date().toISOString(),
     finishedAt: null,
     error: null,
@@ -425,6 +439,7 @@ function findResumableJob(payload) {
 // payload: the new request (same fields; url is already validated)
 function isSameDownload(job, payload) {
   if (job.totalSegments !== payload.totalSegments) return false;
+  if ((job.trackKey || "") !== String(payload.trackKey || "")) return false;
   // Ignore the query string: CDN tokens usually change between attempts.
   if (urlPath(job.url) !== urlPath(payload.url)) return false;
   // The page URL keeps its query (e.g. watch?v=...), which often names the video.
@@ -452,7 +467,7 @@ async function reopenResumableJob(job, url, downloadMode) {
   const receivedFiles = [];
   let receivedBytes = 0;
   for (const name of await readdir(job.tempDir)) {
-    if (!safeBrowserFileName(name) || name === "input.m3u8") continue;
+    if (!safeBrowserFileName(name) || name === "input.m3u8" || name === "audio.m3u8") continue;
     const info = await stat(path.join(job.tempDir, name)).catch(() => null);
     if (!info?.isFile()) continue;
     receivedFiles.push(name);
@@ -467,6 +482,7 @@ async function reopenResumableJob(job, url, downloadMode) {
   job.finishedAt = null;
   job.resumable = false;
   job.localPlaylistPath = null;
+  job.localAudioPlaylistPath = null;
   job.receivedSegments = receivedFiles.filter((name) => /^seg-/i.test(name)).length;
   job.downloadedBytes = receivedBytes;
   job.lastProgressBytes = receivedBytes;
@@ -526,7 +542,10 @@ async function completeBrowserDownload(id, payload) {
 
   const playlistText = String(payload?.playlistText || "").replace(/^\uFEFF/, "");
   if (!playlistText.trimStart().startsWith("#EXTM3U")) return { ok: false, status: 400, error: "INVALID_PLAYLIST" };
-  if (playlistText.length > 20 * 1024 * 1024) return { ok: false, status: 413, error: "PLAYLIST_TOO_LARGE" };
+  // DASH jobs send the audio track as a second playlist.
+  const audioPlaylistText = String(payload?.audioPlaylistText || "").replace(/^﻿/, "");
+  if (audioPlaylistText && !audioPlaylistText.trimStart().startsWith("#EXTM3U")) return { ok: false, status: 400, error: "INVALID_PLAYLIST" };
+  if (playlistText.length + audioPlaylistText.length > 20 * 1024 * 1024) return { ok: false, status: 413, error: "PLAYLIST_TOO_LARGE" };
 
   if (Number.isInteger(job.totalSegments) && job.receivedSegments < job.totalSegments) {
     await failJob(job, "SEGMENTS_INCOMPLETE", `Expected ${job.totalSegments} segments but received ${job.receivedSegments}`);
@@ -539,6 +558,11 @@ async function completeBrowserDownload(id, payload) {
   // Keep job.url as the stream URL: a resume after a restart mid-mux still
   // needs it to match the stream and refetch the playlist.
   job.localPlaylistPath = playlistPath;
+  job.localAudioPlaylistPath = null;
+  if (audioPlaylistText) {
+    job.localAudioPlaylistPath = path.join(job.tempDir, "audio.m3u8");
+    await writeFile(job.localAudioPlaylistPath, audioPlaylistText, "utf8");
+  }
   job.status = "queued";
   job.progressText = "Muxing local segments";
   job.lastActivityAt = Date.now();
@@ -620,6 +644,68 @@ async function inspectForUi(payload) {
   };
 }
 
+// Direct files and single-quality HLS playlists do not state a resolution,
+// so read it from the first video stream. Results (including failures) are
+// cached so reopening the popup does not start ffprobe again.
+const qualityProbeCache = new Map();
+
+async function probeQualityForUi(payload) {
+  const now = Date.now();
+  const url = validateUrl(payload?.url);
+  if (!url) return { ok: false, status: 400, error: "INVALID_URL" };
+  const cached = qualityProbeCache.get(url);
+  if (cached && now - cached.at < QUALITY_PROBE_CACHE_MS) return cached.result;
+
+  const size = await runFfprobe(url, normalizeHeaders(payload.headers || []), payload.kind === "hls");
+  const shortSide = size ? Math.min(size.width, size.height) : 0;
+  const result = { ok: true, width: size?.width || null, height: size?.height || null, quality: shortSide ? `${shortSide}p` : "" };
+  for (const [key, entry] of qualityProbeCache) {
+    if (now - entry.at >= QUALITY_PROBE_CACHE_MS) qualityProbeCache.delete(key);
+  }
+  qualityProbeCache.set(url, { at: now, result });
+  return result;
+}
+
+// Resolves to { width, height } of the first video stream, or null.
+function runFfprobe(url, headers, isPlaylist) {
+  const args = ["-v", "error", "-rw_timeout", "5000000", "-protocol_whitelist", "file,http,https,tcp,tls,crypto"];
+  const userAgent = headers.find((header) => header.name.toLowerCase() === "user-agent")?.value;
+  const headerText = headers
+    .filter((header) => header.name.toLowerCase() !== "user-agent")
+    .map((header) => `${header.name}: ${header.value}`)
+    .join("\r\n");
+  if (userAgent) args.push("-user_agent", userAgent);
+  if (headerText) args.push("-headers", `${headerText}\r\n`);
+  if (isPlaylist) args.push("-allowed_extensions", "ALL", "-allowed_segment_extensions", "ALL", "-extension_picky", "0");
+  args.push("-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "json", url);
+
+  return new Promise((resolve) => {
+    let output = "";
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    const child = spawn("ffprobe", args, { windowsHide: true });
+    const timer = setTimeout(() => {
+      child.kill();
+      finish(null);
+    }, QUALITY_PROBE_TIMEOUT_MS);
+    child.stdout.on("data", (chunk) => { output += chunk; });
+    child.on("error", () => finish(null)); // ffprobe missing
+    child.on("close", () => {
+      try {
+        const stream = JSON.parse(output).streams?.[0];
+        finish(stream?.width > 0 && stream?.height > 0 ? { width: stream.width, height: stream.height } : null);
+      } catch {
+        finish(null);
+      }
+    });
+  });
+}
+
 async function inspectManifest(url, kind, headers) {
   try {
     const response = await fetch(url, {
@@ -680,11 +766,12 @@ function runFfmpeg(job, headers) {
     );
   }
 
-  args.push(
+  const playlistInputFlags = [
     "-allowed_extensions", "ALL",
     "-allowed_segment_extensions", "ALL",
     "-extension_picky", "0"
-  );
+  ];
+  args.push(...playlistInputFlags);
 
   const userAgent = headers.find((header) => header.name.toLowerCase() === "user-agent")?.value;
   const headerText = headers
@@ -694,7 +781,11 @@ function runFfmpeg(job, headers) {
 
   if (!isLocal && userAgent) args.push("-user_agent", userAgent);
   if (!isLocal && headerText) args.push("-headers", `${headerText}\r\n`);
-  args.push("-i", isLocal ? job.localPlaylistPath : job.url, "-map", "0:v:0?", "-map", "0:a:0?", "-c", "copy", "-bsf:a", "aac_adtstoasc", "-movflags", "+faststart", job.outputPath);
+  args.push("-i", isLocal ? job.localPlaylistPath : job.url);
+  // Input options apply per input, so the second playlist repeats them.
+  const audioInput = isLocal && job.localAudioPlaylistPath;
+  if (audioInput) args.push(...playlistInputFlags, "-i", job.localAudioPlaylistPath);
+  args.push("-map", "0:v:0?", "-map", audioInput ? "1:a:0" : "0:a:0?", "-c", "copy", "-bsf:a", "aac_adtstoasc", "-movflags", "+faststart", job.outputPath);
   job.ffmpegArgs = redactArgs(args);
 
   job.status = "running";

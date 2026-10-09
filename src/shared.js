@@ -287,26 +287,8 @@ export function inferQualityLabel(value = "") {
   return "";
 }
 
-export function parseDashManifest(text = "", manifestUrl = "") {
-  const hasDrm = /<ContentProtection\b/i.test(text);
-  const variants = [];
-  const representationPattern = /<Representation\b([^>]*)>/gi;
-  let match;
-
-  while ((match = representationPattern.exec(text))) {
-    const attrs = match[1] || "";
-    const bandwidth = readXmlAttribute(attrs, "bandwidth");
-    const width = readXmlAttribute(attrs, "width");
-    const height = readXmlAttribute(attrs, "height");
-    variants.push({
-      url: manifestUrl,
-      quality: qualityLabel(width && height ? `${width}x${height}` : "", bandwidth),
-      bandwidth: bandwidth ? Number(bandwidth) : null
-    });
-  }
-
-  return { hasDrm, variants };
-}
+// Video qualities only (audio tracks are paired automatically), best first.
+export { listDashVariants as parseDashManifest } from "./dash-browser.js";
 
 function readAttribute(line, key) {
   const match = line.match(new RegExp(`${key}=([^,]+)`, "i"));
@@ -319,11 +301,6 @@ function isProtectedHlsKey(line) {
     /URI=["']?skd:\/\//i.test(line);
 }
 
-function readXmlAttribute(attrs, key) {
-  const match = attrs.match(new RegExp(`(?:^|\\s)${key}=["']([^"']+)["']`, "i"));
-  return match?.[1] || "";
-}
-
 function bitrateLabel(value) {
   const bitrate = Number(value);
   return Number.isFinite(bitrate) && bitrate > 0 ? `${Math.round(bitrate / 1000)} kbps` : "";
@@ -333,6 +310,22 @@ function qualityLabel(resolution, bandwidth) {
   const match = String(resolution || "").match(/(\d{2,5})x(\d{2,5})/i);
   if (match?.[2]) return `${match[2]}p`;
   return bitrateLabel(bandwidth);
+}
+
+// Popup order: sharpest first, then largest. A stream counts as its best
+// variant; items with no known quality or size go last.
+export function sortMediaByQuality(items = []) {
+  const rank = (item) => {
+    const options = [item, ...(item.variants || [])];
+    return {
+      height: Math.max(0, ...options.map((option) => Number(String(option.quality || "").match(/(\d+)p/)?.[1]) || 0)),
+      bytes: Math.max(0, ...options.map((option) => option.size || option.estimatedSize || 0))
+    };
+  };
+  return items
+    .map((item) => ({ item, ...rank(item) }))
+    .sort((a, b) => b.height - a.height || b.bytes - a.bytes)
+    .map((entry) => entry.item);
 }
 
 export function estimateBytes(durationSeconds, bandwidth) {

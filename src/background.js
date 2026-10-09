@@ -4,7 +4,7 @@ import {
   normalizeMediaItem, parseDashManifest, parseHlsManifest, sanitizeFilename
 } from "./shared.js";
 
-console.log("[ds] Service worker started v1.9.0");
+console.log("[ds] Service worker started v1.10.0");
 
 const SETTINGS_KEY = "settings";
 const TAB_MEDIA_PREFIX = "tabMedia:";
@@ -313,7 +313,43 @@ async function enrichMediaForTab(tabId) {
   });
 }
 
+const AUDIO_EXTENSIONS = new Set(["mp3", "m4a", "aac", "flac", "ogg", "wav"]);
+
 async function enrichMediaItem(item) {
+  const enriched = await enrichMediaDetails(item);
+  return needsQualityProbe(enriched) ? probeMediaQuality(enriched) : enriched;
+}
+
+// Direct files and single-quality HLS playlists carry no resolution, so the
+// helper reads it from the video stream itself.
+function needsQualityProbe(item) {
+  if (item.quality || item.isProtected || item.variants?.length) return false;
+  if (item.kind === "hls") return true;
+  return item.kind === "direct" && !AUDIO_EXTENSIONS.has(item.extension);
+}
+
+async function probeMediaQuality(item) {
+  try {
+    const response = await fetch(`${HELPER_URL}/probe-quality`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: item.url, kind: item.kind, headers: helperHeadersForMedia(item) })
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || !payload.quality) return item;
+    // A playlist's size estimate needs a bitrate; the quality now gives one.
+    const estimatedSize = item.size || item.estimatedSize
+      ? null
+      : estimateBytes(item.durationSeconds, fallbackBandwidthForQuality(payload.quality));
+    return estimatedSize
+      ? { ...item, quality: payload.quality, estimatedSize, sizeSource: "estimated" }
+      : { ...item, quality: payload.quality };
+  } catch {
+    return item;
+  }
+}
+
+async function enrichMediaDetails(item) {
   if (item.kind === "direct" && !item.size) return enrichDirectMediaSize(item);
   if (item.kind !== "hls" && item.kind !== "dash") return item;
   if ((item.variants?.length || 0) && (item.estimatedSize || item.size)) return item;
@@ -438,13 +474,8 @@ async function startDownload(item, variant = null) {
 }
 
 async function startStreamDownload(media, variant, { allowHelperFallback = true } = {}) {
-  // The browser paths only speak HLS (m3u8). DASH downloads go straight to
-  // the local helper, which is the only DASH-capable path.
-  if (media.kind === "dash") {
-    console.warn("[ds] startStreamDownload DASH → helper");
-    return startHelperDownload(media, variant);
-  }
-
+  // HLS and DASH share both browser paths. MPD layouts the browser loop does
+  // not handle (live, multi-period, WebM) end up in the helper fallback.
   // Extension mode first: the offscreen document fetches the segments, so
   // the download survives the source tab being frozen, discarded or closed.
   const extension = await startOffscreenDownload(media, variant);
@@ -560,17 +591,20 @@ async function resumeHelperJob(jobId) {
   const job = result.job;
   if (!job.resumable || job.inputMode !== "browser") return { ok: false, error: "JOB_NOT_RESUMABLE" };
 
+  const isDash = job.streamKind === "dash";
   const media = normalizeMediaItem({
     url: job.url,
-    kind: "hls",
-    extension: "m3u8",
+    kind: isDash ? "dash" : "hls",
+    extension: isDash ? "mpd" : "m3u8",
     sourcePageUrl: job.sourcePageUrl || "",
     headers: cachedHeadersForUrl(job.url)
   });
   if (!media) return { ok: false, error: "JOB_NOT_RESUMABLE" };
+  // One MPD serves every quality; ask for the one the job started with.
+  const variant = isDash && job.quality ? { url: job.url, quality: job.quality } : null;
 
   // Never fall back to a fresh helper-direct job: it would not resume.
-  const started = await startStreamDownload(media, null, { allowHelperFallback: false });
+  const started = await startStreamDownload(media, variant, { allowHelperFallback: false });
   if (started.ok || started.error === "DRM_PROTECTED_UNSUPPORTED" || started.error === "HELPER_OFFLINE") return started;
 
   // Usually an expired CDN token or a page-only site. Clicking download on

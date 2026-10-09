@@ -227,6 +227,18 @@ it("POST /inspect rejects an HTML login page as a direct media size", async () =
 
 // ─── Error Handling ───
 
+it("POST /probe-quality rejects a non-http URL", async () => {
+  const res = await fetchJson("/probe-quality", { method: "POST", body: { url: "file:///etc/passwd" } });
+  assert.equal(res.status, 400);
+  assert.equal(res.body.error, "INVALID_URL");
+});
+
+it("POST /probe-quality answers with an empty quality when the stream cannot be read", async () => {
+  const res = await fetchJson("/probe-quality", { method: "POST", body: { url: "http://127.0.0.1:1/missing.mp4", kind: "direct" } });
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.body, { ok: true, width: null, height: null, quality: "" });
+});
+
 it("POST /download with missing URL returns 400", async () => {
   const res = await fetchJson("/download", { method: "POST", body: {} });
   assert.equal(res.status, 400);
@@ -966,6 +978,59 @@ it("a browser job keeps its stream URL while muxing, so a restart mid-mux can st
   assert.equal(complete.status, 202);
   assert.equal(complete.body.job.url, "https://cdn.example.com/resume/mux.m3u8");
   assert.ok(complete.body.job.localPlaylistPath.endsWith("input.m3u8"));
+});
+
+it("a DASH job remembers its tracks and resumes only the same tracks", async () => {
+  const body = {
+    url: "https://cdn.example.com/resume/dash.mpd",
+    kind: "dash",
+    quality: "720p",
+    trackKey: "v720|a128",
+    title: "Resume Dash",
+    totalSegments: 4,
+    sourcePageUrl: "https://site.example/watch/dash"
+  };
+  const id = await failedBrowserJob(body);
+  const job = jobs.get(id);
+  assert.equal(job.streamKind, "dash");
+  assert.equal(job.quality, "720p");
+
+  const otherQuality = await startBrowserJob({ ...body, quality: "360p", trackKey: "v360|a128" });
+  assert.equal(otherQuality.body.resumed, false);
+  await fetchJson(`/jobs/${encodeURIComponent(otherQuality.body.job.id)}/cancel`, { method: "POST" });
+
+  const same = await startBrowserJob(body);
+  assert.equal(same.body.resumed, true);
+  assert.equal(same.body.job.id, id);
+});
+
+it("a DASH job muxes its audio playlist as a second ffmpeg input", async () => {
+  const start = await startBrowserJob({
+    url: "https://cdn.example.com/dash/mux.mpd",
+    kind: "dash",
+    title: "Dash Mux",
+    totalSegments: 2,
+    sourcePageUrl: "https://site.example/watch/dash-mux"
+  });
+  const id = start.body.job.id;
+  await uploadSegment(id, "seg-v-000000.m4s");
+  await uploadSegment(id, "seg-a-000000.m4s");
+
+  const complete = await fetchJson(`/browser-downloads/${encodeURIComponent(id)}/complete`, {
+    method: "POST",
+    body: {
+      playlistText: "#EXTM3U\n#EXTINF:4,\nseg-v-000000.m4s\n#EXT-X-ENDLIST",
+      audioPlaylistText: "#EXTM3U\n#EXTINF:4,\nseg-a-000000.m4s\n#EXT-X-ENDLIST"
+    }
+  });
+
+  assert.equal(complete.status, 202);
+  const job = jobs.get(id);
+  assert.ok(job.localAudioPlaylistPath.endsWith("audio.m3u8"));
+  assert.match(await readFile(job.localAudioPlaylistPath, "utf8"), /seg-a-000000\.m4s/);
+  const inputs = job.ffmpegArgs.filter((arg, i) => job.ffmpegArgs[i - 1] === "-i");
+  assert.deepEqual(inputs, [job.localPlaylistPath, job.localAudioPlaylistPath]);
+  assert.ok(job.ffmpegArgs.join(" ").includes("-map 0:v:0? -map 1:a:0"));
 });
 
 it("resumable temp files expire after the retention window", async () => {

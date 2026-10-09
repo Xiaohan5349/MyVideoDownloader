@@ -6,7 +6,7 @@ A Chrome MV3 extension for downloading HLS/DASH streaming videos and direct medi
 
 ## How It Works
 
-The extension detects media on pages you visit and sends download requests to a local Node.js helper server. For HLS (`.m3u8`) streams, the browser fetches the segments and the helper remuxes them with `ffmpeg`: first from a background offscreen document that replays the page's Referer, Origin and Cookie, and from the page itself if the video server refuses that. For DASH (`.mpd`) streams, the helper invokes `ffmpeg` to download and remux the video. For direct files (`.mp4`, `.webm`, etc.), it uses Chrome's built-in download API.
+The extension detects media on pages you visit and sends download requests to a local Node.js helper server. For HLS (`.m3u8`) and DASH (`.mpd`) streams, the browser fetches the segments and the helper remuxes them with `ffmpeg`: first from a background offscreen document that replays the page's Referer, Origin and Cookie, and from the page itself if the video server refuses that. DASH streams pair the chosen video quality with an audio track; MPDs the browser cannot handle (live, multi-period, WebM-only) fall back to `ffmpeg` in the helper. For direct files (`.mp4`, `.webm`, etc.), it uses Chrome's built-in download API.
 
 ## Requirements
 
@@ -14,7 +14,7 @@ The extension detects media on pages you visit and sends download requests to a 
 |-----------|-------------|
 | Browser | Chrome or Chromium-based (Edge, Brave, Arc) |
 | Runtime | [Node.js](https://nodejs.org/) 20+ for the helper |
-| FFmpeg | [ffmpeg](https://ffmpeg.org/download.html) installed and on your PATH |
+| FFmpeg | [ffmpeg](https://ffmpeg.org/download.html) installed and on your PATH (`ffprobe`, which ships with it, reads the resolution of unlabelled videos) |
 
 ## Installation
 
@@ -52,10 +52,10 @@ npm run helper:autostart:remove   # Disable auto-start
 
 1. Browse to a page with video content
 2. Click the DS Video Downloader icon in your toolbar
-3. The popup lists all detected media — click a file to download it
-4. For HLS streams, pick a quality variant (1080p, 720p, etc.)
+3. The popup lists all detected media, sharpest first and then largest, with quality (e.g. 1080p) and size; "scanning…" shows while the list is still loading. Click a file to download it
+4. For HLS and DASH streams, pick a quality variant (1080p, 720p, etc.)
 5. Monitor progress on the helper dashboard or in the popup
-6. HLS downloads keep running when you switch tabs or close the video page. If one stops (you pressed Stop, stalled, refused by the server, helper restarted), click **Resume** on the job in the popup, or download the same video again within 24 hours, to continue from the segments already downloaded
+6. HLS and DASH downloads keep running when you switch tabs or close the video page. If one stops (you pressed Stop, stalled, refused by the server, helper restarted), click **Resume** on the job in the popup, or download the same video again within 24 hours, to continue from the segments already downloaded
 
 ## Configuration
 
@@ -73,7 +73,7 @@ Default: `helper/downloads/` in the project directory.
 
 - Direct media: `.mp4`, `.webm`, `.mkv`, `.avi`, `.mov`, `.mp3`, `.m4a`, `.flac`, and more
 - HLS streams: `.m3u8` playlists with variant selection and resumable downloads
-- DASH streams: `.mpd` manifests
+- DASH streams: `.mpd` manifests (SegmentTemplate, SegmentList, SegmentBase) with quality selection, automatic audio pairing and resumable downloads
 - Automatic media detection from `<video>`, `<audio>`, `<source>`, and `<a>` elements
 - Cookie/header forwarding for authenticated streams
 

@@ -11,7 +11,8 @@ import {
   normalizeMediaItem,
   parseDashManifest,
   parseHlsManifest,
-  sanitizeFilename
+  sanitizeFilename,
+  sortMediaByQuality
 } from "../src/shared.js";
 
 test("classifyMedia detects direct URLs and manifests", () => {
@@ -249,4 +250,18 @@ test("jobProgressFraction caps running jobs below 100% and returns null when unk
   assert.equal(jobProgressFraction({ status: "running", downloadedBytes: 100 }), null);
   assert.equal(jobProgressFraction({ status: "queued" }), null);
   assert.equal(jobProgressFraction(), null);
+});
+
+test("sortMediaByQuality puts the sharpest first, then the largest", () => {
+  const items = [
+    { id: "unknown", quality: "", size: 900 },
+    { id: "720-small", quality: "720p", size: 100 },
+    { id: "1080-est", quality: "1080p", estimatedSize: 300 },
+    { id: "720-big", quality: "720p", size: 500 },
+    { id: "master", quality: "", variants: [{ quality: "360p" }, { quality: "1080p", estimatedSize: 800 }] },
+    { id: "nothing" }
+  ];
+  assert.deepEqual(sortMediaByQuality(items).map((item) => item.id), [
+    "master", "1080-est", "720-big", "720-small", "unknown", "nothing"
+  ]);
 });

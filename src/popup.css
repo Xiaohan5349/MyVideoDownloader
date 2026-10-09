@@ -2,7 +2,8 @@
    Shared by popup.html and options.html. System fonts only (works offline).
    Light/dark follows the OS via prefers-color-scheme; both sets use the same token names.
    Motion animates transform/opacity only; the single infinite animation is the
-   indeterminate progress bar, which exists only while a job is queued or running. */
+   indeterminate progress bar, which exists only while a job is queued or running
+   or the popup is scanning the page. */
 
 :root {
   color-scheme: dark;
@@ -404,6 +405,24 @@ h1 {
 
 .count-tile {
   grid-column: span 2;
+  overflow: hidden;
+}
+
+/* Scan in progress: blue label plus the indeterminate bar along the tile's bottom edge. */
+.is-scanning .count-tile .tile-text {
+  color: var(--blue);
+}
+
+.is-scanning .count-tile::after {
+  content: "";
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  width: 25%;
+  height: 3px;
+  border-radius: 3px;
+  background: var(--blue);
+  animation: indeterminate 1.6s ease-in-out infinite;
 }
 
 .filter-tile {

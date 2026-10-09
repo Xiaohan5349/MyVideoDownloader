@@ -343,5 +343,8 @@
   },
   "labelDetected": {
     "message": "detected"
+  },
+  "labelScanning": {
+    "message": "scanning…"
   }
 }

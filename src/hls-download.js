@@ -1,4 +1,4 @@
-// Browser-side HLS downloader shared by the offscreen document (extension
+// Browser-side HLS/DASH downloader shared by the offscreen document (extension
 // mode) and the page content script (page mode). It fetches segments with
 // whatever network identity the importing context has and streams them to
 // the local helper, which muxes them with ffmpeg.
@@ -7,6 +7,12 @@ import {
   buildLocalHlsPlaylist,
   parseHlsMediaPlaylist
 } from "./hls-browser.js";
+import {
+  buildDashAssetPlan,
+  buildDashTracks,
+  expandSegmentBase,
+  isDashManifest
+} from "./dash-browser.js";
 
 export const SEGMENT_FETCH_TIMEOUT_MS = 30_000;
 export const SEGMENT_FETCH_RETRIES = 5;
@@ -69,22 +75,10 @@ export async function startHlsDownload(options) {
   };
 
   await o.allowUrls([o.manifestUrl]);
-  const masterText = await fetchPlaylist(net, o.manifestUrl, o.strict);
-  const master = parseHlsMaster(masterText, o.manifestUrl);
-  if (master.hasDrm) throw new Error("DRM_PROTECTED_UNSUPPORTED");
-
-  let variantUrl = o.manifestUrl;
-  let mediaText = masterText;
-  if (master.variants.length) {
-    variantUrl = pickVariant(master.variants, o.quality).url;
-    await o.allowUrls([variantUrl]);
-    mediaText = await fetchPlaylist(net, variantUrl, o.strict);
-  }
-
-  const mediaPlaylist = parseHlsMediaPlaylist(mediaText, variantUrl);
-  if (mediaPlaylist.hasDrm) throw new Error("DRM_PROTECTED_UNSUPPORTED");
-  if (!mediaPlaylist.segments.length) throw new Error("HLS_NO_SEGMENTS");
-  const plan = buildHlsAssetPlan(mediaPlaylist);
+  const manifestText = await fetchPlaylist(net, o.manifestUrl, o.strict);
+  const { plan, start, completion } = isDashManifest(manifestText)
+    ? await prepareDash(net, o, manifestText)
+    : await prepareHls(net, o, manifestText);
   await o.allowUrls([...new Set(plan.assets.map((asset) => asset.url))]);
 
   // Encrypted segments are ciphertext, so only plain streams can be checked.
@@ -101,10 +95,9 @@ export async function startHlsDownload(options) {
     method: "POST",
     headers: { "Content-Type": "application/json", ...o.authHeaders },
     body: JSON.stringify({
-      url: variantUrl,
+      ...start,
       title: o.title || "video",
       totalSegments: plan.segmentAssetCount,
-      durationSeconds: mediaPlaylist.durationSeconds,
       sourcePageUrl: o.sourcePageUrl,
       downloadMode: o.downloadMode
     })
@@ -117,8 +110,7 @@ export async function startHlsDownload(options) {
     net,
     job: startPayload.job,
     plan,
-    mediaText,
-    variantUrl,
+    completion,
     prefetched,
     validate,
     alreadyReceived: new Set(startPayload.receivedFiles || [])
@@ -215,11 +207,10 @@ async function runDownload(ctx) {
     return { status: "failed", error };
   }
 
-  const localPlaylist = buildLocalHlsPlaylist(ctx.mediaText, ctx.variantUrl, plan.assetNameByUrl);
   const completeRes = await net.fetchImpl(`${o.helperUrl}/browser-downloads/${encodeURIComponent(job.id)}/complete`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...o.authHeaders },
-    body: JSON.stringify({ playlistText: localPlaylist })
+    body: JSON.stringify(ctx.completion)
   });
   if (!completeRes.ok) {
     const completePayload = await completeRes.json().catch(() => ({}));
@@ -232,6 +223,55 @@ async function runDownload(ctx) {
     return { status: "failed", error };
   }
   return { status: "completed" };
+}
+
+// Each prepare step returns the files to fetch (plan), the stream fields for
+// /browser-downloads/start, and the /complete body with the local playlists.
+async function prepareHls(net, o, masterText) {
+  const master = parseHlsMaster(masterText, o.manifestUrl);
+  if (master.hasDrm) throw new Error("DRM_PROTECTED_UNSUPPORTED");
+
+  let variantUrl = o.manifestUrl;
+  let mediaText = masterText;
+  if (master.variants.length) {
+    variantUrl = pickVariant(master.variants, o.quality).url;
+    await o.allowUrls([variantUrl]);
+    mediaText = await fetchPlaylist(net, variantUrl, o.strict);
+  }
+
+  const mediaPlaylist = parseHlsMediaPlaylist(mediaText, variantUrl);
+  if (mediaPlaylist.hasDrm) throw new Error("DRM_PROTECTED_UNSUPPORTED");
+  if (!mediaPlaylist.segments.length) throw new Error("HLS_NO_SEGMENTS");
+  const plan = buildHlsAssetPlan(mediaPlaylist);
+  return {
+    plan,
+    start: { url: variantUrl, durationSeconds: mediaPlaylist.durationSeconds },
+    completion: { playlistText: buildLocalHlsPlaylist(mediaText, variantUrl, plan.assetNameByUrl) }
+  };
+}
+
+async function prepareDash(net, o, mpdText) {
+  const dash = buildDashTracks(mpdText, o.manifestUrl, o.quality);
+  const indexed = dash.tracks.filter((track) => track.segmentBase);
+  if (indexed.length) {
+    await o.allowUrls(indexed.map((track) => track.segmentBase.url));
+    await expandSegmentBase(dash.tracks, (url, byteRange) => fetchSegment(net, { url, byteRange }, { ...o, validate: false }));
+  }
+  const plan = buildDashAssetPlan(dash.tracks);
+  return {
+    plan,
+    start: {
+      url: o.manifestUrl,
+      kind: "dash",
+      quality: dash.quality,
+      trackKey: dash.trackKey,
+      durationSeconds: dash.durationSeconds
+    },
+    completion: {
+      playlistText: plan.playlists.video || plan.playlists.audio,
+      audioPlaylistText: plan.playlists.video ? plan.playlists.audio || "" : ""
+    }
+  };
 }
 
 function reportFailure({ o, net, job }, error) {
@@ -249,7 +289,7 @@ async function fetchPlaylist(net, url, strict) {
     throw new Error(response.status === 403 ? "SERVER_PROTECTED_UNSUPPORTED" : `FETCH_${response.status}`);
   }
   const text = (await response.text()).replace(/^﻿/, "");
-  if (strict && !text.trimStart().startsWith("#EXTM3U")) throw new BlockedError("NOT_A_PLAYLIST");
+  if (strict && !text.trimStart().startsWith("#EXTM3U") && !isDashManifest(text)) throw new BlockedError("NOT_A_PLAYLIST");
   return text;
 }
 
