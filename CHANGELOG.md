@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- A file's size could show as unknown after the scan finished, and appear only when the popup was opened again. The resolution probe ran after the size probe and shared its 8-second budget, so a slow probe discarded the size as well. Both probes now run in parallel, and a slow resolution probe only drops the resolution.
+
 ## v1.10.0 - 2026-10-09
 
 ### Added

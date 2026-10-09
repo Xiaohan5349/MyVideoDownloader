@@ -330,6 +330,47 @@ test("MEDIA_GET_FOR_TAB asks the helper for the resolution of unlabeled direct m
   assert.equal(probes.length, 1);
 });
 
+test("a resolution probe that never answers does not cost the size", async (t) => {
+  await mock.storage.local.set({
+    "tabMedia:10": [{
+      id: "https://site.example::https://cdn.example.com/slow.mp4",
+      url: "https://cdn.example.com/slow.mp4",
+      sourcePageUrl: "https://site.example",
+      pageUrl: "https://site.example",
+      title: "Slow",
+      extension: "mp4",
+      kind: "direct",
+      tabId: 10,
+      frameId: 0,
+      size: null,
+      quality: "",
+      detectedAt: 5,
+      headers: [],
+      variants: []
+    }]
+  });
+  mock.tabs.sendMessageResult = { ok: true, size: 456789012 };
+  let probeStarted = false;
+  globalThis.fetch = async (url) => {
+    if (String(url).endsWith("/probe-quality")) {
+      probeStarted = true;
+      return new Promise(() => {}); // ffprobe hangs
+    }
+    return Response.json({ ok: true, totalBytes: null });
+  };
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+
+  const pending = sendRuntimeMessage({ type: "media:getForTab", tabId: 10 });
+  for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
+  // Probed in parallel with the size, not after it.
+  assert.equal(probeStarted, true);
+  t.mock.timers.tick(8000);
+  const response = await pending;
+
+  assert.equal(response.items[0].size, 456789012);
+  assert.equal(response.items[0].quality, "");
+});
+
 test("a probed HLS playlist also gets a size estimate from its quality", async () => {
   await mock.storage.local.set({
     "tabMedia:10": [{

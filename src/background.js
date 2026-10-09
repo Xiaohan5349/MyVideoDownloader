@@ -296,9 +296,8 @@ function withTimeout(promise, timeoutMs, fallback) {
 
 async function enrichMediaForTab(tabId) {
   const snapshot = await getMedia(tabId);
-  const enriched = await Promise.all(snapshot.map((item) =>
-    withTimeout(enrichMediaItem(item), ENRICH_ITEM_TIMEOUT_MS, item)
-  ));
+  // enrichMediaItem keeps itself within ENRICH_ITEM_TIMEOUT_MS.
+  const enriched = await Promise.all(snapshot.map((item) => enrichMediaItem(item)));
 
   // Manifest inspection happens outside the write queue so new detections
   // can keep flowing. Only the final merge + write is serialized.
@@ -315,9 +314,17 @@ async function enrichMediaForTab(tabId) {
 
 const AUDIO_EXTENSIONS = new Set(["mp3", "m4a", "aac", "flac", "ogg", "wav"]);
 
+// Size/manifest details and the resolution probe each get their own timeout,
+// so a slow ffprobe never throws away a size that is already known.
 async function enrichMediaItem(item) {
-  const enriched = await enrichMediaDetails(item);
-  return needsQualityProbe(enriched) ? probeMediaQuality(enriched) : enriched;
+  const started = Date.now();
+  // A direct file can be probed at once; a playlist first has to show it has no variants.
+  const earlyProbe = item.kind === "direct" && needsQualityProbe(item) ? probeMediaQuality(item) : null;
+  const details = await withTimeout(enrichMediaDetails(item), ENRICH_ITEM_TIMEOUT_MS, item);
+  const probe = earlyProbe || (needsQualityProbe(details) ? probeMediaQuality(details) : null);
+  if (!probe) return details;
+  const remainingMs = Math.max(0, ENRICH_ITEM_TIMEOUT_MS - (Date.now() - started));
+  return withQuality(details, await withTimeout(probe, remainingMs, ""));
 }
 
 // Direct files and single-quality HLS playlists carry no resolution, so the
@@ -328,6 +335,7 @@ function needsQualityProbe(item) {
   return item.kind === "direct" && !AUDIO_EXTENSIONS.has(item.extension);
 }
 
+// Resolves to a label like "1080p", or "" when the helper cannot read one.
 async function probeMediaQuality(item) {
   try {
     const response = await fetch(`${HELPER_URL}/probe-quality`, {
@@ -336,17 +344,21 @@ async function probeMediaQuality(item) {
       body: JSON.stringify({ url: item.url, kind: item.kind, headers: helperHeadersForMedia(item) })
     });
     const payload = await response.json().catch(() => ({}));
-    if (!response.ok || !payload.quality) return item;
-    // A playlist's size estimate needs a bitrate; the quality now gives one.
-    const estimatedSize = item.size || item.estimatedSize
-      ? null
-      : estimateBytes(item.durationSeconds, fallbackBandwidthForQuality(payload.quality));
-    return estimatedSize
-      ? { ...item, quality: payload.quality, estimatedSize, sizeSource: "estimated" }
-      : { ...item, quality: payload.quality };
+    return response.ok && payload.quality ? payload.quality : "";
   } catch {
-    return item;
+    return "";
   }
+}
+
+function withQuality(item, quality) {
+  if (!quality || item.quality) return item;
+  // A playlist's size estimate needs a bitrate; the quality now gives one.
+  const estimatedSize = item.size || item.estimatedSize
+    ? null
+    : estimateBytes(item.durationSeconds, fallbackBandwidthForQuality(quality));
+  return estimatedSize
+    ? { ...item, quality, estimatedSize, sizeSource: "estimated" }
+    : { ...item, quality };
 }
 
 async function enrichMediaDetails(item) {
