@@ -112,7 +112,8 @@ async function handleMessage(message, sender) {
     const tabId = message.tabId ?? sender.tab?.id;
     if (typeof tabId !== "number") return { ok: false, error: "TAB_ID_MISSING" };
     const settings = await getSettings();
-    const items = await enrichMediaForTab(tabId);
+    // enrich: false lists what is stored, for the popup's live refresh.
+    const items = message.enrich === false ? await getMedia(tabId) : await enrichMediaForTab(tabId);
     const tab = await chrome.tabs.get(tabId).catch(() => null);
     return {
       ok: true,
@@ -120,8 +121,16 @@ async function handleMessage(message, sender) {
     };
   }
 
+  // Media that showed up while the popup was open: probe without waiting;
+  // the results arrive through storage.
+  if (message.type === MESSAGE.MEDIA_ENRICH) {
+    if (typeof message.tabId !== "number") return { ok: false, error: "TAB_ID_MISSING" };
+    await enrichMediaForTab(message.tabId, { urls: message.urls || [], wait: false });
+    return { ok: true };
+  }
+
   if (message.type === MESSAGE.DOWNLOADS_START) {
-    return startDownload(message.item, message.variant);
+    return startDownload(message.item, message.variant, message.output);
   }
 
   // The page hosting a download loop is going away (navigation, reload,
@@ -157,7 +166,12 @@ async function handleMessage(message, sender) {
   if (message.type === MESSAGE.DOWNLOADS_JOBS_CLEAR_MISSING) return clearMissingHelperJobs();
   if (message.type === MESSAGE.HELPER_STATUS_GET) return getHelperStatus();
   if (message.type === MESSAGE.HELPER_SETTINGS_UPDATE) return updateHelperSettings(message.settings || {});
-  if (message.type === MESSAGE.HELPER_FOLDER_PICK) return pickHelperFolder();
+  if (message.type === MESSAGE.HELPER_FOLDER_PICK) {
+    const { reopenPopup, ...options } = message.options || {};
+    const result = await pickHelperFolder(options);
+    if (reopenPopup) await reopenDownloadDialog(result);
+    return result;
+  }
   if (message.type === MESSAGE.STREAM_VARIANTS_GET) return getStreamVariants(message.item);
   if (message.type === MESSAGE.SETTINGS_GET) return { ok: true, settings: await getSettings() };
 
@@ -284,7 +298,13 @@ async function getMedia(tabId) {
 // We CANNOT fetch from background (Cloudflare blocks non-page contexts).
 // ALL external fetches go through the content script.
 
-const ENRICH_ITEM_TIMEOUT_MS = 8000;
+// How long the popup's scan waits for sizes and resolutions.
+const ENRICH_WAIT_MS = 8000;
+// How long an item's probes may keep running after the scan stopped waiting;
+// their results are still stored, and the open popup updates from storage.
+const ENRICH_BACKGROUND_MS = 30_000;
+// `${tabId}|${url}` -> running enrichment, so overlapping scans share it.
+const enrichmentsInFlight = new Map();
 
 function withTimeout(promise, timeoutMs, fallback) {
   let timer;
@@ -294,21 +314,48 @@ function withTimeout(promise, timeoutMs, fallback) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
-async function enrichMediaForTab(tabId) {
+// urls: only these items (null = all). wait: false starts the probes and
+// returns at once.
+async function enrichMediaForTab(tabId, { urls = null, wait = true } = {}) {
   const snapshot = await getMedia(tabId);
-  // enrichMediaItem keeps itself within ENRICH_ITEM_TIMEOUT_MS.
-  const enriched = await Promise.all(snapshot.map((item) => enrichMediaItem(item)));
+  const targets = urls ? snapshot.filter((item) => urls.includes(item.url)) : snapshot;
+  const tasks = targets.map((item) => enrichAndStore(tabId, item));
+  if (wait) await withTimeout(Promise.all(tasks), ENRICH_WAIT_MS, null);
+  const latest = await getMedia(tabId);
+  // Media detected while the scan waited is in the answer but was not in the
+  // snapshot: probe it too, its results arrive through storage.
+  if (!urls) {
+    const probed = new Set(snapshot.map((item) => item.url));
+    for (const item of latest) {
+      if (!probed.has(item.url)) enrichAndStore(tabId, item);
+    }
+  }
+  return latest;
+}
 
-  // Manifest inspection happens outside the write queue so new detections
-  // can keep flowing. Only the final merge + write is serialized.
-  const tab = await chrome.tabs.get(tabId).catch(() => null);
-  const validEnriched = enriched.filter((item) => mediaMatchesTab(item, tab?.url || ""));
+// Each result is written as soon as it is known: the size first, then the
+// resolution, so a slow probe never hides a size that already arrived.
+function enrichAndStore(tabId, item) {
+  const key = `${tabId}|${item.url}`;
+  if (!enrichmentsInFlight.has(key)) {
+    const store = (enriched) => (enriched !== item ? storeEnrichedMedia(tabId, enriched) : null);
+    const task = enrichMediaItem(item, { timeoutMs: ENRICH_BACKGROUND_MS, onDetails: store })
+      .then(store)
+      .catch(() => {})
+      .finally(() => enrichmentsInFlight.delete(key));
+    enrichmentsInFlight.set(key, task);
+  }
+  return enrichmentsInFlight.get(key);
+}
 
+// Probing happens outside the write queue so new detections can keep
+// flowing. Only the merge + write is serialized.
+function storeEnrichedMedia(tabId, item) {
   return enqueueTabMediaMutation(tabId, async () => {
+    const tab = await chrome.tabs.get(tabId).catch(() => null);
+    if (!mediaMatchesTab(item, tab?.url || "")) return;
     const latest = await getMedia(tabId);
-    const merged = addUniqueMedia(latest, validEnriched);
-    await chrome.storage.local.set({ [tabKey(tabId)]: merged.slice(0, 30) });
-    return merged;
+    await chrome.storage.local.set({ [tabKey(tabId)]: addUniqueMedia(latest, [item]).slice(0, 30) });
   });
 }
 
@@ -316,14 +363,16 @@ const AUDIO_EXTENSIONS = new Set(["mp3", "m4a", "aac", "flac", "ogg", "wav"]);
 
 // Size/manifest details and the resolution probe each get their own timeout,
 // so a slow ffprobe never throws away a size that is already known.
-async function enrichMediaItem(item) {
+// onDetails: called with the size/manifest result before the resolution probe ends.
+async function enrichMediaItem(item, { timeoutMs = ENRICH_WAIT_MS, onDetails } = {}) {
   const started = Date.now();
   // A direct file can be probed at once; a playlist first has to show it has no variants.
   const earlyProbe = item.kind === "direct" && needsQualityProbe(item) ? probeMediaQuality(item) : null;
-  const details = await withTimeout(enrichMediaDetails(item), ENRICH_ITEM_TIMEOUT_MS, item);
+  const details = await withTimeout(enrichMediaDetails(item), timeoutMs, item);
+  await onDetails?.(details);
   const probe = earlyProbe || (needsQualityProbe(details) ? probeMediaQuality(details) : null);
   if (!probe) return details;
-  const remainingMs = Math.max(0, ENRICH_ITEM_TIMEOUT_MS - (Date.now() - started));
+  const remainingMs = Math.max(0, timeoutMs - (Date.now() - started));
   return withQuality(details, await withTimeout(probe, remainingMs, ""));
 }
 
@@ -429,9 +478,21 @@ async function enrichDirectMediaSize(item) {
     return positiveSize(response.ok ? payload.totalBytes : null);
   }).catch(() => null);
 
-  const [pageSize, helperSize] = await Promise.all([pageProbe, helperProbe]);
-  const size = pageSize || helperSize;
+  const size = await firstSize([pageProbe, helperProbe]);
   return size ? { ...item, size, sizeSource: "exact" } : item;
+}
+
+// The first probe that finds a size wins; a slower one cannot delay it.
+function firstSize(probes) {
+  return new Promise((resolve) => {
+    let pending = probes.length;
+    for (const probe of probes) {
+      probe.then((size) => {
+        if (size) resolve(size);
+        else if (--pending === 0) resolve(null);
+      });
+    }
+  });
 }
 
 function positiveSize(value) {
@@ -465,38 +526,85 @@ async function enrichVariantsFromContent(tabId, variants, frameId = 0) {
 
 // --- Download ---
 
-async function startDownload(item, variant = null) {
+// output: { filename, downloadDir } chosen in the popup's download dialog
+// (both optional; the helper falls back to the title and its saved folder).
+// output.viaBrowser: the user asked to retry a direct file with Chrome.
+async function startDownload(item, variant = null, output = {}) {
   const media = normalizeMediaItem(item);
   console.warn("[ds] startDownload kind=", media?.kind, "url=", (media?.url || "").slice(0, 100), "variant=", variant?.quality || "none");
   if (!media) return { ok: false, error: "INVALID_MEDIA" };
   if (media.isProtected) return { ok: false, error: media.unsupportedReason || "UNSUPPORTED_PROTECTED_MEDIA" };
+  const target = outputTarget(output);
 
   if (media.kind === "hls" || media.kind === "dash") {
-    return startStreamDownload(media, variant);
+    return startStreamDownload(media, variant, { output: target });
   }
 
-  // Direct download
+  if (!output?.viaBrowser) {
+    const helper = await startHelperDirectDownload(media, target);
+    if (helper.error !== "HELPER_OFFLINE") return helper;
+    console.warn("[ds] helper offline, downloading the direct file with Chrome");
+  }
+  return startBrowserFileDownload(media, target);
+}
+
+function outputTarget(output) {
+  return {
+    filename: String(output?.filename || "").trim(),
+    downloadDir: String(output?.downloadDir || "").trim()
+  };
+}
+
+// The helper writes the file into any folder and shows it in the job list.
+// Failures other than HELPER_OFFLINE carry browserFallback so the popup can
+// offer "Download with browser".
+async function startHelperDirectDownload(media, output) {
+  try {
+    const response = await fetch(`${HELPER_URL}/download`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        url: media.url,
+        kind: "direct",
+        title: media.title,
+        extension: media.extension,
+        sourcePageUrl: media.sourcePageUrl,
+        headers: helperHeadersForMedia(media),
+        ...output
+      })
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) return { ok: false, error: payload.error || `HELPER_${response.status}`, browserFallback: true };
+    return { ok: true, helperJob: payload.job };
+  } catch {
+    return { ok: false, error: "HELPER_OFFLINE" };
+  }
+}
+
+// Chrome can only save inside its own download folder, so the chosen folder
+// is ignored here; the name is kept and Chrome's Save As prompt is skipped.
+async function startBrowserFileDownload(media, output) {
   const hasDownloads = await chrome.permissions.contains({ permissions: ["downloads"] });
   if (!hasDownloads) return { ok: false, error: "DOWNLOAD_PERMISSION_REQUIRED" };
-  const filename = sanitizeFilename(media.title, media.extension);
+  const filename = sanitizeFilename(output.filename || media.title, media.extension);
   const downloadId = await chrome.downloads.download({
-    url: media.url, filename, conflictAction: "uniquify", saveAs: true
+    url: media.url, filename, conflictAction: "uniquify", saveAs: false
   });
   return { ok: true, downloadId };
 }
 
-async function startStreamDownload(media, variant, { allowHelperFallback = true } = {}) {
+async function startStreamDownload(media, variant, { allowHelperFallback = true, output = {} } = {}) {
   // HLS and DASH share both browser paths. MPD layouts the browser loop does
   // not handle (live, multi-period, WebM) end up in the helper fallback.
   // Extension mode first: the offscreen document fetches the segments, so
   // the download survives the source tab being frozen, discarded or closed.
-  const extension = await startOffscreenDownload(media, variant);
+  const extension = await startOffscreenDownload(media, variant, output);
   if (extension.ok || extension.error === "DRM_PROTECTED_UNSUPPORTED") return extension;
   console.warn("[ds] extension mode unavailable, using page mode:", extension.error);
-  return startPageDownload(media, variant, { allowHelperFallback });
+  return startPageDownload(media, variant, { allowHelperFallback, output });
 }
 
-async function startOffscreenDownload(media, variant) {
+async function startOffscreenDownload(media, variant, output = {}) {
   if (!chrome.offscreen || !chrome.declarativeNetRequest) return { ok: false, error: "OFFSCREEN_UNAVAILABLE" };
   const manifestUrl = variant?.url || media.url;
   let ruleId = null;
@@ -512,7 +620,8 @@ async function startOffscreenDownload(media, variant) {
         quality: variant?.quality || media.quality || "",
         title: media.title,
         sourcePageUrl: media.sourcePageUrl,
-        ruleId
+        ruleId,
+        ...output
       }
     });
     if (!response?.ok || !response.helperJob?.id) {
@@ -539,9 +648,9 @@ function handoffMedia(media) {
   return { url, kind, title, sourcePageUrl, frameId, tabId, quality };
 }
 
-async function startPageDownload(media, variant, { allowHelperFallback = true } = {}) {
+async function startPageDownload(media, variant, { allowHelperFallback = true, output = {} } = {}) {
   const fallback = () => (allowHelperFallback
-    ? startHelperDownload(media, variant)
+    ? startHelperDownload(media, variant, output)
     : { ok: false, error: "SOURCE_PAGE_REQUIRED" });
 
   const authToken = await getHelperToken();
@@ -570,7 +679,8 @@ async function startPageDownload(media, variant, { allowHelperFallback = true } 
         quality: variant?.quality || media.quality || "",
         title: media.title,
         sourcePageUrl: media.sourcePageUrl,
-        authToken
+        authToken,
+        ...output
       }
     }, { frameId: media.frameId ?? 0 });
 
@@ -601,6 +711,7 @@ async function resumeHelperJob(jobId) {
   const result = await getHelperJob(jobId);
   if (!result.ok) return result;
   const job = result.job;
+  if (job.resumable && job.inputMode === "direct") return resumeDirectHelperJob(job);
   if (!job.resumable || job.inputMode !== "browser") return { ok: false, error: "JOB_NOT_RESUMABLE" };
 
   const isDash = job.streamKind === "dash";
@@ -626,6 +737,24 @@ async function resumeHelperJob(jobId) {
     return { ok: false, error: "SOURCE_PAGE_OPENED" };
   }
   return started;
+}
+
+// The helper keeps the finished chunks; send the headers again because the
+// job file never stores cookies.
+async function resumeDirectHelperJob(job) {
+  const headers = helperHeadersForMedia({ url: job.url, kind: "direct", sourcePageUrl: job.sourcePageUrl || "" });
+  try {
+    const response = await fetch(`${HELPER_URL}/jobs/${encodeURIComponent(job.id)}/resume`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ headers })
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) return { ok: false, error: payload.error || `HELPER_${response.status}` };
+    return { ok: true, helperJob: payload.job, resumed: Boolean(payload.resumed) };
+  } catch {
+    return { ok: false, error: "HELPER_OFFLINE" };
+  }
 }
 
 async function openOrFocusTab(url) {
@@ -802,7 +931,7 @@ async function reportBrowserDownloadFailure(jobId, error) {
   }).catch(() => {});
 }
 
-async function startHelperDownload(media, variant) {
+async function startHelperDownload(media, variant, output = {}) {
   const downloadUrl = variant?.url || media.url;
   console.warn("[ds] startHelperDownload url=", downloadUrl.slice(0, 100));
   try {
@@ -814,7 +943,8 @@ async function startHelperDownload(media, variant) {
         title: media.title,
         kind: media.kind,
         sourcePageUrl: media.sourcePageUrl,
-        headers: helperHeadersForMedia({ ...media, url: downloadUrl })
+        headers: helperHeadersForMedia({ ...media, url: downloadUrl }),
+        ...output
       })
     });
     const payload = await response.json().catch(() => ({}));
@@ -911,9 +1041,30 @@ async function updateHelperSettings(settings) {
   }
 }
 
-async function pickHelperFolder() {
+// The folder picker takes focus, which closes the popup and its download
+// dialog. The popup saved the dialog in session storage before asking; store
+// the chosen folder there and reopen the popup so it restores the dialog.
+async function reopenDownloadDialog(pickResult) {
+  const key = "pendingDownloadDialog";
+  const stored = await chrome.storage.session.get(key).catch(() => ({}));
+  const state = stored?.[key];
+  if (!state) return;
+  if (pickResult?.ok && pickResult.settings?.downloadDir) {
+    await chrome.storage.session.set({ [key]: { ...state, downloadDir: pickResult.settings.downloadDir } });
+  }
+  // Fails while the popup is still open, or without a focused Chrome window;
+  // the dialog then comes back the next time the user opens the popup.
+  await chrome.action.openPopup?.().catch(() => {});
+}
+
+// options: { initialDir, persist } — see pickDownloadFolder in helper/server.js.
+async function pickHelperFolder(options = {}) {
   try {
-    const response = await fetch(`${HELPER_URL}/pick-folder`, { method: "POST" });
+    const response = await fetch(`${HELPER_URL}/pick-folder`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(options)
+    });
     const payload = await response.json().catch(() => ({}));
     return response.ok
       ? { ok: true, settings: payload.settings || {} }

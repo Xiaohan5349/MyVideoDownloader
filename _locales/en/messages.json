@@ -346,5 +346,35 @@
   },
   "labelScanning": {
     "message": "scanning…"
+  },
+  "dialogFileNameLabel": {
+    "message": "File name"
+  },
+  "dialogFolderLabel": {
+    "message": "Save to"
+  },
+  "btnBrowse": {
+    "message": "Browse…"
+  },
+  "dialogChromeFolderHint": {
+    "message": "Helper offline: Chrome saves the file to its own download folder."
+  },
+  "msgHelperDirectStarted": {
+    "message": "Helper started the download."
+  },
+  "msgDirectHelperFailed": {
+    "message": "The helper could not download this file ({{error}})."
+  },
+  "btnDownloadWithBrowser": {
+    "message": "Download with browser"
+  },
+  "btnBrowserShort": {
+    "message": "Browser"
+  },
+  "btnPrevJob": {
+    "message": "Previous download"
+  },
+  "btnNextJob": {
+    "message": "Next download"
   }
 }

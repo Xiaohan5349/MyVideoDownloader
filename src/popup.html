@@ -11,6 +11,8 @@
       <symbol id="i-down" viewBox="0 0 24 24"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></symbol>
       <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.3-5.7M20 4v5h-5"/></symbol>
       <symbol id="i-lock" viewBox="0 0 24 24"><path d="M6 11h12v9H6zM9 11V8a3 3 0 0 1 6 0v3"/></symbol>
+      <symbol id="i-prev" viewBox="0 0 24 24"><path d="M14.5 6.5 9 12l5.5 5.5"/></symbol>
+      <symbol id="i-next" viewBox="0 0 24 24"><path d="M9.5 6.5 15 12l-5.5 5.5"/></symbol>
     </svg>
     <main class="popup">
       <header class="topbar">
@@ -45,8 +47,16 @@
       <section id="helperPanel" class="panel bento" hidden>
         <div id="runTile" class="tile run-tile" hidden>
           <span id="runTitle" class="tile-cap"></span>
-          <b id="runValue" class="big-num"></b>
+          <div class="run-row">
+            <b id="runValue" class="big-num"></b>
+            <div id="runNav" class="run-nav" hidden>
+              <button id="runPrev" class="run-step" type="button" data-i18n-aria="btnPrevJob"><svg class="icon"><use href="#i-prev"/></svg></button>
+              <span id="runPos" class="run-pos"></span>
+              <button id="runNext" class="run-step" type="button" data-i18n-aria="btnNextJob"><svg class="icon"><use href="#i-next"/></svg></button>
+            </div>
+          </div>
           <div class="progress-bar" aria-hidden="true"><i></i></div>
+          <div id="runDots" class="run-dots" aria-hidden="true" hidden></div>
         </div>
         <div id="helperStatus" class="helper-status tile"></div>
         <section class="tile jobs-tile">
@@ -124,6 +134,7 @@
           <div class="helper-job-actions">
             <button class="source-button" type="button" data-i18n="btnSource">Source</button>
             <button class="resume-button" type="button" data-i18n="btnResume">Resume</button>
+            <button class="browser-button" type="button" data-i18n="btnBrowserShort">Browser</button>
             <button class="cancel-button" type="button" data-i18n="btnStop">Stop</button>
             <button class="show-button" type="button" data-i18n="btnFolder">Open folder</button>
             <button class="remove-button" type="button" data-i18n="btnRemove">Remove</button>

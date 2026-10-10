@@ -727,6 +727,90 @@ span.variant-chip:hover {
   margin-top: 12px;
 }
 
+.run-row {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+/* Carousel stepper: one capsule, ‹ 1/3 › */
+.run-nav {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  height: 26px;
+  padding: 2px;
+  border: 1px solid var(--edge-hi);
+  border-radius: 999px;
+  background: var(--inset);
+}
+
+.run-step {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  color: var(--tx-2);
+  transition: color 120ms, background-color 120ms;
+}
+
+.run-step:hover {
+  background: var(--blue-wash);
+  color: var(--blue);
+}
+
+.run-step:focus-visible {
+  outline: 1px solid var(--blue);
+  outline-offset: 1px;
+}
+
+.run-step .icon {
+  width: 14px;
+  height: 14px;
+  stroke-width: 2.2;
+}
+
+.run-pos {
+  min-width: 30px;
+  color: var(--tx-2);
+  font: 600 11px var(--mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.04em;
+  text-align: center;
+}
+
+/* One dot per active download; the shown one stretches and lights up. */
+.run-dots {
+  display: flex;
+  justify-content: center;
+  gap: 5px;
+  margin-top: 10px;
+}
+
+.run-dots i {
+  width: 5px;
+  height: 5px;
+  border-radius: 3px;
+  background: var(--edge-max);
+  transition: width 200ms ease-out, background-color 200ms;
+}
+
+.run-dots i.is-active {
+  width: 16px;
+  background: var(--blue);
+  box-shadow: 0 0 8px var(--blue);
+}
+
+[hidden].run-nav,
+[hidden].run-dots {
+  display: none;
+}
+
 .run-tile .big-num:not(.is-word)::after {
   content: "%";
   margin-left: 4px;
@@ -1098,6 +1182,50 @@ select {
   margin: 8px 0 0;
   color: var(--tx-3);
   font: 11px var(--mono);
+}
+
+.confirm-fields {
+  display: grid;
+  gap: 10px;
+}
+
+.confirm-field {
+  display: grid;
+  gap: 5px;
+}
+
+.confirm-field > span {
+  color: var(--tx-2);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.confirm-input-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.confirm-input-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.confirm-ext {
+  flex: none;
+  color: var(--tx-3);
+  font: 12px var(--mono);
+}
+
+.confirm-hint {
+  margin: 0;
+  color: var(--amber);
+  font-size: 11.5px;
+}
+
+.notice-action {
+  flex: none;
+  margin-left: auto;
 }
 
 .confirm-actions {

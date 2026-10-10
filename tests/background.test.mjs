@@ -1140,3 +1140,264 @@ test("DOWNLOADS_JOB_RESUME refuses a job that is not resumable", async () => {
   assert.equal(response.ok, false);
   assert.equal(response.error, "JOB_NOT_RESUMABLE");
 });
+
+// ─── Download dialog: file name, folder, direct files via the helper ───
+
+const DIRECT_ITEM = {
+  url: "https://cdn.example.com/clip.mp4",
+  sourcePageUrl: "https://site.example",
+  title: "Clip",
+  extension: "mp4",
+  kind: "direct",
+  frameId: 0,
+  tabId: 10,
+};
+
+function recordDownloads() {
+  const calls = [];
+  mock.downloads.download = async (options) => {
+    calls.push(options);
+    return 42;
+  };
+  return calls;
+}
+
+test("direct downloads go to the helper with the dialog's name and folder", async () => {
+  const downloads = recordDownloads();
+  const calls = [];
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push({ url: String(url), body: JSON.parse(options.body || "{}") });
+    return new Response(JSON.stringify({ ok: true, job: { id: "job-direct" } }), {
+      status: 202, headers: { "Content-Type": "application/json" },
+    });
+  };
+
+  const response = await sendRuntimeMessage({
+    type: MESSAGE.DOWNLOADS_START,
+    item: DIRECT_ITEM,
+    output: { filename: "My Clip", downloadDir: "D:\\Videos" },
+  });
+
+  assert.equal(response.ok, true);
+  assert.equal(response.helperJob.id, "job-direct");
+  assert.equal(calls.length, 1);
+  assert.ok(calls[0].url.endsWith("/download"));
+  assert.equal(calls[0].body.kind, "direct");
+  assert.equal(calls[0].body.extension, "mp4");
+  assert.equal(calls[0].body.filename, "My Clip");
+  assert.equal(calls[0].body.downloadDir, "D:\\Videos");
+  assert.equal(downloads.length, 0, "Chrome's downloader is not used");
+});
+
+test("direct downloads fall back to Chrome without Save As when the helper is offline", async () => {
+  const downloads = recordDownloads();
+  globalThis.fetch = async () => { throw new TypeError("fetch failed"); };
+
+  const response = await sendRuntimeMessage({
+    type: MESSAGE.DOWNLOADS_START,
+    item: DIRECT_ITEM,
+    output: { filename: "My Clip", downloadDir: "D:\\Videos" },
+  });
+
+  assert.equal(response.ok, true);
+  assert.deepEqual(downloads, [{ url: DIRECT_ITEM.url, filename: "My Clip.mp4", conflictAction: "uniquify", saveAs: false }]);
+});
+
+test("a helper refusal for a direct file offers the browser fallback instead of using it", async () => {
+  const downloads = recordDownloads();
+  globalThis.fetch = async () => new Response(JSON.stringify({ ok: false, error: "SERVER_PROTECTED_UNSUPPORTED" }), {
+    status: 403, headers: { "Content-Type": "application/json" },
+  });
+
+  const response = await sendRuntimeMessage({ type: MESSAGE.DOWNLOADS_START, item: DIRECT_ITEM });
+
+  assert.equal(response.ok, false);
+  assert.equal(response.error, "SERVER_PROTECTED_UNSUPPORTED");
+  assert.equal(response.browserFallback, true);
+  assert.equal(downloads.length, 0);
+});
+
+test("viaBrowser sends a direct file straight to Chrome", async () => {
+  const downloads = recordDownloads();
+  globalThis.fetch = async (url) => { throw new Error(`unexpected fetch ${url}`); };
+
+  const response = await sendRuntimeMessage({
+    type: MESSAGE.DOWNLOADS_START,
+    item: DIRECT_ITEM,
+    output: { filename: "Retry", viaBrowser: true },
+  });
+
+  assert.equal(response.ok, true);
+  assert.equal(downloads[0].filename, "Retry.mp4");
+  assert.equal(downloads[0].saveAs, false);
+});
+
+test("the dialog's name and folder reach the offscreen stream download", async () => {
+  enableOffscreen();
+  mock.runtime.offscreenResponse = { ok: true, helperJob: { id: "job-named" } };
+
+  await sendRuntimeMessage({
+    type: MESSAGE.DOWNLOADS_START,
+    item: HLS_ITEM,
+    output: { filename: "Named Stream", downloadDir: "D:\\Streams" },
+  });
+
+  const [start] = offscreenStarts();
+  assert.equal(start.payload.filename, "Named Stream");
+  assert.equal(start.payload.downloadDir, "D:\\Streams");
+});
+
+test("a folder picked for one download is stored for the dialog and reopens the popup", async () => {
+  const opened = [];
+  mock.action.openPopup = async () => { opened.push(true); };
+  mock.sessionData.pendingDownloadDialog = { tabId: 10, item: DIRECT_ITEM, filename: "Clip", downloadDir: "C:\\Old" };
+  const calls = [];
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push({ url: String(url), body: JSON.parse(options.body || "{}") });
+    return new Response(JSON.stringify({ ok: true, settings: { downloadDir: "D:\\Picked" } }), {
+      status: 200, headers: { "Content-Type": "application/json" },
+    });
+  };
+
+  try {
+    const response = await sendRuntimeMessage({
+      type: "helper:folderPick",
+      options: { initialDir: "C:\\Old", persist: false, reopenPopup: true },
+    });
+
+    assert.equal(response.ok, true);
+    assert.deepEqual(calls[0].body, { initialDir: "C:\\Old", persist: false });
+    assert.equal(mock.sessionData.pendingDownloadDialog.downloadDir, "D:\\Picked");
+    assert.equal(mock.sessionData.pendingDownloadDialog.filename, "Clip");
+    assert.equal(opened.length, 1);
+  } finally {
+    delete mock.action.openPopup;
+  }
+});
+
+test("DOWNLOADS_JOB_RESUME continues a direct job in the helper with fresh headers", async () => {
+  const job = { ...RESUMABLE_JOB, id: "job-d", inputMode: "direct", url: "https://cdn.example.com/clip.mp4" };
+  captureHeaders(job.url, { Cookie: "sid=fresh" });
+  const calls = [];
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push({ url: String(url), body: options.body ? JSON.parse(options.body) : null });
+    const payload = String(url).endsWith("/resume") ? { ok: true, job: { id: "job-d" }, resumed: true } : job;
+    return new Response(JSON.stringify(payload), { status: String(url).endsWith("/resume") ? 202 : 200, headers: { "Content-Type": "application/json" } });
+  };
+
+  const response = await sendRuntimeMessage({ type: "downloads:jobResume", jobId: "job-d" });
+
+  assert.equal(response.ok, true);
+  assert.equal(response.resumed, true);
+  const resume = calls.find((call) => call.url.endsWith("/jobs/job-d/resume"));
+  assert.ok(resume, "posts to the helper's resume endpoint");
+  const headers = Object.fromEntries(resume.body.headers.map((h) => [h.name.toLowerCase(), h.value]));
+  assert.equal(headers.cookie, "sid=fresh");
+  assert.equal(headers.referer, "https://site.example");
+  assert.equal(offscreenStarts().length, 0, "no browser stream download");
+});
+
+// ─── Sizes that arrive late ───
+
+function storeDirectItem(url) {
+  return mock.storage.local.set({
+    "tabMedia:10": [{
+      id: `https://site.example::${url}`,
+      url,
+      sourcePageUrl: "https://site.example",
+      pageUrl: "https://site.example",
+      title: "Late",
+      extension: "mp4",
+      kind: "direct",
+      tabId: 10,
+      frameId: 0,
+      size: null,
+      quality: "720p",
+      detectedAt: 5,
+      headers: [],
+      variants: []
+    }]
+  });
+}
+
+test("a size from the page is used without waiting for a hanging helper probe", async (t) => {
+  await storeDirectItem("https://cdn.example.com/page-size.mp4");
+  mock.tabs.sendMessageResult = { ok: true, size: 123456789 };
+  globalThis.fetch = async () => new Promise(() => {}); // helper /inspect hangs
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+
+  const pending = sendRuntimeMessage({ type: "media:getForTab", tabId: 10 });
+  for (let i = 0; i < 10; i += 1) await new Promise((resolve) => setImmediate(resolve));
+  t.mock.timers.tick(8000);
+  const response = await pending;
+
+  assert.equal(response.items[0].size, 123456789);
+});
+
+test("a size found after the scan stopped waiting is still stored", async (t) => {
+  const url = "https://cdn.example.com/late-size.mp4";
+  await storeDirectItem(url);
+  mock.tabs.sendMessageResult = { ok: false };
+  let answerHelper;
+  globalThis.fetch = async () => new Promise((resolve) => { answerHelper = resolve; });
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+
+  const pending = sendRuntimeMessage({ type: "media:getForTab", tabId: 10 });
+  for (let i = 0; i < 10; i += 1) await new Promise((resolve) => setImmediate(resolve));
+  t.mock.timers.tick(8000);
+  const response = await pending;
+  assert.equal(response.items[0].size, null, "the scan answered without the size");
+
+  answerHelper(Response.json({ ok: true, totalBytes: 987654321 }));
+  for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setImmediate(resolve));
+  const stored = mock.data["tabMedia:10"].find((item) => item.url === url);
+  assert.equal(stored.size, 987654321);
+});
+
+test("MEDIA_ENRICH probes only the given items and answers at once", async () => {
+  await storeDirectItem("https://cdn.example.com/new-item.mp4");
+  mock.tabs.sendMessageResult = { ok: true, size: 5555555 };
+  globalThis.fetch = async () => Response.json({ ok: true, totalBytes: null });
+
+  const response = await sendRuntimeMessage({ type: "media:enrich", tabId: 10, urls: ["https://cdn.example.com/new-item.mp4"] });
+  assert.equal(response.ok, true);
+  for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(mock.data["tabMedia:10"][0].size, 5555555);
+});
+
+test("MEDIA_GET_FOR_TAB with enrich: false lists stored media without probing", async () => {
+  await storeDirectItem("https://cdn.example.com/listed.mp4");
+  globalThis.fetch = async (url) => { throw new Error(`unexpected fetch ${url}`); };
+  mock.tabs.sendMessageCalls = [];
+
+  const response = await sendRuntimeMessage({ type: "media:getForTab", tabId: 10, enrich: false });
+  assert.equal(response.items.length, 1);
+  assert.equal(mock.tabs.sendMessageCalls.length, 0);
+});
+
+test("media detected while the scan waits is probed as well", async () => {
+  const first = "https://cdn.example.com/first.mp4";
+  const late = "https://cdn.example.com/arrived-during-scan.mp4";
+  await storeDirectItem(first);
+  const sizes = { [first]: 111111111, [late]: 222222222 };
+  const original = mock.tabs.sendMessage;
+  mock.tabs.sendMessage = async (tabId, message, options) => {
+    if (message.url === first && !mock.data["tabMedia:10"].some((item) => item.url === late)) {
+      // The page reports another video while the first one is being probed.
+      mock.data["tabMedia:10"] = [{ ...mock.data["tabMedia:10"][0], id: `https://site.example::${late}`, url: late, detectedAt: 6 }, ...mock.data["tabMedia:10"]];
+    }
+    return { ok: true, size: sizes[message.url] };
+  };
+  globalThis.fetch = async () => Response.json({ ok: true, totalBytes: null });
+
+  try {
+    const response = await sendRuntimeMessage({ type: "media:getForTab", tabId: 10 });
+    assert.ok(response.items.some((item) => item.url === late), "the late item is in the answer");
+    for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setImmediate(resolve));
+    const stored = Object.fromEntries(mock.data["tabMedia:10"].map((item) => [item.url, item.size]));
+    assert.equal(stored[first], 111111111);
+    assert.equal(stored[late], 222222222);
+  } finally {
+    mock.tabs.sendMessage = original;
+  }
+});
