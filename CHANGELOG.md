@@ -2,7 +2,19 @@
 
 ## Unreleased
 
+### Added
+- The download dialog lets you rename the file and choose the folder before the download starts, for HLS, DASH and direct files. The folder starts at the helper's download folder; a folder picked with Browse… applies to that download only and does not change the saved one. The extension is fixed by the output (`.mp4` for streams, the file's own type for direct files), and a typed name is used as is, without the hash suffix.
+- Direct files are downloaded by the helper (new `kind: "direct"` on `POST /download`) instead of Chrome, so they can go to any folder and Chrome's Save As prompt no longer appears after the dialog. When the server supports byte ranges, the file is fetched in 8 MB chunks over 4 parallel connections (`DIRECT_CONNECTIONS`, `DIRECT_CHUNK_BYTES`); a 403/429 drops it to one connection. Servers without range support get a single connection. The file is written as `<name>.part` and renamed when complete.
+- Ranged direct downloads can be resumed: Stop, a failure, a stall or a helper restart keeps the `.part` file and the list of finished chunks for 24 hours. Resume (new `POST /jobs/:id/resume`) or downloading the same file again fetches only the missing chunks; if the file on the server changed size, it starts over.
+- "Download with browser" for direct files the helper cannot fetch (for example HTTP 403): offered in the notice when the download fails, and as a button on the failed job in the Helper tab, so it is still there after the popup was closed. It keeps the chosen file name and saves to Chrome's download folder without the Save As prompt.
+
+### Changed
+- With the helper offline, direct files fall back to Chrome's downloader without the Save As prompt, keeping the name from the dialog.
+- The Helper tab's progress tile shows every active download instead of only the newest: with more than one, it switches to the next every 4 seconds (paused while the pointer is over it), and a ‹ 1/3 › stepper switches by hand. Dots under the progress bar show which download is on screen.
+- `POST /pick-folder` accepts `initialDir` (the picker opens there) and `persist: false` (return the folder without saving it). Because the picker closes the popup, the popup saves the open download dialog first and reopens with it, and the chosen folder, after the picker closes.
+
 ### Fixed
+- Sizes could still stay unknown after the scan finished and appear only when the popup was opened again. The page's size was discarded while the helper's probe was still running past the scan's 8 seconds, and any result that arrived later was dropped. Now the first probe to find a size wins, results that arrive after the scan are still stored, and the open popup updates its list from them (also showing media detected while it is open). Media detected while a scan was waiting is probed too; before, it was listed but never probed, which usually left the last item without a size. An item still without a size is probed again up to twice, at least 5 seconds apart, since its first probe may have run before the page's cookies and referer were captured.
 - A file's size could show as unknown after the scan finished, and appear only when the popup was opened again. The resolution probe ran after the size probe and shared its 8-second budget, so a slow probe discarded the size as well. Both probes now run in parallel, and a slow resolution probe only drops the resolution.
 
 ## v1.10.0 - 2026-10-09
