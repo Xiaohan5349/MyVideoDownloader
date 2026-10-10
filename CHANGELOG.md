@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## v1.11.1 - 2026-10-10
+
+### Fixed
+- The settings page and the service worker's startup log showed v1.10.0 in the v1.11.0 release; both now show the current version. A test now checks that `manifest.json`, `package.json`, the startup log and the settings page carry the same version.
+
 ## v1.11.0 - 2026-10-09
 
 ### Added
