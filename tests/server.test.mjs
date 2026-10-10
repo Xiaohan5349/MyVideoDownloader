@@ -14,6 +14,8 @@ process.env.PORT = "0"; // Random port
 process.env.DOWNLOAD_DIR = path.join(__dirname, "..", "helper", "test-downloads");
 process.env.CONFIG_PATH = path.join(process.env.DOWNLOAD_DIR, "helper-settings.json");
 process.env.JOBS_PATH = path.join(process.env.DOWNLOAD_DIR, "helper-jobs.json");
+// Small chunks so a few KB of test data spreads over several range requests.
+process.env.DIRECT_CHUNK_BYTES = "1000";
 
 // Dynamic import to get server reference
 const serverPath = pathToFileURL(path.join(__dirname, "..", "helper", "server.js")).href;
@@ -1074,6 +1076,339 @@ it("forgetting a resumable job removes its temp files", async () => {
 
   assert.ok(!jobs.has(id));
   assert.ok(!existsSync(tempDir));
+});
+
+// ─── Output name/folder and direct downloads ───
+
+const CUSTOM_DIR = path.join(process.env.DOWNLOAD_DIR, "picked-folder");
+
+it("POST /browser-downloads/start uses the dialog's file name and folder", async () => {
+  const res = await fetchJson("/browser-downloads/start", {
+    method: "POST",
+    body: {
+      url: "https://cdn.example.com/named/video.m3u8",
+      title: "Page Title",
+      filename: "My: Clip.mp4",
+      downloadDir: CUSTOM_DIR,
+      totalSegments: 1,
+      sourcePageUrl: "https://site.example/watch/named"
+    },
+  });
+  assert.equal(res.status, 202);
+  assert.equal(res.body.job.outputPath, path.join(CUSTOM_DIR, "My Clip.mp4"));
+  assert.equal(res.body.job.downloadDir, CUSTOM_DIR);
+});
+
+it("a relative download folder is rejected", async () => {
+  const res = await fetchJson("/browser-downloads/start", {
+    method: "POST",
+    body: { url: "https://cdn.example.com/rel.m3u8", downloadDir: "videos", totalSegments: 1 },
+  });
+  assert.equal(res.status, 400);
+  assert.equal(res.body.error, "INVALID_DOWNLOAD_DIR");
+});
+
+// Serves `content` (a Buffer, or a function returning the current one) with
+// optional Range support; `onRequest` may answer first.
+async function startUpstream(content, { ranges = true, onRequest } = {}) {
+  const stats = { requests: [], active: 0, maxActive: 0 };
+  const upstream = http.createServer(async (req, res) => {
+    const body = typeof content === "function" ? content() : content;
+    stats.requests.push(req.headers.range || "");
+    stats.active += 1;
+    stats.maxActive = Math.max(stats.maxActive, stats.active);
+    res.on("close", () => { stats.active -= 1; });
+    if (onRequest && await onRequest(req, res, stats)) return;
+    // Hold each response briefly so parallel requests overlap.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const match = /^bytes=(\d+)-(\d+)$/.exec(req.headers.range || "");
+    if (ranges && match) {
+      const start = Number(match[1]);
+      const end = Math.min(Number(match[2]), body.length - 1);
+      res.writeHead(206, {
+        "Content-Type": "video/mp4",
+        "Content-Length": String(end - start + 1),
+        "Content-Range": `bytes ${start}-${end}/${body.length}`
+      });
+      res.end(body.subarray(start, end + 1));
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "video/mp4", "Content-Length": String(body.length) });
+    res.end(body);
+  });
+  await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+  return { upstream, stats, url: `http://127.0.0.1:${upstream.address().port}/clip.webm` };
+}
+
+async function waitForJob(id, done = (job) => job.status !== "running" && job.status !== "queued") {
+  for (let i = 0; i < 200; i += 1) {
+    const job = jobs.get(id);
+    if (job && done(job)) return job;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`job ${id} did not settle`);
+}
+
+function testBytes(size) {
+  return Buffer.from(Array.from({ length: size }, (_, i) => (i * 7) % 251));
+}
+
+it("direct downloads split a ranged file over parallel connections", async () => {
+  const body = testBytes(10_500);
+  const { upstream, stats, url } = await startUpstream(body);
+  try {
+    const res = await fetchJson("/download", {
+      method: "POST",
+      body: { url, kind: "direct", extension: "webm", filename: "Parallel", downloadDir: CUSTOM_DIR, headers: [] },
+    });
+    assert.equal(res.status, 202);
+    assert.equal(res.body.job.inputMode, "direct");
+    assert.equal(res.body.job.totalBytes, body.length);
+
+    const job = await waitForJob(res.body.job.id);
+    assert.equal(job.status, "completed", job.error);
+    assert.equal(job.outputPath, path.join(CUSTOM_DIR, "Parallel.webm"));
+    assert.deepEqual(await readFile(job.outputPath), body);
+    assert.ok(!existsSync(`${job.outputPath}.part`));
+    // 1 probe + 11 chunks of 1000 bytes, at most 4 at a time.
+    assert.equal(stats.requests.length, 12);
+    assert.ok(stats.maxActive > 1 && stats.maxActive <= 4, `maxActive=${stats.maxActive}`);
+  } finally {
+    await new Promise((resolve) => upstream.close(resolve));
+  }
+});
+
+it("direct downloads use one connection when the server ignores Range", async () => {
+  const body = testBytes(4_321);
+  const { upstream, stats, url } = await startUpstream(body, { ranges: false });
+  try {
+    const res = await fetchJson("/download", {
+      method: "POST",
+      body: { url, kind: "direct", title: "No Ranges", headers: [] },
+    });
+    assert.equal(res.status, 202);
+    const job = await waitForJob(res.body.job.id);
+    assert.equal(job.status, "completed", job.error);
+    assert.equal(path.extname(job.outputPath), ".webm", "extension falls back to the URL");
+    assert.equal(path.dirname(job.outputPath), process.env.DOWNLOAD_DIR, "default folder");
+    assert.deepEqual(await readFile(job.outputPath), body);
+    assert.equal(stats.requests.length, 1, "the probe response body is the download");
+  } finally {
+    await new Promise((resolve) => upstream.close(resolve));
+  }
+});
+
+it("direct downloads drop to one connection after a 429 and still finish", async () => {
+  const body = testBytes(6_000);
+  let refused = 0;
+  const { upstream, url } = await startUpstream(body, {
+    onRequest: async (req, res) => {
+      if (req.headers.range === "bytes=0-0" || refused >= 2) return false;
+      refused += 1;
+      res.writeHead(429);
+      res.end();
+      return true;
+    }
+  });
+  try {
+    const res = await fetchJson("/download", {
+      method: "POST",
+      body: { url, kind: "direct", filename: "Throttled", headers: [] },
+    });
+    const job = await waitForJob(res.body.job.id);
+    assert.equal(job.status, "completed", job.error);
+    assert.deepEqual(await readFile(job.outputPath), body);
+  } finally {
+    await new Promise((resolve) => upstream.close(resolve));
+  }
+});
+
+it("direct downloads report a 403 before creating a job", async () => {
+  const { upstream, url } = await startUpstream(testBytes(10), {
+    onRequest: async (_req, res) => {
+      res.writeHead(403);
+      res.end();
+      return true;
+    }
+  });
+  try {
+    const before = jobs.size;
+    const res = await fetchJson("/download", { method: "POST", body: { url, kind: "direct", headers: [] } });
+    assert.equal(res.status, 403);
+    assert.equal(res.body.error, "SERVER_PROTECTED_UNSUPPORTED");
+    assert.equal(jobs.size, before);
+  } finally {
+    await new Promise((resolve) => upstream.close(resolve));
+  }
+});
+
+// Serves 6 chunks of 1000 bytes; while `gate.stall` is set, chunks from
+// byte 3000 on send a few bytes and then hang, so the job can be stopped
+// with exactly chunks 0-2 finished.
+async function startStallingUpstream(gate) {
+  return startUpstream(() => gate.body, {
+    onRequest: async (req, res) => {
+      const start = Number(/^bytes=(\d+)-/.exec(req.headers.range || "")?.[1] ?? -1);
+      if (!gate.stall || start < 3000) return false;
+      res.writeHead(206, { "Content-Type": "video/mp4", "Content-Range": `bytes ${start}-${start + 999}/${gate.body.length}`, "Content-Length": "1000" });
+      res.write(gate.body.subarray(start, start + 10));
+      return true;
+    }
+  });
+}
+
+async function startAndStopDirect(url, filename) {
+  const res = await fetchJson("/download", { method: "POST", body: { url, kind: "direct", filename, headers: [] } });
+  const id = res.body.job.id;
+  await waitForJob(id, (job) => job.directChunksDone?.length === 3);
+  const cancel = await fetchJson(`/jobs/${encodeURIComponent(id)}/cancel`, { method: "POST" });
+  assert.equal(cancel.status, 200);
+  return jobs.get(id);
+}
+
+it("Stop pauses a ranged direct download and Resume fetches only the missing chunks", async () => {
+  const gate = { body: testBytes(6_000), stall: true };
+  const { upstream, stats, url } = await startStallingUpstream(gate);
+  try {
+    const job = await startAndStopDirect(url, "Paused");
+    const partPath = `${job.outputPath}.part`;
+    assert.equal(job.status, "cancelled");
+    assert.equal(job.resumable, true);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.ok(existsSync(partPath), "the partial file is kept");
+
+    upstream.closeAllConnections();
+    gate.stall = false;
+    stats.requests.length = 0;
+    const resume = await fetchJson(`/jobs/${encodeURIComponent(job.id)}/resume`, { method: "POST", body: { headers: [] } });
+    assert.equal(resume.status, 202);
+    assert.equal(resume.body.resumed, true);
+
+    const done = await waitForJob(job.id);
+    assert.equal(done.status, "completed", done.error);
+    assert.deepEqual(await readFile(done.outputPath), gate.body);
+    assert.ok(!existsSync(partPath));
+    assert.deepEqual(stats.requests.sort(), ["bytes=0-0", "bytes=3000-3999", "bytes=4000-4999", "bytes=5000-5999"]);
+  } finally {
+    upstream.closeAllConnections();
+    await new Promise((resolve) => upstream.close(resolve));
+  }
+});
+
+it("downloading the same direct file again continues the stopped job", async () => {
+  const gate = { body: testBytes(6_000), stall: true };
+  const { upstream, url } = await startStallingUpstream(gate);
+  try {
+    const job = await startAndStopDirect(url, "Again");
+    upstream.closeAllConnections();
+    gate.stall = false;
+
+    const res = await fetchJson("/download", { method: "POST", body: { url, kind: "direct", filename: "Another Name", headers: [] } });
+    assert.equal(res.status, 202);
+    assert.equal(res.body.job.id, job.id, "the old job is reopened");
+    assert.equal(res.body.resumed, true);
+    const done = await waitForJob(job.id);
+    assert.equal(done.status, "completed", done.error);
+    assert.equal(path.basename(done.outputPath), "Again.webm", "the original name is kept");
+    assert.deepEqual(await readFile(done.outputPath), gate.body);
+  } finally {
+    upstream.closeAllConnections();
+    await new Promise((resolve) => upstream.close(resolve));
+  }
+});
+
+it("Resume starts over when the file on the server changed size", async () => {
+  const gate = { body: testBytes(6_000), stall: true };
+  const { upstream, url } = await startStallingUpstream(gate);
+  try {
+    const job = await startAndStopDirect(url, "Changed");
+    upstream.closeAllConnections();
+    gate.stall = false;
+    gate.body = testBytes(2_500);
+
+    const resume = await fetchJson(`/jobs/${encodeURIComponent(job.id)}/resume`, { method: "POST", body: { headers: [] } });
+    assert.equal(resume.body.resumed, false);
+    const done = await waitForJob(job.id);
+    assert.equal(done.status, "completed", done.error);
+    assert.deepEqual(await readFile(done.outputPath), gate.body);
+  } finally {
+    upstream.closeAllConnections();
+    await new Promise((resolve) => upstream.close(resolve));
+  }
+});
+
+it("removing a stopped direct job deletes its partial file", async () => {
+  const gate = { body: testBytes(6_000), stall: true };
+  const { upstream, url } = await startStallingUpstream(gate);
+  try {
+    const job = await startAndStopDirect(url, "Removed");
+    const partPath = `${job.outputPath}.part`;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.ok(existsSync(partPath));
+
+    await fetchJson(`/jobs/${encodeURIComponent(job.id)}/history`, { method: "DELETE" });
+    assert.ok(!jobs.has(job.id));
+    assert.ok(!existsSync(partPath));
+  } finally {
+    upstream.closeAllConnections();
+    await new Promise((resolve) => upstream.close(resolve));
+  }
+});
+
+it("a stalled ranged direct job keeps its partial file for 24 hours", async () => {
+  const outputPath = path.join(process.env.DOWNLOAD_DIR, "stalled-direct.mp4");
+  await writeFile(`${outputPath}.part`, "partial");
+  const job = {
+    id: "stalled-direct",
+    inputMode: "direct",
+    status: "running",
+    url: "https://cdn.example.com/stalled.mp4",
+    outputPath,
+    downloadDir: process.env.DOWNLOAD_DIR,
+    directChunkBytes: 1000,
+    directChunksDone: [0],
+    startedAt: new Date().toISOString(),
+    lastActivityAt: Date.now() - 60 * 60_000,
+    log: []
+  };
+  jobs.set(job.id, job);
+
+  await sweepStalledJobs();
+  assert.equal(job.status, "failed");
+  assert.equal(job.error, "DOWNLOAD_STALLED");
+  assert.equal(job.resumable, true);
+  assert.ok(existsSync(`${outputPath}.part`));
+
+  job.finishedAt = new Date(Date.now() - 25 * 60 * 60_000).toISOString();
+  await sweepStalledJobs();
+  assert.equal(job.resumable, false);
+  assert.ok(!existsSync(`${outputPath}.part`));
+  jobs.delete(job.id);
+});
+
+it("a direct download that cannot use ranges is not resumable after Stop", async () => {
+  const body = testBytes(3_000);
+  const { upstream, url } = await startUpstream(body, {
+    // Whole-file response that never finishes.
+    onRequest: async (_req, res) => {
+      res.writeHead(200, { "Content-Type": "video/mp4", "Content-Length": String(body.length) });
+      res.write(body.subarray(0, 10));
+      return true;
+    }
+  });
+  try {
+    const res = await fetchJson("/download", { method: "POST", body: { url, kind: "direct", filename: "Unranged", headers: [] } });
+    const id = res.body.job.id;
+    const partPath = `${res.body.job.outputPath}.part`;
+    await waitForJob(id, () => existsSync(partPath));
+    await fetchJson(`/jobs/${encodeURIComponent(id)}/cancel`, { method: "POST" });
+    for (let i = 0; i < 100 && existsSync(partPath); i += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(jobs.get(id).resumable, false);
+    assert.ok(!existsSync(partPath));
+  } finally {
+    upstream.closeAllConnections();
+    await new Promise((resolve) => upstream.close(resolve));
+  }
 });
 
 }); // close describe

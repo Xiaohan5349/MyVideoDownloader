@@ -97,6 +97,8 @@ export async function startHlsDownload(options) {
     body: JSON.stringify({
       ...start,
       title: o.title || "video",
+      filename: o.filename || "",
+      downloadDir: o.downloadDir || "",
       totalSegments: plan.segmentAssetCount,
       sourcePageUrl: o.sourcePageUrl,
       downloadMode: o.downloadMode

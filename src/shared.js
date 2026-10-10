@@ -1,6 +1,7 @@
 export const MESSAGE = Object.freeze({
   MEDIA_ADD_DETECTED: "media:addDetected",
   MEDIA_GET_FOR_TAB: "media:getForTab",
+  MEDIA_ENRICH: "media:enrich",
   DOWNLOADS_START: "downloads:start",
   DOWNLOADS_JOB_GET: "downloads:jobGet",
   DOWNLOADS_JOB_SHOW: "downloads:jobShow",

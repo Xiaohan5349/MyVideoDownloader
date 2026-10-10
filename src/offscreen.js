@@ -13,7 +13,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   return true;
 });
 
-async function startExtensionDownload({ helperUrl, manifestUrl, quality, title, sourcePageUrl, ruleId }) {
+async function startExtensionDownload({ helperUrl, manifestUrl, quality, title, sourcePageUrl, ruleId, filename, downloadDir }) {
   const allowedHosts = new Set();
   const allowUrls = async (urls) => {
     const hosts = [...new Set(urls.map(hostOf).filter((host) => host && !allowedHosts.has(host)))];
@@ -28,6 +28,8 @@ async function startExtensionDownload({ helperUrl, manifestUrl, quality, title, 
     quality,
     title,
     sourcePageUrl,
+    filename,
+    downloadDir,
     downloadMode: "extension",
     strict: true,
     credentials: "include",

@@ -346,5 +346,35 @@
   },
   "labelScanning": {
     "message": "扫描中…"
+  },
+  "dialogFileNameLabel": {
+    "message": "文件名"
+  },
+  "dialogFolderLabel": {
+    "message": "保存到"
+  },
+  "btnBrowse": {
+    "message": "浏览…"
+  },
+  "dialogChromeFolderHint": {
+    "message": "助手离线：将由 Chrome 保存到它自己的默认下载目录。"
+  },
+  "msgHelperDirectStarted": {
+    "message": "助手已开始下载。"
+  },
+  "msgDirectHelperFailed": {
+    "message": "助手无法下载此文件（{{error}}）。"
+  },
+  "btnDownloadWithBrowser": {
+    "message": "用浏览器下载"
+  },
+  "btnBrowserShort": {
+    "message": "浏览器下载"
+  },
+  "btnPrevJob": {
+    "message": "上一个下载"
+  },
+  "btnNextJob": {
+    "message": "下一个下载"
   }
 }

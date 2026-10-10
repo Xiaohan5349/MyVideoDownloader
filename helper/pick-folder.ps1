@@ -1,6 +1,7 @@
 param(
   [Parameter(Mandatory = $true)]
-  [string]$OutFile
+  [string]$OutFile,
+  [string]$InitialDir = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -74,12 +75,27 @@ public static class ModernFolderPicker
     [DllImport("user32.dll")]
     private static extern bool SetForegroundWindow(IntPtr hWnd);
 
-    public static string Pick(IntPtr ownerHandle)
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    private static extern int SHCreateItemFromParsingName(string pszPath, IntPtr pbc, ref Guid riid, out IntPtr ppv);
+
+    public static string Pick(IntPtr ownerHandle, string initialDir)
     {
         var dialog = (IFileOpenDialog)new FileOpenDialog();
         dialog.SetOptions(FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
-        dialog.SetTitle("Select helper download folder");
+        dialog.SetTitle("Select download folder");
         dialog.SetOkButtonLabel("Select Folder");
+
+        // Open in the current download folder instead of the last-used one.
+        if (!String.IsNullOrEmpty(initialDir) && System.IO.Directory.Exists(initialDir))
+        {
+            Guid shellItemId = new Guid("43826d1e-e718-42ee-bc55-a1e261c37bfe");
+            IntPtr folderItem;
+            if (SHCreateItemFromParsingName(initialDir, IntPtr.Zero, ref shellItemId, out folderItem) == 0)
+            {
+                dialog.SetFolder(folderItem);
+                Marshal.Release(folderItem);
+            }
+        }
 
         if (ownerHandle != IntPtr.Zero)
         {
@@ -125,7 +141,7 @@ $owner.Show()
 $owner.Activate()
 
 try {
-  $selectedPath = [ModernFolderPicker]::Pick($owner.Handle)
+  $selectedPath = [ModernFolderPicker]::Pick($owner.Handle, $InitialDir)
   if ([string]::IsNullOrWhiteSpace($selectedPath)) {
     exit 2
   }

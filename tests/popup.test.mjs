@@ -23,7 +23,10 @@ class FakeElement {
   constructor(tagName = "div") {
     this.tagName = tagName.toUpperCase();
     this.children = [];
-    this.style = {};
+    this.style = {
+      setProperty(name, value) { this[name] = value; },
+      removeProperty(name) { delete this[name]; },
+    };
     this.dataset = {};
     this.classList = new FakeClassList();
     this.textContent = "";
@@ -62,6 +65,7 @@ class FakeElement {
   remove() {}
   closest() { return null; }
   click() { this.dispatch("click"); }
+  cloneNode() { return new FakeElement(this.tagName); }
 }
 
 const elements = new Map();
@@ -115,7 +119,8 @@ const chromeMock = {
       async set() {},
     },
     onChanged: {
-      addListener() {},
+      listeners: [],
+      addListener(fn) { this.listeners.push(fn); },
     },
   },
   i18n: {
@@ -205,6 +210,97 @@ test("the media panel shows a scanning state until the media list arrives", asyn
     assert.equal(panel.ariaBusy, "false");
     assert.equal(label.textContent, "detected");
     assert.equal(getElement("#rescanButton").disabled, false);
+  } finally {
+    chromeMock.runtime.sendMessage = original;
+  }
+});
+
+test("media found after the scan shows up live and new items are probed once", async () => {
+  const original = chromeMock.runtime.sendMessage;
+  const item = { url: "https://cdn.example.com/late.mp4", kind: "direct", extension: "mp4", title: "Late", size: 123456789 };
+  chromeMock.runtime.sendMessage = async (message) => {
+    runtimeMessages.push(message);
+    if (message?.type === "media:getForTab") return { ok: true, items: [item] };
+    return original(message);
+  };
+  try {
+    runtimeMessages.length = 0;
+    const before = timers.setTimeoutCalls.length;
+    for (const listener of chromeMock.storage.onChanged.listeners) listener({ "tabMedia:1": { newValue: [] } }, "local");
+    const refresh = timers.setTimeoutCalls[timers.setTimeoutCalls.length - 1];
+    assert.ok(timers.setTimeoutCalls.length > before, "the refresh is debounced");
+    await refresh.fn();
+
+    const list = runtimeMessages.find((message) => message.type === "media:getForTab");
+    assert.equal(list.enrich, false, "the live refresh does not start a new scan");
+    const enrich = runtimeMessages.find((message) => message.type === "media:enrich");
+    assert.deepEqual(enrich.urls, [item.url]);
+    assert.equal(getElement("#mediaCount").textContent, "1 detected");
+
+    runtimeMessages.length = 0;
+    await refresh.fn();
+    assert.equal(runtimeMessages.filter((message) => message.type === "media:enrich").length, 0, "probed only once");
+  } finally {
+    chromeMock.runtime.sendMessage = original;
+  }
+});
+
+test("the run tile switches between active downloads", async () => {
+  const original = chromeMock.runtime.sendMessage;
+  const jobs = [
+    { id: "a", status: "running", outputPath: "D:/v/first.mp4", startedAt: "2026-10-09T10:00:02Z" },
+    { id: "b", status: "running", outputPath: "D:/v/second.mp4", startedAt: "2026-10-09T10:00:01Z" },
+    { id: "c", status: "completed", outputPath: "D:/v/done.mp4", startedAt: "2026-10-09T10:00:00Z" }
+  ];
+  chromeMock.runtime.sendMessage = async (message) => {
+    if (message?.type === "helper:statusGet") return { ok: true, online: true, health: { downloadDir: "D:/v" }, jobs };
+    return original(message);
+  };
+  try {
+    const poll = timers.setIntervalCalls[0].fn;
+    await poll();
+    assert.equal(getElement("#runTile").hidden, false);
+    assert.equal(getElement("#runNav").hidden, false);
+    assert.equal(getElement("#runTitle").textContent, "first.mp4");
+    assert.equal(getElement("#runPos").textContent, "1/2");
+
+    getElement("#runNext").click();
+    assert.equal(getElement("#runTitle").textContent, "second.mp4");
+    assert.equal(getElement("#runPos").textContent, "2/2");
+
+    getElement("#runNext").click();
+    assert.equal(getElement("#runTitle").textContent, "first.mp4", "wraps around");
+
+    await poll();
+    assert.equal(getElement("#runTitle").textContent, "first.mp4", "a poll right after a switch keeps the job");
+  } finally {
+    chromeMock.runtime.sendMessage = original;
+  }
+});
+
+test("media still without a size is probed again after a pause, a limited number of times", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+  const original = chromeMock.runtime.sendMessage;
+  const item = { url: "https://cdn.example.com/unknown.mp4", kind: "direct", extension: "mp4", title: "Unknown", size: null };
+  chromeMock.runtime.sendMessage = async (message) => {
+    // original() records every other message itself.
+    if (message?.type === "media:getForTab") return { ok: true, items: [item] };
+    return original(message);
+  };
+  const enrichCount = () => runtimeMessages.filter((message) => message.type === "media:enrich").length;
+  try {
+    for (const listener of chromeMock.storage.onChanged.listeners) listener({ "tabMedia:1": { newValue: [] } }, "local");
+    await timers.setTimeoutCalls[timers.setTimeoutCalls.length - 1].fn();
+    runtimeMessages.length = 0;
+    const poll = timers.setIntervalCalls[0].fn;
+
+    await poll();
+    assert.equal(enrichCount(), 0, "not again right away");
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      t.mock.timers.tick(5000);
+      await poll();
+    }
+    assert.equal(enrichCount(), 2, "two retries after the first probe, then it stops");
   } finally {
     chromeMock.runtime.sendMessage = original;
   }

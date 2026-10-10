@@ -26,6 +26,9 @@ const mediaCountNum = document.querySelector("#mediaCountNum");
 const runTile = document.querySelector("#runTile");
 const runTitle = document.querySelector("#runTitle");
 const runValue = document.querySelector("#runValue");
+const runNav = document.querySelector("#runNav");
+const runPos = document.querySelector("#runPos");
+const runDots = document.querySelector("#runDots");
 const mediaPanel = document.querySelector("#mediaPanel");
 const scanLabel = document.querySelector("#scanLabel");
 
@@ -37,6 +40,27 @@ const helperJobNodes = new Map();
 let statusLoading = false;
 let statusPending = false;
 let scansRunning = 0;
+let helperOnline = false;
+let helperDownloadDir = "";
+// media URL -> { node, variants, status, item } of the rendered item
+const mediaNodes = new Map();
+// Media URL -> { count, at } of probes this popup asked for (scan or
+// MEDIA_ENRICH). An item still without a size is retried a few times: its
+// first probe may have run before the page's cookies/referer were captured.
+const enrichAttempts = new Map();
+const ENRICH_RETRY_MS = 5000;
+const ENRICH_MAX_ATTEMPTS = 3;
+let mediaRefreshTimer = null;
+let refreshAfterScan = false;
+// Run tile carousel: which active job is shown, and since when.
+const RUN_ROTATE_MS = 4000;
+let runJobId = null;
+let runShownAt = 0;
+let lastRunJobs = [];
+// Download dialog saved while the Windows folder picker is open: the popup
+// closes when it loses focus, and restores the dialog when it reopens.
+const PENDING_DIALOG_KEY = "pendingDownloadDialog";
+const PENDING_DIALOG_TTL_MS = 10 * 60_000;
 
 rescanButton.addEventListener("click", () => whileScanning(async () => {
   if (!activeTab?.id) return;
@@ -51,6 +75,8 @@ rescanButton.addEventListener("click", () => whileScanning(async () => {
 }));
 
 refreshHelperButton.addEventListener("click", loadHelperStatus);
+document.querySelector("#runPrev").addEventListener("click", () => renderRunTile(lastRunJobs, -1));
+document.querySelector("#runNext").addEventListener("click", () => renderRunTile(lastRunJobs, 1));
 clearMissingButton.addEventListener("click", clearMissingJobs);
 openDashboardButton.addEventListener("click", () => {
   chrome.tabs.create({ url: "http://127.0.0.1:8765" });
@@ -80,7 +106,12 @@ if (langSelector) {
 
 await applyLanguageUI();
 await Promise.all([loadSettings(), loadMedia(), loadHelperStatus()]);
-window.setInterval(loadHelperStatus, 2000);
+window.setInterval(() => {
+  retryUnknownSizes();
+  return loadHelperStatus();
+}, 2000);
+chrome.storage.onChanged.addListener(onMediaStorageChanged);
+await restorePendingDialog();
 
 async function loadSettings() {
   const response = await chrome.runtime.sendMessage({ type: MESSAGE.SETTINGS_GET });
@@ -115,7 +146,62 @@ async function whileScanning(task) {
   } finally {
     scansRunning -= 1;
     if (!scansRunning) setScanning(false);
+    if (!scansRunning && refreshAfterScan) {
+      refreshAfterScan = false;
+      refreshMediaList();
+    }
   }
+}
+
+// Sizes and resolutions found after the scan answered, and media detected
+// while the popup is open, arrive through storage; show them as they come.
+function onMediaStorageChanged(changes, area) {
+  if (area !== "local" || !activeTab?.id || !changes[`tabMedia:${activeTab.id}`]) return;
+  window.clearTimeout(mediaRefreshTimer);
+  mediaRefreshTimer = window.setTimeout(refreshMediaList, 300);
+}
+
+async function refreshMediaList() {
+  // A running scan renders the final list itself; refresh once it is done.
+  if (scansRunning) {
+    refreshAfterScan = true;
+    return;
+  }
+  const response = await chrome.runtime.sendMessage({
+    type: MESSAGE.MEDIA_GET_FOR_TAB,
+    tabId: activeTab.id,
+    enrich: false
+  }).catch(() => null);
+  if (!response?.ok) return;
+  const items = sortMediaByQuality(response.items || []);
+  renderMedia(items, { live: true });
+
+  const urls = items.filter(needsProbe).map((item) => item.url);
+  if (!urls.length) return;
+  for (const url of urls) noteProbe(url);
+  chrome.runtime.sendMessage({ type: MESSAGE.MEDIA_ENRICH, tabId: activeTab.id, urls }).catch(() => {});
+}
+
+// Runs on the 2 s status poll, so a retry does not wait for a storage change.
+function retryUnknownSizes() {
+  if (scansRunning || !activeTab?.id) return;
+  const urls = [...mediaNodes.values()].map((entry) => entry.item).filter(needsProbe).map((item) => item.url);
+  if (!urls.length) return;
+  for (const url of urls) noteProbe(url);
+  chrome.runtime.sendMessage({ type: MESSAGE.MEDIA_ENRICH, tabId: activeTab.id, urls }).catch(() => {});
+}
+
+// New media is probed once; media still without a size is probed again
+// after ENRICH_RETRY_MS, up to ENRICH_MAX_ATTEMPTS in all.
+function needsProbe(item) {
+  const attempt = enrichAttempts.get(item.url);
+  if (!attempt) return true;
+  if (item.size || item.estimatedSize || item.isProtected) return false;
+  return attempt.count < ENRICH_MAX_ATTEMPTS && Date.now() - attempt.at >= ENRICH_RETRY_MS;
+}
+
+function noteProbe(url) {
+  enrichAttempts.set(url, { count: (enrichAttempts.get(url)?.count || 0) + 1, at: Date.now() });
 }
 
 function setScanning(active) {
@@ -143,7 +229,9 @@ function loadMedia() {
       return;
     }
 
-    renderMedia(sortMediaByQuality(response.items || []));
+    const items = response.items || [];
+    for (const item of items) noteProbe(item.url);
+    renderMedia(sortMediaByQuality(items));
   });
 }
 
@@ -164,6 +252,8 @@ async function loadHelperStatus() {
     const cachedJobs = response?.cachedJobs || [];
     const stats = response?.stats || null;
     const downloadDir = response?.health?.downloadDir || "";
+    helperOnline = online;
+    helperDownloadDir = downloadDir;
 
     console.log("[ds-video-downloader] loadHelperStatus online=%s jobs=%d cached=%d",
       online, liveJobs.length, cachedJobs.length);
@@ -208,53 +298,64 @@ async function loadHelperStatus() {
   }
 }
 
-function renderMedia(items) {
-  list.textContent = "";
+// Updates the list in place: existing items keep their node, so a live
+// refresh does not wipe a running download's status line.
+// live: a refresh from storage; keep whatever notice is showing.
+function renderMedia(items, { live = false } = {}) {
   mediaCount.textContent = getMessage("msgCountDetected", { count: String(items.length) });
   mediaCountNum.textContent = String(items.length);
   setTabCount(mediaTabCount, items.length);
 
   if (!items.length) {
+    list.textContent = "";
+    mediaNodes.clear();
     showNotice(getMessage("msgEmptyHint"));
     return;
   }
 
-  hideNotice();
+  if (!live || notice.textContent === getMessage("msgEmptyHint")) hideNotice();
+  const seen = new Set();
   for (const item of items) {
-    const node = template.content.firstElementChild.cloneNode(true);
-    node.dataset.kind = item.kind;
-    node.classList.toggle("is-locked", Boolean(item.isProtected));
-    const title = node.querySelector(".media-title");
-    const kind = node.querySelector(".media-kind");
-    const meta = node.querySelector(".media-meta-row");
-    const variants = node.querySelector(".variant-list");
-    const status = node.querySelector(".job-status");
-    const button = node.querySelector(".download-button");
-
-    title.textContent = displayMediaTitle(item);
-    kind.textContent = item.kind.toUpperCase();
-    renderMediaMeta(meta, item);
-    renderVariants(variants, item.variants || [], item);
-
-    // Remove the separate download button — clicking the media item itself initiates download
-    if (button) button.remove();
-
-    // Make the entire media item a clickable download trigger
-    if (!item.isProtected) node.style.cursor = "pointer";
-    node.title = item.isProtected
-      ? (item.unsupportedReason || getMessage("labelUnsupported"))
-      : getMessage("msgClickToDownload", { name: sanitizeFilename(item.title, item.extension) });
-
-    if (!item.isProtected) {
-      node.addEventListener("click", (e) => {
-        // Don't trigger when clicking variant chips (those have their own handlers)
-        if (e.target.closest(".variant-chip")) return;
-        confirmDownload(item, () => startDownload(item, variants, status));
-      });
-    }
-
-    list.appendChild(node);
+    seen.add(item.url);
+    const entry = mediaNodes.get(item.url) || createMediaNode();
+    entry.item = item;
+    fillMediaNode(entry);
+    mediaNodes.set(item.url, entry);
+    list.appendChild(entry.node); // re-appending also moves it into sort order
   }
+  for (const [url, entry] of mediaNodes) {
+    if (seen.has(url)) continue;
+    entry.node.remove();
+    mediaNodes.delete(url);
+  }
+}
+
+function createMediaNode() {
+  const node = template.content.firstElementChild.cloneNode(true);
+  // Remove the separate download button — clicking the media item itself initiates download
+  node.querySelector(".download-button")?.remove();
+  const entry = { node, variants: node.querySelector(".variant-list"), status: node.querySelector(".job-status"), item: null };
+  node.addEventListener("click", (e) => {
+    // Don't trigger when clicking variant chips (those have their own handlers)
+    if (e.target.closest(".variant-chip") || entry.item.isProtected) return;
+    const item = entry.item;
+    confirmDownload(item, (output) => startDownload(item, entry.variants, entry.status, output));
+  });
+  return entry;
+}
+
+function fillMediaNode({ node, item, variants }) {
+  node.dataset.kind = item.kind;
+  node.classList.toggle("is-locked", Boolean(item.isProtected));
+  node.querySelector(".media-title").textContent = displayMediaTitle(item);
+  node.querySelector(".media-kind").textContent = item.kind.toUpperCase();
+  renderMediaMeta(node.querySelector(".media-meta-row"), item);
+  renderVariants(variants, item.variants || [], item);
+  // Make the entire media item a clickable download trigger
+  node.style.cursor = item.isProtected ? "" : "pointer";
+  node.title = item.isProtected
+    ? (item.unsupportedReason || getMessage("labelUnsupported"))
+    : getMessage("msgClickToDownload", { name: sanitizeFilename(item.title, item.extension) });
 }
 
 function renderHelperJobs(jobs) {
@@ -279,6 +380,7 @@ function renderHelperJobs(jobs) {
       const pathEl = existing.querySelector(".helper-job-path");
       const sourceBtn = existing.querySelector(".source-button");
       const resumeBtn = existing.querySelector(".resume-button");
+      const browserBtn = existing.querySelector(".browser-button");
       const cancelBtn = existing.querySelector(".cancel-button");
       const showBtn = existing.querySelector(".show-button");
       const removeBtn = existing.querySelector(".remove-button");
@@ -295,6 +397,7 @@ function renderHelperJobs(jobs) {
       sourceBtn.disabled = !job.sourcePageUrl;
       sourceBtn.dataset.sourceUrl = job.sourcePageUrl || "";
       resumeBtn.disabled = !job.resumable;
+      browserBtn.disabled = !canRetryInBrowser(job);
       cancelBtn.disabled = !isActive;
       showBtn.disabled = !fileExists;
       removeBtn.disabled = isActive;
@@ -318,6 +421,7 @@ function renderHelperJobs(jobs) {
 
       const sourceButton = node.querySelector(".source-button");
       const resumeButton = node.querySelector(".resume-button");
+      const browserButton = node.querySelector(".browser-button");
       const cancelButton = node.querySelector(".cancel-button");
       const showButton = node.querySelector(".show-button");
       const removeButton = node.querySelector(".remove-button");
@@ -326,12 +430,14 @@ function renderHelperJobs(jobs) {
       sourceButton.disabled = !job.sourcePageUrl;
       sourceButton.dataset.sourceUrl = job.sourcePageUrl || "";
       resumeButton.disabled = !job.resumable;
+      browserButton.disabled = !canRetryInBrowser(job);
       cancelButton.disabled = !isActive;
       showButton.disabled = !fileExists;
       removeButton.disabled = isActive;
       removeButton.dataset.fileExists = String(fileExists);
       sourceButton.addEventListener("click", () => openSourcePage(sourceButton.dataset.sourceUrl));
       resumeButton.addEventListener("click", () => resumeJob(job.id, resumeButton));
+      browserButton.addEventListener("click", () => downloadJobWithBrowser(job));
       cancelButton.addEventListener("click", () => cancelJob(job.id));
       showButton.addEventListener("click", () => showJobInFolder(job.id));
       removeButton.addEventListener("click", () => openRemoveDialog(job.id, removeButton.dataset.fileExists === "true", jobTitle(job)));
@@ -355,24 +461,152 @@ function renderHelperJobs(jobs) {
   }
 }
 
-function confirmDownload(item, callback) {
-  const kindLabel = item.kind === "direct"
-    ? getMessage("labelDirectDownload")
-    : getMessage("labelStreamKind", { kind: item.kind.toUpperCase() });
-  const quality = item.quality ? ` (${item.quality})` : "";
-  const dialog = openDialog(getMessage("confirmDownloadTitle"), `${sanitizeFilename(item.title, item.extension)}${quality}`, kindLabel, [
+// The download dialog: an editable file name (the extension is fixed by what
+// gets written) and a folder for this download only, starting at the
+// helper's saved download folder. onConfirm receives { filename, downloadDir }.
+// initial: values restored after the folder picker closed the popup.
+function confirmDownload(item, onConfirm, variant = null, initial = {}) {
+  const quality = variant?.quality || item.quality;
+  const kindLabel = [
+    item.kind === "direct" ? getMessage("labelDirectDownload") : getMessage("labelStreamKind", { kind: item.kind.toUpperCase() }),
+    quality
+  ].filter(Boolean).join(" · ");
+  // Offline, a direct file goes to Chrome, which only saves to its own folder.
+  const chooseFolder = helperOnline || item.kind !== "direct";
+
+  const fields = document.createElement("div");
+  fields.className = "confirm-fields";
+
+  const nameInput = document.createElement("input");
+  nameInput.type = "text";
+  nameInput.value = initial.filename ?? defaultFileBase(item);
+  nameInput.spellcheck = false;
+  const extension = document.createElement("span");
+  extension.className = "confirm-ext";
+  extension.textContent = `.${outputExtension(item)}`;
+  fields.appendChild(dialogField(getMessage("dialogFileNameLabel"), nameInput, extension));
+
+  const dirInput = document.createElement("input");
+  dirInput.type = "text";
+  dirInput.value = initial.downloadDir || helperDownloadDir;
+  dirInput.spellcheck = false;
+  const browseButton = document.createElement("button");
+  browseButton.type = "button";
+  browseButton.className = "ghost-button";
+  browseButton.textContent = getMessage("btnBrowse");
+  if (chooseFolder) {
+    fields.appendChild(dialogField(getMessage("dialogFolderLabel"), dirInput, browseButton));
+  } else {
+    const hint = document.createElement("p");
+    hint.className = "confirm-hint";
+    hint.textContent = getMessage("dialogChromeFolderHint");
+    fields.appendChild(hint);
+  }
+
+  const overlay = openDialog(getMessage("confirmDownloadTitle"), "", kindLabel, [
     { label: getMessage("btnCancel"), className: "btn-ghost" },
-    { label: getMessage("btnDownload"), className: "btn-primary", onClick: callback, focus: true }
-  ]);
-  return dialog;
+    {
+      label: getMessage("btnDownload"),
+      className: "btn-primary",
+      onClick: () => onConfirm({
+        filename: nameInput.value.trim(),
+        downloadDir: chooseFolder ? dirInput.value.trim() : ""
+      })
+    }
+  ], "", { content: fields, onClose: clearPendingDialog });
+
+  const submit = (event) => {
+    if (event.key === "Enter") overlay.querySelector(".btn-primary")?.click();
+  };
+  nameInput.addEventListener("keydown", submit);
+  dirInput.addEventListener("keydown", submit);
+
+  browseButton.addEventListener("click", async () => {
+    browseButton.disabled = true;
+    await chrome.storage.session?.set({
+      [PENDING_DIALOG_KEY]: {
+        tabId: activeTab?.id,
+        item,
+        variant,
+        filename: nameInput.value,
+        downloadDir: dirInput.value,
+        savedAt: Date.now()
+      }
+    }).catch(() => {});
+    const response = await chrome.runtime.sendMessage({
+      type: MESSAGE.HELPER_FOLDER_PICK,
+      options: { initialDir: dirInput.value.trim(), persist: false, reopenPopup: true }
+    }).catch(() => null);
+    // Only reached when the popup stayed open during the picker.
+    browseButton.disabled = false;
+    if (response?.ok) {
+      dirInput.value = response.settings?.downloadDir || dirInput.value;
+    } else if (response?.error && response.error !== "FOLDER_PICK_CANCELLED") {
+      showNotice(response.error === "HELPER_OFFLINE" ? getMessage("msgHelperOfflinePickDir") : response.error, true);
+    }
+  });
+
+  nameInput.focus?.();
+  nameInput.select?.();
+  return overlay;
+}
+
+function dialogField(labelText, input, trailing) {
+  const field = document.createElement("label");
+  field.className = "confirm-field";
+  const label = document.createElement("span");
+  label.textContent = labelText;
+  const row = document.createElement("div");
+  row.className = "confirm-input-row";
+  row.appendChild(input);
+  row.appendChild(trailing);
+  field.appendChild(label);
+  field.appendChild(row);
+  return field;
+}
+
+// HLS/DASH are muxed to mp4 by the helper; direct files keep their own type.
+function outputExtension(item) {
+  return item.kind === "direct" ? (item.extension || "mp4") : "mp4";
+}
+
+function defaultFileBase(item) {
+  let base = sanitizeFilename(item.title);
+  for (const extension of new Set([item.extension, outputExtension(item)])) {
+    if (extension && base.toLowerCase().endsWith(`.${extension}`)) base = base.slice(0, -extension.length - 1);
+  }
+  return base;
+}
+
+// Reopens the download dialog the folder picker interrupted, with the folder
+// the background stored after the picker closed.
+async function restorePendingDialog() {
+  const stored = await chrome.storage.session?.get(PENDING_DIALOG_KEY).catch(() => null);
+  const state = stored?.[PENDING_DIALOG_KEY];
+  if (!state?.item) return;
+  if (state.tabId !== activeTab?.id || Date.now() - state.savedAt > PENDING_DIALOG_TTL_MS) {
+    await clearPendingDialog();
+    return;
+  }
+  const nodes = mediaNodes.get(state.item.url) || {};
+  const start = state.variant
+    ? (output) => startVariantDownload(state.item, state.variant, nodes.status, output)
+    : (output) => startDownload(state.item, nodes.variants, nodes.status, output);
+  confirmDownload(state.item, start, state.variant, state);
+}
+
+function clearPendingDialog() {
+  return chrome.storage.session?.remove(PENDING_DIALOG_KEY).catch(() => {});
 }
 
 // Builds a modal: yellow header slab, paper body, action buttons. Every button
 // closes the dialog first, then runs its onClick. Backdrop click and Escape
 // behave like the cancel path (close without a callback).
+// options.content: extra element shown above the buttons.
+// options.onClose: runs whenever the dialog closes, by any path.
 let closeActiveDialog = null;
 
-function openDialog(titleText, nameText, kindText, actions, actionsClassName = "") {
+function openDialog(titleText, nameText, kindText, actions, actionsClassName = "", options = {}) {
   closeActiveDialog?.();
 
   const overlay = document.createElement("div");
@@ -390,10 +624,13 @@ function openDialog(titleText, nameText, kindText, actions, actionsClassName = "
 
   const body = document.createElement("div");
   body.className = "confirm-body";
-  const name = document.createElement("p");
-  name.className = "confirm-name";
-  name.textContent = nameText;
-  body.appendChild(name);
+  if (nameText) {
+    const name = document.createElement("p");
+    name.className = "confirm-name";
+    name.textContent = nameText;
+    body.appendChild(name);
+  }
+  if (options.content) body.appendChild(options.content);
   if (kindText) {
     const kind = document.createElement("p");
     kind.className = "confirm-kind";
@@ -408,6 +645,7 @@ function openDialog(titleText, nameText, kindText, actions, actionsClassName = "
     overlay.remove();
     document.removeEventListener("keydown", onKey);
     if (closeActiveDialog === close) closeActiveDialog = null;
+    options.onClose?.();
   };
   closeActiveDialog = close;
   const onKey = (event) => {
@@ -439,7 +677,9 @@ function openDialog(titleText, nameText, kindText, actions, actionsClassName = "
   return overlay;
 }
 
-async function startDownload(item, variantContainer, statusContainer) {
+// output: { filename, downloadDir } from the dialog; viaBrowser: true sends a
+// direct file to Chrome's downloader instead of the helper.
+async function startDownload(item, variantContainer, statusContainer, output = {}) {
   if (pendingDownloads.has(item.url)) {
     showNotice(getMessage("msgDownloadInProgress"), true);
     return;
@@ -456,7 +696,8 @@ async function startDownload(item, variantContainer, statusContainer) {
   }
 
   try {
-    if (item.kind === "direct") {
+    // Only Chrome's downloader needs the optional "downloads" permission.
+    if (item.kind === "direct" && (output.viaBrowser || !helperOnline)) {
       try {
         const hasPermission = await chrome.permissions.contains({ permissions: ["downloads"] });
         if (!hasPermission) {
@@ -477,7 +718,8 @@ async function startDownload(item, variantContainer, statusContainer) {
     try {
       response = await chrome.runtime.sendMessage({
         type: MESSAGE.DOWNLOADS_START,
-        item
+        item,
+        output
       });
     } catch (error) {
       console.error("[ds-video-downloader] startDownload sendMessage failed", error);
@@ -493,12 +735,20 @@ async function startDownload(item, variantContainer, statusContainer) {
         keepStatus = true;
         releasePending = false;
         showJobStatus(statusContainer, response.helperJob);
-        pollJob(response.helperJob.id, statusContainer, () => pendingDownloads.delete(item.url));
+        pollJob(response.helperJob.id, statusContainer, (job) => {
+          pendingDownloads.delete(item.url);
+          if (item.kind === "direct" && job?.status === "failed") offerBrowserDownload(item, output, job.error);
+        });
         await loadHelperStatus();
-        showNotice(getMessage("msgHelperStreamStarted"));
+        showNotice(getMessage(item.kind === "direct" ? "msgHelperDirectStarted" : "msgHelperStreamStarted"));
       } else {
         showNotice(getMessage("msgDownloadStarted"));
       }
+      return;
+    }
+
+    if (response?.browserFallback) {
+      offerBrowserDownload(item, output, response.error);
       return;
     }
 
@@ -528,6 +778,31 @@ async function startDownload(item, variantContainer, statusContainer) {
     if (!keepStatus) clearPendingStatus(statusContainer);
   }
 }
+
+// The helper could not fetch a direct file (e.g. 403 without the browser's
+// cookies): offer Chrome's own downloader with the same file name.
+function offerBrowserDownload(item, output, error) {
+  const nodes = mediaNodes.get(item.url) || {};
+  showNotice(getMessage("msgDirectHelperFailed", { error: error || getMessage("statusUnknownError") }), true, {
+    label: getMessage("btnDownloadWithBrowser"),
+    onClick: () => startDownload(item, nodes.variants, nodes.status, { ...output, viaBrowser: true })
+  });
+}
+
+// Failed helper downloads of direct files stay retryable with Chrome from the
+// job list, after the popup was closed and reopened.
+function canRetryInBrowser(job) {
+  return job.inputMode === "direct" && job.status === "failed" && /^https?:\/\//i.test(job.url || "");
+}
+
+function downloadJobWithBrowser(job) {
+  const name = jobTitle(job);
+  const dot = name.lastIndexOf(".");
+  const extension = dot > 0 ? name.slice(dot + 1) : "mp4";
+  const item = { url: job.url, kind: "direct", extension, title: name, sourcePageUrl: job.sourcePageUrl || "" };
+  startDownload(item, null, null, { filename: dot > 0 ? name.slice(0, dot) : name, viaBrowser: true });
+}
+
 function displayMediaTitle(item) {
   const base = sanitizeFilename(item.title, item.extension);
   if (item.kind !== "direct") return base;
@@ -551,7 +826,11 @@ function renderVariants(container, variants, item = null) {
     chip.className = "variant-chip";
     if (item) {
       chip.type = "button";
-      chip.addEventListener("click", () => confirmDownload(item, () => startVariantDownload(item, variant, container.closest(".media-item")?.querySelector(".job-status"))));
+      chip.addEventListener("click", () => confirmDownload(
+        item,
+        (output) => startVariantDownload(item, variant, container.closest(".media-item")?.querySelector(".job-status"), output),
+        variant
+      ));
     }
     const quality = document.createElement("b");
     quality.textContent = variant.quality || getMessage("labelStream");
@@ -570,7 +849,7 @@ function renderVariants(container, variants, item = null) {
   container.hidden = false;
 }
 
-async function startVariantDownload(item, variant, statusContainer) {
+async function startVariantDownload(item, variant, statusContainer, output = {}) {
   if (pendingDownloads.has(item.url)) {
     showNotice(getMessage("msgDownloadInProgress"), true);
     return;
@@ -586,7 +865,8 @@ async function startVariantDownload(item, variant, statusContainer) {
       response = await chrome.runtime.sendMessage({
         type: MESSAGE.DOWNLOADS_START,
         item,
-        variant
+        variant,
+        output
       });
     } catch (error) {
       console.error("[ds-video-downloader] startVariantDownload sendMessage failed", error);
@@ -645,7 +925,7 @@ function pollJob(jobId, container, onSettled) {
     if (response.job.status === "completed" || response.job.status === "failed" || response.job.status === "cancelled") {
       window.clearInterval(timer);
       jobPollers.delete(jobId);
-      onSettled?.();
+      onSettled?.(response.job);
       await loadHelperStatus();
     }
   }, 1000);
@@ -933,12 +1213,36 @@ function setProgress(element, job) {
   else element.style.setProperty("--p", `${(fraction * 100).toFixed(1)}%`);
 }
 
-// Helper panel headline tile: the newest queued/running job and its progress.
+// Helper panel headline tile: one queued/running job and its progress.
 // Hidden when nothing is active, so the helper status tile takes the full row.
-function renderRunTile(jobs) {
-  const job = jobs.find((entry) => entry.status === "running" || entry.status === "queued");
-  runTile.hidden = !job;
-  if (!job) return;
+// With several active jobs it switches to the next one every RUN_ROTATE_MS
+// (on the 2 s status poll, paused while hovered); step -1/+1 switches now.
+function renderRunTile(jobs, step = 0) {
+  lastRunJobs = jobs;
+  const active = jobs.filter((entry) => entry.status === "running" || entry.status === "queued");
+  runTile.hidden = !active.length;
+  runNav.hidden = active.length < 2;
+  runDots.hidden = active.length < 2;
+  if (!active.length) return;
+
+  const now = Date.now();
+  let index = active.findIndex((entry) => entry.id === runJobId);
+  if (index < 0) {
+    index = 0;
+    runShownAt = now;
+  } else if (step || (active.length > 1 && now - runShownAt >= RUN_ROTATE_MS && !runTile.matches?.(":hover"))) {
+    index = (index + (step || 1) + active.length) % active.length;
+    runShownAt = now;
+  }
+  const job = active[index];
+  runJobId = job.id;
+  runPos.textContent = `${index + 1}/${active.length}`;
+  // Keep the dots between polls so the active one animates when it moves.
+  if (runDots.children.length !== active.length) {
+    runDots.textContent = "";
+    for (let dot = 0; dot < active.length; dot += 1) runDots.appendChild(document.createElement("i"));
+  }
+  Array.from(runDots.children).forEach((mark, dot) => mark.classList.toggle("is-active", dot === index));
   const fraction = jobProgressFraction(job);
   runTitle.textContent = jobTitle(job);
   runValue.textContent = fraction === null ? humanStatus(job.status) : String(Math.floor(fraction * 100));
@@ -953,10 +1257,21 @@ function translateNode(root) {
   }
 }
 
-function showNotice(message, isError = false) {
+// action: optional { label, onClick } shown as a button inside the notice.
+function showNotice(message, isError = false, action = null) {
   notice.textContent = message;
   notice.hidden = false;
   notice.classList.toggle("error", isError);
+  if (!action) return;
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "small-button notice-action";
+  button.textContent = action.label;
+  button.addEventListener("click", () => {
+    hideNotice();
+    action.onClick();
+  });
+  notice.appendChild(button);
 }
 
 function hideNotice() {

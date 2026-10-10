@@ -215,7 +215,7 @@ function isSameOrigin(url) {
 // download loop itself lives in src/hls-download.js, shared with the
 // offscreen document (extension mode).
 async function handleStreamDownload(payload) {
-  const { helperUrl, manifestUrl, quality, title, sourcePageUrl, authToken } = payload;
+  const { helperUrl, manifestUrl, quality, title, sourcePageUrl, authToken, filename, downloadDir } = payload;
   console.warn("[ds-content] handleStreamDownload start manifestUrl=", manifestUrl?.slice(0, 80));
   const { startHlsDownload } = await getHlsDownloadModule();
   const handle = await startHlsDownload({
@@ -225,6 +225,8 @@ async function handleStreamDownload(payload) {
     quality,
     title,
     sourcePageUrl: sourcePageUrl || location.href,
+    filename,
+    downloadDir,
     downloadMode: "page"
   });
 

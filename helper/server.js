@@ -2,7 +2,7 @@ import http from "node:http";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { createWriteStream, existsSync } from "node:fs";
-import { mkdir, readdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
+import { mkdir, open, readdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Transform } from "node:stream";
@@ -42,8 +42,16 @@ const RESUMABLE_BROWSER_ERRORS = [
 const DOWNLOAD_MODES = new Set(["extension", "page"]);
 const JOBS_PAGE_SIZE_DEFAULT = 50;
 const JOBS_PAGE_SIZE_MAX = 500;
+// Direct files are fetched in byte-range chunks over parallel connections
+// when the server answers Range requests; otherwise over one connection.
+const DIRECT_CONNECTIONS = Number(process.env.DIRECT_CONNECTIONS || 4);
+const DIRECT_CHUNK_BYTES = Number(process.env.DIRECT_CHUNK_BYTES || 8 * 1024 * 1024);
+const DIRECT_CHUNK_RETRIES = 3;
+const DIRECT_PROBE_TIMEOUT_MS = 30_000;
 const jobs = new Map();
 const jobProcesses = new Map();
+// Direct (non-ffmpeg) downloads are stopped through their AbortController.
+const jobAborts = new Map();
 const uploadLocks = new Map();
 
 async function loadJobsFromDisk() {
@@ -56,7 +64,7 @@ async function loadJobsFromDisk() {
         if (job.status === "running" || job.status === "queued") {
           await failJob(job, "HELPER_RESTARTED", "Download interrupted when the helper stopped").catch(() => {});
         }
-        if (job.resumable && !existsSync(job.tempDir || "")) job.resumable = false;
+        if (job.resumable && !existsSync(resumeDataPath(job))) job.resumable = false;
         reconcileJobFileState(job);
         jobs.set(job.id, job);
       }
@@ -172,7 +180,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === "POST" && req.url === "/pick-folder") {
-      const result = await pickDownloadFolder();
+      const result = await pickDownloadFolder(await readJson(req));
       writeJson(res, result.ok ? 200 : result.status || 400, result);
       return;
     }
@@ -220,6 +228,13 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === "POST" && /^\/jobs\/[^/]+\/resume$/.test(req.url || "")) {
+      const id = decodeURIComponent(req.url.split("/")[2] || "");
+      const result = await resumeDirectJob(id, await readJson(req));
+      writeJson(res, result.ok ? 202 : result.status || 400, result);
+      return;
+    }
+
     if (req.method === "DELETE" && /^\/jobs\/[^/]+\/history$/.test(req.url || "")) {
       const id = decodeURIComponent(req.url.split("/")[2] || "");
       const result = await forgetJobRecord(id);
@@ -236,7 +251,7 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "POST" && req.url === "/download") {
       const payload = await readJson(req);
-      const result = await startDownload(payload);
+      const result = payload?.kind === "direct" ? await startDirectDownload(payload) : await startDownload(payload);
       writeJson(res, result.ok ? 202 : result.status || 400, result);
       return;
     }
@@ -313,9 +328,9 @@ async function startDownload(payload) {
   if (!inspection.ok) return inspection;
   if (inspection.hasDrm) return { ok: false, status: 422, error: "DRM_PROTECTED_UNSUPPORTED" };
 
+  const output = await resolveOutputPath(payload, url, "mp4");
+  if (!output.ok) return output;
   const id = randomUUID();
-  const filename = buildFilename(payload.title || "video", url);
-  const outputPath = await uniqueOutputPath(path.join(downloadDir, filename));
   const now = Date.now();
   const job = {
     id,
@@ -323,8 +338,8 @@ async function startDownload(payload) {
     status: "queued",
     url,
     sourcePageUrl: validateUrl(payload?.sourcePageUrl) || "",
-    outputPath,
-    downloadDir,
+    outputPath: output.outputPath,
+    downloadDir: output.outputDir,
     startedAt: new Date().toISOString(),
     finishedAt: null,
     error: null,
@@ -369,9 +384,9 @@ async function startBrowserDownload(payload) {
     return { ok: true, job: resumable, resumed: true, receivedFiles };
   }
 
+  const output = await resolveOutputPath(payload, url, "mp4");
+  if (!output.ok) return output;
   const id = randomUUID();
-  const filename = buildFilename(payload.title || "video", url);
-  const outputPath = await uniqueOutputPath(path.join(downloadDir, filename));
   const tempDir = path.join(tmpdir(), `ds-video-browser-${id}`);
   await mkdir(tempDir, { recursive: true });
 
@@ -387,8 +402,8 @@ async function startBrowserDownload(payload) {
     streamKind: payload.kind === "dash" ? "dash" : "hls",
     quality: String(payload.quality || "").slice(0, 32),
     trackKey: String(payload.trackKey || "").slice(0, 300),
-    outputPath,
-    downloadDir,
+    outputPath: output.outputPath,
+    downloadDir: output.outputDir,
     tempDir,
     localPlaylistPath: null,
     localAudioPlaylistPath: null,
@@ -416,6 +431,311 @@ async function startBrowserDownload(payload) {
   enforceJobHistoryCap();
   await persistJobsToDisk();
   return { ok: true, job, resumed: false, receivedFiles: [] };
+}
+
+// Direct media files (mp4, webm, ...) are written by the helper itself, so
+// they can land in any folder without the browser's Save As prompt.
+async function startDirectDownload(payload) {
+  const url = validateUrl(payload?.url);
+  if (!url) return { ok: false, status: 400, error: "INVALID_URL" };
+
+  const headers = directHeaders(payload);
+  const controller = new AbortController();
+  const probe = await probeDirectDownload(url, headers, controller);
+  if (!probe.ok) return probe;
+
+  // Downloading the same file again continues the stopped job (keeping its
+  // original name and folder), like browser-fed streams do.
+  const sourcePageUrl = validateUrl(payload?.sourcePageUrl) || "";
+  const previous = probe.acceptsRanges && findResumableDirectJob(url, sourcePageUrl, probe.totalBytes);
+  if (previous) return reopenDirectJob(previous, url, headers, probe, controller);
+
+  const output = await resolveOutputPath(payload, url, directExtension(payload.extension, url));
+  if (!output.ok) {
+    controller.abort();
+    return output;
+  }
+
+  const now = Date.now();
+  const job = {
+    id: randomUUID(),
+    ok: true,
+    inputMode: "direct",
+    status: "running",
+    url,
+    sourcePageUrl,
+    outputPath: output.outputPath,
+    downloadDir: output.outputDir,
+    // Ranged downloads record finished chunks so Resume skips them.
+    directChunkBytes: probe.acceptsRanges ? DIRECT_CHUNK_BYTES : null,
+    directChunksDone: probe.acceptsRanges ? [] : null,
+    startedAt: new Date(now).toISOString(),
+    finishedAt: null,
+    error: null,
+    exitCode: null,
+    progressText: "starting",
+    downloadedBytes: 0,
+    totalBytes: probe.totalBytes,
+    totalSizeSource: probe.totalBytes ? "exact" : "unknown",
+    durationSeconds: null,
+    downloadedSeconds: 0,
+    transferRateBytesPerSecond: 0,
+    etaSeconds: null,
+    lastProgressAt: null,
+    lastProgressBytes: 0,
+    lastActivityAt: now,
+    ffmpegArgs: [],
+    log: []
+  };
+  jobs.set(job.id, job);
+  enforceJobHistoryCap();
+  await persistJobsToDisk();
+
+  runDirectDownload(job, headers, probe, controller);
+  return { ok: true, job };
+}
+
+function directHeaders(payload) {
+  return normalizeHeaders(payload?.headers || []).filter((header) => header.name.toLowerCase() !== "range");
+}
+
+function findResumableDirectJob(url, sourcePageUrl, totalBytes) {
+  for (const job of Array.from(jobs.values()).reverse()) {
+    if (!isRangedDirect(job) || !job.resumable) continue;
+    if (job.status !== "failed" && job.status !== "cancelled") continue;
+    if (urlPath(job.url) !== urlPath(url) || (job.sourcePageUrl || "") !== sourcePageUrl) continue;
+    if (job.totalBytes === totalBytes && existsSync(resumeDataPath(job))) return job;
+  }
+  return null;
+}
+
+// POST /jobs/:id/resume — payload.headers: fresh request headers from the
+// extension (cookies are never stored in the job file).
+async function resumeDirectJob(id, payload) {
+  const job = jobs.get(id);
+  if (!job) return { ok: false, status: 404, error: "JOB_NOT_FOUND" };
+  if (job.inputMode !== "direct" || !job.resumable || !existsSync(resumeDataPath(job))) {
+    return { ok: false, status: 409, error: "JOB_NOT_RESUMABLE" };
+  }
+  const headers = directHeaders(payload);
+  const controller = new AbortController();
+  const probe = await probeDirectDownload(job.url, headers, controller);
+  if (!probe.ok) return probe;
+  return reopenDirectJob(job, job.url, headers, probe, controller);
+}
+
+// Continues from the finished chunks when the server still serves the same
+// size in ranges; otherwise starts the file over at the same output path.
+async function reopenDirectJob(job, url, headers, probe, controller) {
+  const sameFile = probe.acceptsRanges && probe.totalBytes === job.totalBytes;
+  if (!sameFile) {
+    job.totalBytes = probe.totalBytes;
+    job.totalSizeSource = probe.totalBytes ? "exact" : "unknown";
+    job.directChunkBytes = probe.acceptsRanges ? DIRECT_CHUNK_BYTES : null;
+    job.directChunksDone = probe.acceptsRanges ? [] : null;
+  }
+  const doneBytes = sameFile ? directDoneBytes(job) : 0;
+
+  job.url = url;
+  job.status = "running";
+  job.error = null;
+  job.exitCode = null;
+  job.finishedAt = null;
+  job.resumable = false;
+  job.downloadedBytes = doneBytes;
+  job.lastProgressBytes = doneBytes;
+  job.lastProgressAt = null;
+  job.transferRateBytesPerSecond = 0;
+  job.etaSeconds = null;
+  job.lastActivityAt = Date.now();
+  job.resumeCount = (job.resumeCount || 0) + 1;
+  job.progressText = sameFile
+    ? `Resuming: ${formatBytes(doneBytes)} already downloaded`
+    : "File changed on the server; starting over";
+  // Move to the end so job lists (newest first) show the resumed job on top.
+  jobs.delete(job.id);
+  jobs.set(job.id, job);
+  await persistJobsNow();
+
+  runDirectDownload(job, headers, probe, controller, { resume: sameFile });
+  return { ok: true, job, resumed: sameFile };
+}
+
+function directDoneBytes(job) {
+  const done = new Set(job.directChunksDone || []);
+  return planByteRanges(job.totalBytes, job.directChunkBytes)
+    .filter((chunk) => done.has(chunk.index))
+    .reduce((sum, chunk) => sum + chunk.end - chunk.start + 1, 0);
+}
+
+// Asks for the first byte. A 206 with a total size means the file can be
+// split into ranges; a 200 is the whole file, and its body is reused for a
+// single-connection download instead of being requested again.
+async function probeDirectDownload(url, headers, controller) {
+  const timer = setTimeout(() => controller.abort(), DIRECT_PROBE_TIMEOUT_MS);
+  try {
+    const response = await fetch(url, {
+      headers: { ...headersToObject(headers), Range: "bytes=0-0" },
+      signal: controller.signal
+    });
+    if (response.status === 401 || response.status === 403) {
+      await response.body?.cancel().catch(() => {});
+      return { ok: false, status: 403, error: "SERVER_PROTECTED_UNSUPPORTED" };
+    }
+    if (response.status !== 200 && response.status !== 206) {
+      await response.body?.cancel().catch(() => {});
+      return { ok: false, status: 502, error: `DIRECT_FETCH_${response.status}` };
+    }
+    if (/^text\/html\b/i.test(response.headers.get("content-type") || "")) {
+      await response.body?.cancel().catch(() => {});
+      return { ok: false, status: 422, error: "DIRECT_NOT_MEDIA" };
+    }
+
+    const total = Number(/\/(\d+)\s*$/.exec(response.headers.get("content-range") || "")?.[1]);
+    if (response.status === 206) {
+      await response.body?.cancel().catch(() => {});
+      return total > 0
+        ? { ok: true, acceptsRanges: true, totalBytes: total, response: null }
+        : { ok: true, acceptsRanges: false, totalBytes: null, response: null };
+    }
+    const length = Number(response.headers.get("content-length"));
+    return { ok: true, acceptsRanges: false, totalBytes: length > 0 ? length : null, response };
+  } catch {
+    return { ok: false, status: 502, error: "DIRECT_FETCH_FAILED" };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// resume: keep the .part file and fetch only the chunks not yet finished.
+async function runDirectDownload(job, headers, probe, controller, { resume = false } = {}) {
+  jobAborts.set(job.id, controller);
+  const partPath = resumeDataPath(job);
+  const progress = { bytes: job.downloadedBytes || 0, connections: probe.acceptsRanges ? DIRECT_CONNECTIONS : 1 };
+  const report = () => {
+    updateDownloadedBytes(job, progress.bytes);
+    job.etaSeconds = job.totalBytes && job.transferRateBytesPerSecond > 0
+      ? Math.max(0, job.totalBytes - job.downloadedBytes) / job.transferRateBytesPerSecond
+      : null;
+    const connections = progress.connections > 1 ? ` - ${progress.connections} connections` : "";
+    job.progressText = `${formatProgress(job)}${connections}`;
+    queuePersistJobsToDisk();
+  };
+  const reporter = setInterval(report, 500);
+  reporter.unref?.();
+
+  let handle = null;
+  try {
+    handle = await open(partPath, resume ? "r+" : "w");
+    if (probe.acceptsRanges) {
+      await downloadDirectRanges(job, headers, handle, controller.signal, progress, resume);
+    } else {
+      const response = probe.response || await fetch(job.url, { headers: headersToObject(headers), signal: controller.signal });
+      if (!response.ok) throw new Error(`DIRECT_HTTP_${response.status}`);
+      await writeBodyAt(response.body, handle, 0, (count) => { progress.bytes += count; });
+    }
+    await handle.close();
+    handle = null;
+    if (job.status !== "running") return;
+    if (job.totalBytes && progress.bytes !== job.totalBytes) throw new Error("DIRECT_INCOMPLETE");
+
+    await rename(partPath, job.outputPath);
+    report();
+    job.directChunksDone = null;
+    job.status = "completed";
+    job.progressText = `Completed ${formatBytes(job.downloadedBytes)}`;
+    job.finishedAt = new Date().toISOString();
+    job.etaSeconds = null;
+  } catch (error) {
+    // Stop the other connections; their chunks are no longer needed.
+    controller.abort();
+    if (job.status === "running") {
+      const code = /^DIRECT_|^SERVER_/.test(error?.message || "") ? error.message : "DIRECT_FETCH_FAILED";
+      await failJob(job, code, code);
+    }
+  } finally {
+    clearInterval(reporter);
+    jobAborts.delete(job.id);
+    await handle?.close().catch(() => {});
+    if (job.status !== "completed" && !job.resumable) await unlink(partPath).catch(() => {});
+    persistJobsToDisk();
+  }
+}
+
+// Workers take chunks in order and write each one at its own offset, so no
+// merge step is needed. A 403/429 means the server dislikes parallel
+// requests: drop to one connection and retry the chunk where it stopped.
+async function downloadDirectRanges(job, headers, handle, signal, progress, resume) {
+  if (!resume) await handle.truncate(job.totalBytes);
+  const done = new Set(job.directChunksDone);
+  const chunks = planByteRanges(job.totalBytes, job.directChunkBytes).filter((chunk) => !done.has(chunk.index));
+  let next = 0;
+
+  const worker = async (index) => {
+    while (next < chunks.length && index < progress.connections) {
+      const chunk = chunks[next++];
+      let position = chunk.start;
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          const response = await fetch(job.url, {
+            headers: { ...headersToObject(headers), Range: `bytes=${position}-${chunk.end}` },
+            signal
+          });
+          if (response.status !== 206) {
+            await response.body?.cancel().catch(() => {});
+            if (response.status === 403 || response.status === 429) progress.connections = 1;
+            throw new Error(response.status === 200 ? "DIRECT_RANGE_IGNORED" : `DIRECT_HTTP_${response.status}`);
+          }
+          position = await writeBodyAt(response.body, handle, position, (count) => { progress.bytes += count; });
+          if (position !== chunk.end + 1) throw new Error("DIRECT_INCOMPLETE");
+          job.directChunksDone.push(chunk.index);
+          break;
+        } catch (error) {
+          if (signal.aborted || attempt >= DIRECT_CHUNK_RETRIES) throw error;
+          await new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1)));
+        }
+      }
+    }
+  };
+
+  await Promise.all(Array.from({ length: Math.min(progress.connections, chunks.length) }, (_, index) => worker(index)));
+}
+
+function planByteRanges(totalBytes, chunkBytes) {
+  const chunks = [];
+  for (let start = 0; start < totalBytes; start += chunkBytes) {
+    chunks.push({ index: chunks.length, start, end: Math.min(start + chunkBytes, totalBytes) - 1 });
+  }
+  return chunks;
+}
+
+// Direct jobs downloaded in byte ranges can continue from their .part file.
+function isRangedDirect(job) {
+  return job?.inputMode === "direct" && Array.isArray(job.directChunksDone);
+}
+
+// Where a resumable job keeps what it has downloaded so far.
+function resumeDataPath(job) {
+  return job?.inputMode === "direct" ? `${job.outputPath}.part` : job?.tempDir || "";
+}
+
+async function cleanupResumeData(job) {
+  if (job?.inputMode === "direct") {
+    await unlink(resumeDataPath(job)).catch(() => {});
+    return;
+  }
+  await cleanupBrowserTemp(job);
+}
+
+// Writes a response body into the file starting at `position`; returns the
+// position after the last byte written.
+async function writeBodyAt(body, handle, position, onBytes) {
+  for await (const chunk of body) {
+    await handle.write(chunk, 0, chunk.length, position);
+    position += chunk.length;
+    onBytes(chunk.length);
+  }
+  return position;
 }
 
 function findResumableJob(payload) {
@@ -596,9 +916,9 @@ async function failJob(job, error, progressText, now = Date.now()) {
   job.error = error;
   job.finishedAt = new Date(now).toISOString();
   job.etaSeconds = null;
-  job.resumable = job.inputMode === "browser" && isResumableBrowserError(error);
+  job.resumable = (job.inputMode === "browser" && isResumableBrowserError(error)) || isRangedDirect(job);
   job.progressText = progressText;
-  if (!job.resumable) await cleanupBrowserTemp(job);
+  if (!job.resumable) await cleanupResumeData(job);
 }
 
 async function inspectForUi(payload) {
@@ -930,9 +1250,13 @@ async function updateHelperSettings(payload) {
   return { ok: true, settings: { downloadDir } };
 }
 
-async function pickDownloadFolder() {
+// payload.initialDir: folder the picker opens in (default: the saved one).
+// payload.persist === false: return the choice without saving it as the
+// default, for a folder picked in the download dialog.
+async function pickDownloadFolder(payload = {}) {
   if (process.platform !== "win32") return { ok: false, status: 501, error: "FOLDER_PICKER_UNSUPPORTED" };
 
+  const initialDir = normalizeDownloadDir(payload.initialDir) || downloadDir;
   const resultPath = path.join(tmpdir(), `ds-video-downloader-folder-${randomUUID()}.txt`);
   const result = await runProcess("powershell.exe", [
     "-NoProfile",
@@ -945,7 +1269,9 @@ async function pickDownloadFolder() {
     "-File",
     PICKER_SCRIPT_PATH,
     "-OutFile",
-    resultPath
+    resultPath,
+    "-InitialDir",
+    initialDir
   ], { windowsHide: true });
   const selectedPath = await readFile(resultPath, "utf8").catch(() => "");
   await unlink(resultPath).catch(() => {});
@@ -955,6 +1281,7 @@ async function pickDownloadFolder() {
       : { ok: false, status: 400, error: "FOLDER_PICK_CANCELLED" };
   }
   if (!selectedPath.trim()) return { ok: false, status: 500, error: `FOLDER_PICK_FAILED${result.stderr ? `: ${result.stderr.trim()}` : ""}` };
+  if (payload.persist === false) return { ok: true, settings: { downloadDir: normalizeDownloadDir(selectedPath) } };
   return updateHelperSettings({ downloadDir: selectedPath });
 }
 
@@ -1028,7 +1355,7 @@ async function forgetJobRecord(id) {
     return { ok: false, status: 409, error: "JOB_HISTORY_NOT_REMOVABLE" };
   }
 
-  await cleanupBrowserTemp(job);
+  await cleanupResumeData(job);
   jobs.delete(id);
   await persistJobsToDisk();
   return { ok: true };
@@ -1114,7 +1441,7 @@ async function sweepStalledJobs(now = Date.now(), timeoutMs = JOB_STALL_TIMEOUT_
   for (const job of jobs.values()) {
     if (job.resumable && now - Date.parse(job.finishedAt || 0) >= BROWSER_RESUME_TTL_MS) {
       job.resumable = false;
-      await cleanupBrowserTemp(job);
+      await cleanupResumeData(job);
       changed = true;
       continue;
     }
@@ -1136,6 +1463,7 @@ async function sweepStalledJobs(now = Date.now(), timeoutMs = JOB_STALL_TIMEOUT_
 }
 
 function terminateJobProcess(id) {
+  jobAborts.get(id)?.abort();
   const child = jobProcesses.get(id);
   if (!child || child.killed) return;
   child.kill("SIGTERM");
@@ -1153,13 +1481,13 @@ async function cancelJob(id) {
 
   job.status = "cancelled";
   job.error = null;
-  // Stop works as pause for browser-fed jobs: keep the uploaded segments so
-  // Resume (or downloading the same video again) continues from here.
-  job.resumable = job.inputMode === "browser";
+  // Stop works as pause for browser-fed and ranged direct jobs: keep what was
+  // downloaded so Resume (or downloading the same video again) continues.
+  job.resumable = job.inputMode === "browser" || isRangedDirect(job);
   job.progressText = "Stopped by user";
   job.finishedAt = new Date().toISOString();
   job.etaSeconds = null;
-  if (!job.resumable) await cleanupBrowserTemp(job);
+  if (!job.resumable) await cleanupResumeData(job);
   await persistJobsNow();
 
   terminateJobProcess(id);
@@ -1516,14 +1844,55 @@ function headersToObject(headers) {
   return Object.fromEntries(headers.map((header) => [header.name, header.value]));
 }
 
-function buildFilename(title, url) {
+function buildFilename(title, url, extension = "mp4") {
   const cleanTitle = String(title || "video")
     .replace(/[<>:"/\\|?*\u0000-\u001f]/g, " ")
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 90) || "video";
   const hash = createHash("sha1").update(url).digest("hex").slice(0, 8);
-  return `${cleanTitle}-${hash}.mp4`;
+  return `${cleanTitle}-${hash}.${extension}`;
+}
+
+// A name typed in the download dialog: used as given (no hash suffix), made
+// safe for Windows, and always ends in the extension the output really has.
+function buildCustomFilename(name, extension) {
+  let base = String(name || "")
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (base.toLowerCase().endsWith(`.${extension}`)) base = base.slice(0, -extension.length - 1);
+  base = base.replace(/[. ]+$/, "").slice(0, 120) || "video";
+  if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(base)) base = `_${base}`;
+  return `${base}.${extension}`;
+}
+
+function directExtension(value, url) {
+  const fromPayload = String(value || "").replace(/^\./, "").toLowerCase();
+  if (/^[a-z0-9]{1,8}$/.test(fromPayload)) return fromPayload;
+  const fromUrl = /\.([a-z0-9]{1,8})$/i.exec(urlPath(url))?.[1]?.toLowerCase();
+  return fromUrl || "mp4";
+}
+
+// The download dialog can name the file and choose a folder for this one
+// download. The saved download folder stays the default and is not changed.
+async function resolveOutputPath(payload, url, extension) {
+  let outputDir = downloadDir;
+  if (payload?.downloadDir) {
+    const requested = String(payload.downloadDir).trim().replace(/^"|"$/g, "");
+    if (!path.isAbsolute(requested)) return { ok: false, status: 400, error: "INVALID_DOWNLOAD_DIR" };
+    outputDir = normalizeDownloadDir(requested);
+    if (!outputDir) return { ok: false, status: 400, error: "INVALID_DOWNLOAD_DIR" };
+  }
+  try {
+    await mkdir(outputDir, { recursive: true });
+  } catch {
+    return { ok: false, status: 400, error: "DOWNLOAD_DIR_UNAVAILABLE" };
+  }
+  const filename = String(payload?.filename || "").trim()
+    ? buildCustomFilename(payload.filename, extension)
+    : buildFilename(payload?.title || "video", url, extension);
+  return { ok: true, outputDir, outputPath: await uniqueOutputPath(path.join(outputDir, filename)) };
 }
 
 async function uniqueOutputPath(outputPath) {
