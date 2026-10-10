@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v1.11.0 - 2026-10-09
+
 ### Added
 - The download dialog lets you rename the file and choose the folder before the download starts, for HLS, DASH and direct files. The folder starts at the helper's download folder; a folder picked with Browse… applies to that download only and does not change the saved one. The extension is fixed by the output (`.mp4` for streams, the file's own type for direct files), and a typed name is used as is, without the hash suffix.
 - Direct files are downloaded by the helper (new `kind: "direct"` on `POST /download`) instead of Chrome, so they can go to any folder and Chrome's Save As prompt no longer appears after the dialog. When the server supports byte ranges, the file is fetched in 8 MB chunks over 4 parallel connections (`DIRECT_CONNECTIONS`, `DIRECT_CHUNK_BYTES`); a 403/429 drops it to one connection. Servers without range support get a single connection. The file is written as `<name>.part` and renamed when complete.
