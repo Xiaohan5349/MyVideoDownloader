@@ -128,6 +128,35 @@ export function classifyMedia(url = "", contentType = "") {
   return null;
 }
 
+// The popup's "Copy ffmpeg command": stream copy into fileName, with the
+// page as Referer when there is one.
+export function ffmpegCommand(url, referer, fileName) {
+  const quote = (value) => `"${String(value).replace(/"/g, '\\"')}"`;
+  return ["ffmpeg", referer ? `-referer ${quote(referer)}` : "", `-i ${quote(url)}`, "-c copy", quote(fileName)]
+    .filter(Boolean).join(" ");
+}
+
+// Search highlighting: the [start, end) spans of text that contain any of
+// words (already lowercase), in order, with overlapping spans merged.
+export function highlightRanges(text, words) {
+  const lower = String(text).toLowerCase();
+  const ranges = [];
+  for (const word of words) {
+    if (!word) continue;
+    for (let at = lower.indexOf(word); at >= 0; at = lower.indexOf(word, at + word.length)) {
+      ranges.push([at, at + word.length]);
+    }
+  }
+  ranges.sort((a, b) => a[0] - b[0]);
+  const merged = [];
+  for (const [start, end] of ranges) {
+    const last = merged.at(-1);
+    if (last && start <= last[1]) last[1] = Math.max(last[1], end);
+    else merged.push([start, end]);
+  }
+  return merged;
+}
+
 export function sanitizeFilename(name = "video", extension = "") {
   let base = String(name || "video")
     .replace(/[<>:"/\\|?*\u0000-\u001f]/g, " ")

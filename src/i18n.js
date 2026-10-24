@@ -18,10 +18,11 @@ async function loadLocale(locale) {
 
 export async function initI18n() {
   const result = await chrome.storage.local.get(USER_LANGUAGE_KEY);
-  const lang = result[USER_LANGUAGE_KEY] || chrome.i18n.getUILanguage() || "en";
+  const lang = result[USER_LANGUAGE_KEY] || chrome.i18n?.getUILanguage() || "en";
   const locale = lang.startsWith("zh") ? "zh_CN" : "en";
   messages = await loadLocale(locale);
-  document.documentElement.lang = locale === "zh_CN" ? "zh-CN" : "en";
+  // The service worker (notifications) has no document.
+  if (globalThis.document) document.documentElement.lang = locale === "zh_CN" ? "zh-CN" : "en";
 }
 
 export async function getUserLanguage() {
@@ -61,7 +62,9 @@ export async function applyLanguageUI(root = document) {
   }
 }
 
-chrome.storage.onChanged.addListener((changes, area) => {
-  if (area !== "local" || !changes[USER_LANGUAGE_KEY]) return;
-  applyLanguageUI().catch(() => {});
-});
+if (globalThis.document) {
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== "local" || !changes[USER_LANGUAGE_KEY]) return;
+    applyLanguageUI().catch(() => {});
+  });
+}

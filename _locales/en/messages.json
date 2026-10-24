@@ -26,9 +26,6 @@
   "btnRefresh": {
     "message": "Refresh"
   },
-  "btnOpenDashboard": {
-    "message": "Dashboard"
-  },
   "btnDownload": {
     "message": "Download"
   },
@@ -376,5 +373,53 @@
   },
   "btnNextJob": {
     "message": "Next download"
+  },
+  "searchJobsPlaceholder": {
+    "message": "Search downloads: name, folder"
+  },
+  "msgNoMatches": {
+    "message": "No downloads match “{{query}}”."
+  },
+  "filterAll": {
+    "message": "All"
+  },
+  "labelKindDirect": {
+    "message": "Direct"
+  },
+  "filterKindAria": {
+    "message": "Filter by media type"
+  },
+  "btnCopyUrl": {
+    "message": "Copy URL"
+  },
+  "btnCopyFfmpeg": {
+    "message": "Copy ffmpeg command"
+  },
+  "msgCopied": {
+    "message": "Copied"
+  },
+  "msgCopyFailed": {
+    "message": "Copy failed"
+  },
+  "notifyJobDone": {
+    "message": "Download finished"
+  },
+  "notifyJobFailed": {
+    "message": "Download failed"
+  },
+  "notifyClickToShow": {
+    "message": "Click to open the folder"
+  },
+  "filterAllSites": {
+    "message": "All sites"
+  },
+  "siteFilterAria": {
+    "message": "Filter by site"
+  },
+  "msgNoSiteJobs": {
+    "message": "No downloads from {{site}}."
+  },
+  "btnSiteFilterTitle": {
+    "message": "Show only downloads from this site"
   }
 }

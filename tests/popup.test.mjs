@@ -62,6 +62,7 @@ class FakeElement {
   }
   querySelectorAll() { return []; }
   appendChild(child) { this.children.push(child); return child; }
+  append(...nodes) { this.children.push(...nodes); }
   remove() {}
   closest() { return null; }
   click() { this.dispatch("click"); }
@@ -156,7 +157,7 @@ test("popup initializes with no media and helper offline", () => {
   assert.equal(getElement("#mediaCount").textContent, "0 detected");
   assert.equal(getElement("#helperSummary").textContent, "Helper offline");
   assert.ok(getElement("#helperStatus").className.includes("is-offline"));
-  assert.match(getElement("#helperJobs").innerHTML, /No helper jobs yet/);
+  assert.match(getElement("#helperJobs").children.at(-1).textContent, /No helper jobs yet/);
   assert.equal(timers.setIntervalCalls.length, 1);
 });
 
@@ -303,5 +304,108 @@ test("media still without a size is probed again after a pause, a limited number
     assert.equal(enrichCount(), 2, "two retries after the first probe, then it stops");
   } finally {
     chromeMock.runtime.sendMessage = original;
+  }
+});
+
+test("typing in the job search asks the helper for matches and shows a no-match message", async () => {
+  const original = chromeMock.runtime.sendMessage;
+  const statusQueries = [];
+  chromeMock.runtime.sendMessage = async (message) => {
+    if (message?.type === "helper:statusGet") {
+      statusQueries.push(message.query);
+      return { ok: true, online: true, health: {}, jobs: [], searchJobs: [], stats: { active: 0, total: 0 } };
+    }
+    return original(message);
+  };
+  const input = getElement("#jobSearchInput");
+  try {
+    input.value = "  <b>trip</b> ";
+    const before = timers.setTimeoutCalls.length;
+    input.dispatch("input");
+    assert.equal(timers.setTimeoutCalls.length, before + 1, "the search waits for typing to pause");
+    await timers.setTimeoutCalls.at(-1).fn();
+
+    assert.equal(statusQueries.at(-1), "<b>trip</b>");
+    const empty = getElement("#helperJobs").children.at(-1);
+    assert.equal(empty.textContent, "No downloads match “<b>trip</b>”.");
+
+    let prevented = false;
+    input.dispatch("keydown", { key: "Escape", preventDefault() { prevented = true; } });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.ok(prevented, "Escape clears the search instead of closing the popup");
+    assert.equal(input.value, "");
+    assert.equal(statusQueries.at(-1), "");
+  } finally {
+    chromeMock.runtime.sendMessage = original;
+    input.value = "";
+  }
+});
+
+test("media type chips appear for mixed kinds and hide the other kinds", async () => {
+  const original = chromeMock.runtime.sendMessage;
+  const items = [
+    { url: "https://cdn.example.com/a.m3u8", kind: "hls", extension: "m3u8", title: "A" },
+    { url: "https://cdn.example.com/b.mp4", kind: "direct", extension: "mp4", title: "B", size: 5_000_000 },
+    { url: "https://cdn.example.com/c.mp4", kind: "direct", extension: "mp4", title: "C", size: 6_000_000 },
+  ];
+  chromeMock.runtime.sendMessage = async (message) => {
+    if (message?.type === "media:getForTab") return { ok: true, items };
+    return original(message);
+  };
+  const filter = getElement("#kindFilter");
+  const list = getElement("#mediaList");
+  try {
+    filter.children = [];
+    for (const listener of chromeMock.storage.onChanged.listeners) listener({ "tabMedia:1": { newValue: [] } }, "local");
+    await timers.setTimeoutCalls.at(-1).fn();
+
+    assert.equal(filter.hidden, false);
+    assert.deepEqual(filter.children.map((chip) => chip.textContent), ["All 3", "HLS 1", "Direct 2"]);
+    assert.equal(filter.children[0].ariaPressed, "true");
+
+    const nodes = new Set(list.children.slice(-3));
+    filter.children[1].click();
+    const shown = list.children.slice(-3);
+    assert.deepEqual(shown.filter((node) => !node.hidden).map((node) => node.dataset.kind), ["hls"]);
+    assert.ok(shown.every((node) => nodes.has(node)), "items keep their nodes");
+    assert.equal(getElement("#mediaCount").textContent, "3 detected", "the count stays the page total");
+
+    // Back to a single kind: no chips, and nothing stays hidden.
+    items.splice(0, 1);
+    await timers.setTimeoutCalls.at(-1).fn();
+    assert.equal(filter.hidden, true);
+    assert.ok(list.children.slice(-2).every((node) => !node.hidden));
+  } finally {
+    chromeMock.runtime.sendMessage = original;
+  }
+});
+
+test("the site filter lists the helper sites and sends the chosen one", async () => {
+  const original = chromeMock.runtime.sendMessage;
+  const requests = [];
+  chromeMock.runtime.sendMessage = async (message) => {
+    if (message?.type === "helper:statusGet") {
+      requests.push(message);
+      return { ok: true, online: true, health: {}, jobs: [], searchJobs: [], stats: { active: 0, total: 9 },
+        sites: [{ site: "site.example", count: 8 }, { site: "example.org", count: 1 }] };
+    }
+    return original(message);
+  };
+  const select = getElement("#jobSiteSelect");
+  try {
+    select.children = [];
+    await timers.setIntervalCalls[0].fn();
+    assert.equal(select.hidden, false);
+    assert.deepEqual(select.children.map((option) => [option.value, option.textContent]),
+      [["", "All sites"], ["site.example", "site.example · 8"], ["example.org", "example.org · 1"]]);
+
+    select.value = "site.example";
+    select.dispatch("change");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(requests.at(-1).site, "site.example");
+    assert.equal(getElement("#helperJobs").children.at(-1).textContent, "No downloads from site.example.");
+  } finally {
+    chromeMock.runtime.sendMessage = original;
+    select.value = "";
   }
 });

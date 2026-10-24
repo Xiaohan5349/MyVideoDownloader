@@ -129,7 +129,24 @@ function createChromeMock() {
       async setBadgeText() {},
       async setBadgeBackgroundColor() {},
     },
+    alarms: {
+      active: {},
+      onAlarm: { addListener(fn) { listeners.onAlarm = fn; } },
+      async get(name) { return mock.alarms.active[name]; },
+      async create(name, info) { mock.alarms.active[name] = { name, ...info }; },
+      async clear(name) { delete mock.alarms.active[name]; return true; },
+    },
+    notifications: {
+      created: [],
+      cleared: [],
+      onClicked: { addListener(fn) { listeners.onNotificationClicked = fn; } },
+      async create(id, options) { mock.notifications.created.push({ id, options }); return id; },
+      async clear(id) { mock.notifications.cleared.push(id); return true; },
+    },
     reset() {
+      mock.alarms.active = {};
+      mock.notifications.created = [];
+      mock.notifications.cleared = [];
       for (const key of Object.keys(data)) delete data[key];
       for (const key of Object.keys(sessionData)) delete sessionData[key];
       mock.tabs.updateCalls = [];
@@ -1400,4 +1417,94 @@ test("media detected while the scan waits is probed as well", async () => {
   } finally {
     mock.tabs.sendMessage = original;
   }
+});
+
+function helperStatusFetch(state) {
+  return async (url) => {
+    const href = String(url);
+    state.urls.push(href);
+    if (href.endsWith("/health")) return Response.json({ ok: true, downloadDir: "C:\\Videos" });
+    if (href.includes("/_locales/")) return Response.json({});
+    if (href.includes("limit=50&")) return Response.json({ ok: true, jobs: state.matches || [], total: (state.matches || []).length });
+    return Response.json({ ok: true, jobs: state.jobs, total: state.jobs.length, sites: state.sites || [], stats: { active: 0 } });
+  };
+}
+
+test("HELPER_STATUS_GET with a query also asks the helper for matching jobs", async () => {
+  const state = { urls: [], jobs: [{ id: "recent", status: "completed" }], matches: [{ id: "old-match", status: "completed" }] };
+  globalThis.fetch = helperStatusFetch(state);
+
+  const response = await sendRuntimeMessage({ type: "helper:statusGet", query: "  holiday trip " });
+
+  assert.deepEqual(response.jobs.map((job) => job.id), ["recent"], "the recent list stays unfiltered");
+  assert.deepEqual(response.searchJobs.map((job) => job.id), ["old-match"]);
+  assert.ok(state.urls.some((href) => href.endsWith("/jobs?limit=50&q=holiday+trip")));
+
+  const plain = await sendRuntimeMessage({ type: "helper:statusGet" });
+  assert.equal(plain.searchJobs, null);
+});
+
+test("a watched job that finishes raises one notification and stops the alarm", async () => {
+  const state = { urls: [], jobs: [{ id: "j1", status: "running", outputPath: "C:\\Videos\\Trip.mp4" }] };
+  globalThis.fetch = helperStatusFetch(state);
+  mock.runtime.getURL = (file) => `chrome-extension://ext-id/${file}`;
+
+  await sendRuntimeMessage({ type: "helper:statusGet" });
+  assert.ok(mock.alarms.active.jobWatch, "a running job starts the watch alarm");
+  assert.equal(mock.notifications.created.length, 0);
+
+  state.jobs = [{ id: "j1", status: "completed", outputPath: "C:\\Videos\\Trip.mp4" }];
+  await mock.listeners.onAlarm({ name: "jobWatch" });
+  for (let i = 0; i < 10; i += 1) await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(mock.notifications.created.length, 1);
+  assert.equal(mock.notifications.created[0].id, "job:j1");
+  assert.equal(mock.notifications.created[0].options.message, "Trip.mp4");
+  assert.equal(mock.alarms.active.jobWatch, undefined, "nothing left to watch");
+
+  await sendRuntimeMessage({ type: "helper:statusGet" });
+  assert.equal(mock.notifications.created.length, 1, "the same job is not announced twice");
+});
+
+test("a cancelled job and a job never seen running are not announced", async () => {
+  const state = { urls: [], jobs: [{ id: "c1", status: "running" }] };
+  globalThis.fetch = helperStatusFetch(state);
+  await sendRuntimeMessage({ type: "helper:statusGet" });
+
+  state.jobs = [{ id: "c1", status: "cancelled" }, { id: "old", status: "completed" }];
+  await sendRuntimeMessage({ type: "helper:statusGet" });
+
+  assert.equal(mock.notifications.created.length, 0);
+});
+
+test("clicking a finished-job notification opens the file's folder", async () => {
+  const state = { urls: [], jobs: [] };
+  const fetchFor = helperStatusFetch(state);
+  globalThis.fetch = async (url, options) => {
+    if (String(url).endsWith("/show")) {
+      state.urls.push(`${options?.method} ${url}`);
+      return Response.json({ ok: true });
+    }
+    return fetchFor(url, options);
+  };
+
+  mock.listeners.onNotificationClicked("job:abc");
+  for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(mock.notifications.cleared, ["job:abc"]);
+  assert.ok(state.urls.includes("POST http://127.0.0.1:8765/jobs/abc/show"));
+});
+
+test("HELPER_STATUS_GET filters by site, alone or with a query, and passes the site list on", async () => {
+  const sites = [{ site: "site.example", count: 8 }];
+  const state = { urls: [], jobs: [], matches: [{ id: "m", status: "completed" }], sites };
+  globalThis.fetch = helperStatusFetch(state);
+
+  const bySite = await sendRuntimeMessage({ type: "helper:statusGet", site: "site.example" });
+  assert.ok(state.urls.some((href) => href.endsWith("/jobs?limit=50&site=site.example")));
+  assert.deepEqual(bySite.searchJobs.map((job) => job.id), ["m"]);
+  assert.deepEqual(bySite.sites, sites);
+
+  await sendRuntimeMessage({ type: "helper:statusGet", query: "ep1", site: "site.example" });
+  assert.ok(state.urls.some((href) => href.endsWith("/jobs?limit=50&q=ep1&site=site.example")));
 });

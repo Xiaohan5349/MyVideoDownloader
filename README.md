@@ -34,7 +34,7 @@ npm run helper:start
 
 This starts the helper in the background, so the terminal can be closed.
 
-The helper dashboard opens at [http://127.0.0.1:8765](http://127.0.0.1:8765). You can monitor downloads, check ffmpeg status, and change the download directory from there.
+Downloads are listed in the popup's Helper tab, with search, Stop/Resume and Open folder. [http://127.0.0.1:8765](http://127.0.0.1:8765) only shows that the helper is running.
 
 ### Helper Management
 

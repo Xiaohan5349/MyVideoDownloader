@@ -436,6 +436,38 @@ h1 {
   color: var(--tx);
 }
 
+/* Media type chips: a full row above the list, only when kinds are mixed. */
+.kind-filter {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.kind-chip {
+  height: 26px;
+  padding: 0 11px;
+  border: 1px solid var(--edge-hi);
+  border-radius: 999px;
+  background: var(--tile);
+  color: var(--tx-2);
+  font: 600 11.5px var(--mono);
+  letter-spacing: 0.02em;
+  transition: border-color 120ms, color 120ms;
+}
+
+.kind-chip:hover {
+  border-color: var(--edge-max);
+  color: var(--tx);
+}
+
+.kind-chip[aria-pressed="true"] {
+  border-color: var(--blue);
+  background: var(--blue-wash);
+  color: var(--blue);
+  box-shadow: 0 0 10px var(--blue-wash);
+}
+
 .media-list {
   display: grid;
   grid-template-columns: repeat(6, minmax(0, 1fr));
@@ -870,6 +902,48 @@ span.variant-chip:hover {
   font-weight: 650;
 }
 
+/* Job search and site filter: their own row under the toolbar buttons. */
+.job-search-row {
+  display: flex;
+  flex: 1 0 100%;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.job-search-row .job-site-select {
+  flex: 0 1 auto;
+  width: auto;
+  max-width: 45%;
+  height: 30px;
+  margin: 0;
+  font-size: 11.5px;
+}
+
+.toolbar .job-search {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--edge-hi);
+  border-radius: var(--r3);
+  background: var(--inset);
+  color: var(--tx);
+  font: 12px var(--sans);
+}
+
+.toolbar .job-search::placeholder {
+  color: var(--tx-3);
+}
+
+.toolbar .job-search:focus {
+  border-color: var(--blue);
+  outline: none;
+}
+
+.toolbar .job-search:disabled {
+  opacity: 0.5;
+}
+
 .job-list {
   margin-top: 6px;
 }
@@ -972,6 +1046,15 @@ span.variant-chip:hover {
   margin-top: 3px;
 }
 
+/* Search matches in a job's name and path. */
+.helper-job mark {
+  padding: 0 1px;
+  border-radius: 3px;
+  background: var(--amber-wash);
+  color: var(--amber);
+  box-shadow: 0 0 0 1px var(--amber-wash), 0 0 8px var(--amber-wash);
+}
+
 .helper-job-meta {
   color: var(--tx-2);
   font-size: 12px;
@@ -1029,6 +1112,22 @@ span.variant-chip:hover {
 
 .helper-job-actions button:disabled {
   display: none;
+}
+
+/* The job's site, at the row's end; clicking it filters by that site. */
+.helper-job-actions .site-tag {
+  margin-left: auto;
+  max-width: 45%;
+  overflow: hidden;
+  border-color: var(--edge);
+  color: var(--tx-2);
+  font: 600 10.5px var(--mono);
+  text-overflow: ellipsis;
+}
+
+.helper-job-actions .site-tag:hover {
+  border-color: var(--blue);
+  color: var(--blue);
 }
 
 .helper-job-actions .resume-button {
@@ -1226,6 +1325,13 @@ select {
 .notice-action {
   flex: none;
   margin-left: auto;
+}
+
+/* Copy URL / ffmpeg command: secondary, so they sit above the main actions. */
+.confirm-copy {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 .confirm-actions {

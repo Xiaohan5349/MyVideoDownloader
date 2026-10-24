@@ -3,6 +3,7 @@ import {
   estimateBytes, fallbackBandwidthForQuality, isSegmentFile, mergeSettings,
   normalizeMediaItem, parseDashManifest, parseHlsManifest, sanitizeFilename
 } from "./shared.js";
+import { getMessage, initI18n } from "./i18n.js";
 
 console.log("[ds] Service worker started v1.11.1");
 
@@ -19,6 +20,12 @@ const requestHeadersById = new Map();
 const requestHeadersByUrl = new Map();
 const tabMediaMutationChains = new Map();
 const MAX_CAPTURED_HEADERS = 500;
+// Running helper jobs (id -> status) in chrome.storage.session; a job that
+// leaves this set as completed/failed gets a system notification.
+const WATCHED_JOBS_KEY = "watchedJobs";
+const JOB_WATCH_ALARM = "jobWatch";
+const JOB_NOTIFICATION_PREFIX = "job:";
+const JOB_SEARCH_LIMIT = 50;
 
 // --- Message routing ---
 
@@ -63,6 +70,18 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.status === "loading") {
     enqueueTabMediaMutation(tabId, () => chrome.storage.local.remove(tabKey(tabId))).catch(() => {});
   }
+});
+
+// While helper jobs run, an alarm checks on them so a finished download is
+// announced even with the popup closed.
+chrome.alarms?.onAlarm.addListener((alarm) => {
+  if (alarm.name === JOB_WATCH_ALARM) pollWatchedJobs().catch(() => {});
+});
+
+chrome.notifications?.onClicked.addListener((notificationId) => {
+  if (!notificationId.startsWith(JOB_NOTIFICATION_PREFIX)) return;
+  chrome.notifications.clear(notificationId);
+  showHelperJob(notificationId.slice(JOB_NOTIFICATION_PREFIX.length)).catch(() => {});
 });
 
 // --- Message handler ---
@@ -130,7 +149,7 @@ async function handleMessage(message, sender) {
   }
 
   if (message.type === MESSAGE.DOWNLOADS_START) {
-    return startDownload(message.item, message.variant, message.output);
+    return watchStartedJob(await startDownload(message.item, message.variant, message.output));
   }
 
   // The page hosting a download loop is going away (navigation, reload,
@@ -156,7 +175,7 @@ async function handleMessage(message, sender) {
     return { ok: true };
   }
 
-  if (message.type === MESSAGE.DOWNLOADS_JOB_RESUME) return resumeHelperJob(message.jobId);
+  if (message.type === MESSAGE.DOWNLOADS_JOB_RESUME) return watchStartedJob(await resumeHelperJob(message.jobId));
 
   if (message.type === MESSAGE.DOWNLOADS_JOB_GET) return getHelperJob(message.jobId);
   if (message.type === MESSAGE.DOWNLOADS_JOB_SHOW) return showHelperJob(message.jobId);
@@ -164,7 +183,7 @@ async function handleMessage(message, sender) {
   if (message.type === MESSAGE.DOWNLOADS_JOB_FORGET) return forgetHelperJob(message.jobId);
   if (message.type === MESSAGE.DOWNLOADS_JOB_CANCEL) return cancelHelperJob(message.jobId);
   if (message.type === MESSAGE.DOWNLOADS_JOBS_CLEAR_MISSING) return clearMissingHelperJobs();
-  if (message.type === MESSAGE.HELPER_STATUS_GET) return getHelperStatus();
+  if (message.type === MESSAGE.HELPER_STATUS_GET) return getHelperStatus(message.query, message.site);
   if (message.type === MESSAGE.HELPER_SETTINGS_UPDATE) return updateHelperSettings(message.settings || {});
   if (message.type === MESSAGE.HELPER_FOLDER_PICK) {
     const { reopenPopup, ...options } = message.options || {};
@@ -991,21 +1010,32 @@ async function getHelperJob(jobId) {
   }
 }
 
-async function getHelperStatus() {
+// query / site: the popup's job search and site filter. The recent jobs stay
+// unfiltered (they feed the summary and the run tile); matches come back in
+// searchJobs.
+async function getHelperStatus(query = "", site = "") {
+  const search = String(query || "").trim();
+  const siteFilter = String(site || "").trim();
+  const searchParams = new URLSearchParams({ limit: String(JOB_SEARCH_LIMIT) });
+  if (search) searchParams.set("q", search);
+  if (siteFilter) searchParams.set("site", siteFilter);
   try {
-    const [healthRes, jobsRes] = await Promise.all([
+    const [healthRes, jobsRes, searchRes] = await Promise.all([
       fetch(`${HELPER_URL}/health`),
-      fetch(`${HELPER_URL}/jobs?limit=20`)
+      fetch(`${HELPER_URL}/jobs?limit=20`),
+      search || siteFilter ? fetch(`${HELPER_URL}/jobs?${searchParams}`) : null
     ]);
     const health = await healthRes.json().catch(() => ({}));
     const jobs = await jobsRes.json().catch(() => ({}));
     const jobsList = Array.isArray(jobs.jobs) ? jobs.jobs : [];
+    const found = searchRes ? await searchRes.json().catch(() => ({})) : null;
 
     if (healthRes.ok) {
       const recent = jobsList
         .sort((a, b) => (b.startedAt || "").localeCompare(a.startedAt || ""))
         .slice(0, 20);
       await chrome.storage.local.set({ recentJobs: recent }).catch(() => {});
+      await watchHelperJobs(jobsList);
     }
 
     return {
@@ -1013,6 +1043,8 @@ async function getHelperStatus() {
       online: healthRes.ok,
       health,
       jobs: jobsList,
+      searchJobs: found ? (Array.isArray(found.jobs) ? found.jobs : []) : null,
+      sites: Array.isArray(jobs.sites) ? jobs.sites : [],
       // /jobs reports the total at the top level, not inside stats.
       stats: jobs.stats ? { ...jobs.stats, total: Number.isInteger(jobs.total) ? jobs.total : jobsList.length } : null
     };
@@ -1023,6 +1055,77 @@ async function getHelperStatus() {
       cachedJobs: cached.recentJobs || []
     };
   }
+}
+
+// --- Finished-job notifications ---
+
+function isActiveJob(job) {
+  return job?.status === "queued" || job?.status === "running";
+}
+
+// A download or resume that created a helper job is watched from the start,
+// so even one that finishes before the next poll gets announced.
+async function watchStartedJob(result) {
+  const job = result?.helperJob || result?.job;
+  if (result?.ok && job?.id) {
+    await watchHelperJobs([{ ...job, status: isActiveJob(job) ? job.status : "running" }], { merge: true });
+  }
+  return result;
+}
+
+async function pollWatchedJobs() {
+  const response = await fetch(`${HELPER_URL}/jobs?limit=50`).catch(() => null);
+  // Helper offline: keep the watch list; the next alarm tries again.
+  if (!response?.ok) return;
+  const data = await response.json().catch(() => ({}));
+  await watchHelperJobs(Array.isArray(data.jobs) ? data.jobs : []);
+}
+
+// Serialized like activeDownloadsChain: the popup poll and the alarm can run
+// at the same time, and must not both announce one job.
+let jobWatchChain = Promise.resolve();
+function watchHelperJobs(jobs, options) {
+  const next = jobWatchChain.then(() => updateJobWatch(jobs, options));
+  jobWatchChain = next.catch(() => {});
+  return next;
+}
+
+// jobs: the helper's current view. merge: only add jobs (a single started
+// job), instead of treating jobs missing from the list as gone.
+async function updateJobWatch(jobs, { merge = false } = {}) {
+  const stored = await chrome.storage.session.get(WATCHED_JOBS_KEY).catch(() => ({}));
+  const watched = stored[WATCHED_JOBS_KEY] || {};
+  const next = merge ? { ...watched } : {};
+  for (const job of jobs) {
+    if (isActiveJob(job)) next[job.id] = job.status;
+    else if (watched[job.id] && (job.status === "completed" || job.status === "failed")) {
+      delete next[job.id];
+      await notifyJobFinished(job);
+    }
+  }
+  await chrome.storage.session.set({ [WATCHED_JOBS_KEY]: next }).catch(() => {});
+
+  if (!chrome.alarms) return;
+  if (!Object.keys(next).length) {
+    await chrome.alarms.clear(JOB_WATCH_ALARM).catch(() => {});
+  } else if (!(await chrome.alarms.get(JOB_WATCH_ALARM).catch(() => null))) {
+    // 30 s is the shortest alarm period Chrome allows.
+    await chrome.alarms.create(JOB_WATCH_ALARM, { periodInMinutes: 0.5 });
+  }
+}
+
+async function notifyJobFinished(job) {
+  if (!chrome.notifications) return;
+  await initI18n();
+  const done = job.status === "completed";
+  const fileName = String(job.outputPath || "").split(/[\\/]/).pop();
+  await chrome.notifications.create(`${JOB_NOTIFICATION_PREFIX}${job.id}`, {
+    type: "basic",
+    iconUrl: chrome.runtime.getURL("icons/icon-128.png"),
+    title: getMessage(done ? "notifyJobDone" : "notifyJobFailed"),
+    message: fileName || job.url || "",
+    contextMessage: done ? getMessage("notifyClickToShow") : String(job.error || "")
+  }).catch(() => {});
 }
 
 async function updateHelperSettings(settings) {

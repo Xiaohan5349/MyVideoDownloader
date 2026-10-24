@@ -1,4 +1,4 @@
-import { MESSAGE, jobProgressFraction, sanitizeFilename, sortMediaByQuality } from "./shared.js";
+import { MESSAGE, ffmpegCommand, highlightRanges, jobProgressFraction, sanitizeFilename, sortMediaByQuality } from "./shared.js";
 import { getMessage, getUserLanguage, setUserLanguage, applyLanguageUI } from "./i18n.js";
 
 const list = document.querySelector("#mediaList");
@@ -13,7 +13,9 @@ const helperStatus = document.querySelector("#helperStatus");
 const helperJobs = document.querySelector("#helperJobs");
 const refreshHelperButton = document.querySelector("#refreshHelperButton");
 const clearMissingButton = document.querySelector("#clearMissingButton");
-const openDashboardButton = document.querySelector("#openDashboardButton");
+const jobSearchInput = document.querySelector("#jobSearchInput");
+const jobSiteSelect = document.querySelector("#jobSiteSelect");
+const kindFilter = document.querySelector("#kindFilter");
 const minSizeSelect = document.querySelector("#minSizeSelect");
 const showUnsupportedInput = document.querySelector("#showUnsupportedInput");
 const downloadDirInput = document.querySelector("#downloadDirInput");
@@ -57,6 +59,17 @@ const RUN_ROTATE_MS = 4000;
 let runJobId = null;
 let runShownAt = 0;
 let lastRunJobs = [];
+// Job search: the helper filters its whole history; typing waits a moment.
+const JOB_SEARCH_DELAY_MS = 250;
+let jobSearchTimer = null;
+let renderedJobQuery = "";
+// Site filter options as last rendered, so the 2 s poll rebuilds them only on change.
+let renderedSites = "";
+// Media type filter ("all" or an item.kind); the chips show only when the
+// page has more than one kind.
+const KIND_ORDER = ["hls", "dash", "direct"];
+let mediaKindFilter = "all";
+let lastMediaItems = [];
 // Download dialog saved while the Windows folder picker is open: the popup
 // closes when it loses focus, and restores the dialog when it reopens.
 const PENDING_DIALOG_KEY = "pendingDownloadDialog";
@@ -78,8 +91,17 @@ refreshHelperButton.addEventListener("click", loadHelperStatus);
 document.querySelector("#runPrev").addEventListener("click", () => renderRunTile(lastRunJobs, -1));
 document.querySelector("#runNext").addEventListener("click", () => renderRunTile(lastRunJobs, 1));
 clearMissingButton.addEventListener("click", clearMissingJobs);
-openDashboardButton.addEventListener("click", () => {
-  chrome.tabs.create({ url: "http://127.0.0.1:8765" });
+jobSearchInput.addEventListener("input", () => {
+  window.clearTimeout(jobSearchTimer);
+  jobSearchTimer = window.setTimeout(loadHelperStatus, JOB_SEARCH_DELAY_MS);
+});
+jobSiteSelect.addEventListener("change", loadHelperStatus);
+jobSearchInput.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || !jobSearchInput.value) return;
+  // Clear the search instead of closing the popup.
+  event.preventDefault();
+  jobSearchInput.value = "";
+  loadHelperStatus();
 });
 
 document.querySelectorAll(".tab-button").forEach((button) => {
@@ -246,7 +268,9 @@ async function loadHelperStatus() {
   }
   statusLoading = true;
   try {
-    const response = await chrome.runtime.sendMessage({ type: MESSAGE.HELPER_STATUS_GET });
+    const query = jobSearchInput.value.trim();
+    const site = jobSiteSelect.value;
+    const response = await chrome.runtime.sendMessage({ type: MESSAGE.HELPER_STATUS_GET, query, site });
     const online = Boolean(response?.online);
     const liveJobs = response?.jobs || [];
     const cachedJobs = response?.cachedJobs || [];
@@ -285,7 +309,12 @@ async function loadHelperStatus() {
       console.warn("[ds-video-downloader] loadHelperStatus DOM update failed", domError);
     }
 
-    renderHelperJobs(merged);
+    // Searching needs the helper: offline there is only the cached recent list.
+    jobSearchInput.disabled = !online;
+    jobSiteSelect.disabled = !online;
+    if (online) renderSiteOptions(response.sites || []);
+    const searching = online && Boolean(query || site);
+    renderHelperJobs(searching ? (response.searchJobs || []) : merged, searching ? query : "", searching ? site : "");
     renderRunTile(merged);
   } catch (error) {
     console.error("[ds-video-downloader] loadHelperStatus failed", error);
@@ -302,6 +331,7 @@ async function loadHelperStatus() {
 // refresh does not wipe a running download's status line.
 // live: a refresh from storage; keep whatever notice is showing.
 function renderMedia(items, { live = false } = {}) {
+  lastMediaItems = items;
   mediaCount.textContent = getMessage("msgCountDetected", { count: String(items.length) });
   mediaCountNum.textContent = String(items.length);
   setTabCount(mediaTabCount, items.length);
@@ -309,17 +339,21 @@ function renderMedia(items, { live = false } = {}) {
   if (!items.length) {
     list.textContent = "";
     mediaNodes.clear();
+    renderKindFilter(items);
     showNotice(getMessage("msgEmptyHint"));
     return;
   }
 
   if (!live || notice.textContent === getMessage("msgEmptyHint")) hideNotice();
+  renderKindFilter(items);
   const seen = new Set();
   for (const item of items) {
     seen.add(item.url);
     const entry = mediaNodes.get(item.url) || createMediaNode();
     entry.item = item;
     fillMediaNode(entry);
+    // Hidden, not removed: a filtered-out item keeps its running download status.
+    entry.node.hidden = mediaKindFilter !== "all" && item.kind !== mediaKindFilter;
     mediaNodes.set(item.url, entry);
     list.appendChild(entry.node); // re-appending also moves it into sort order
   }
@@ -328,6 +362,38 @@ function renderMedia(items, { live = false } = {}) {
     entry.node.remove();
     mediaNodes.delete(url);
   }
+}
+
+// Chips "All 12 · HLS 3 · Direct 9"; only when the page has more than one
+// kind. A chosen kind that is no longer on the page falls back to All.
+function renderKindFilter(items) {
+  const counts = new Map();
+  for (const item of items) counts.set(item.kind, (counts.get(item.kind) || 0) + 1);
+  if (!counts.has(mediaKindFilter)) mediaKindFilter = "all";
+  kindFilter.textContent = "";
+  kindFilter.hidden = counts.size < 2;
+  if (kindFilter.hidden) return;
+
+  const kinds = [...counts.keys()].sort((a, b) => kindRank(a) - kindRank(b));
+  for (const kind of ["all", ...kinds]) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "kind-chip";
+    chip.dataset.kind = kind;
+    chip.ariaPressed = String(kind === mediaKindFilter);
+    const label = kind === "all" ? getMessage("filterAll") : kind === "direct" ? getMessage("labelKindDirect") : kind.toUpperCase();
+    chip.textContent = `${label} ${kind === "all" ? items.length : counts.get(kind)}`;
+    chip.addEventListener("click", () => {
+      mediaKindFilter = kind;
+      renderMedia(lastMediaItems, { live: true });
+    });
+    kindFilter.appendChild(chip);
+  }
+}
+
+function kindRank(kind) {
+  const index = KIND_ORDER.indexOf(kind);
+  return index < 0 ? KIND_ORDER.length : index;
 }
 
 function createMediaNode() {
@@ -358,11 +424,22 @@ function fillMediaNode({ node, item, variants }) {
     : getMessage("msgClickToDownload", { name: sanitizeFilename(item.title, item.extension) });
 }
 
-function renderHelperJobs(jobs) {
+// query / site: the active search and site filter, for the empty-state text.
+function renderHelperJobs(jobs, query = "", site = "") {
   if (!helperJobTemplate) {
     console.warn("[ds-video-downloader] helperJobTemplate not found in DOM");
     return;
   }
+  // Nodes are updated in place, which keeps their order; a new search (or
+  // leaving one) starts from an empty list so the results keep the helper's order.
+  const filterKey = `${query}\n${site}`;
+  if (filterKey !== renderedJobQuery) {
+    renderedJobQuery = filterKey;
+    helperJobs.textContent = "";
+    helperJobNodes.clear();
+  }
+  // The search words, marked in each job's name and path.
+  const words = query.toLowerCase().split(/\s+/).filter(Boolean);
   // Clear empty-state if we have jobs now
   if (jobs.length && helperJobNodes.size === 0) {
     helperJobs.textContent = "";
@@ -388,7 +465,7 @@ function renderHelperJobs(jobs) {
       state.textContent = humanStatus(job.status);
       state.className = `helper-job-state ${job.status === "completed" ? "is-complete" : ""} ${job.status === "failed" ? "is-error" : ""} ${job.status === "cancelled" ? "is-cancelled" : ""} ${job.status === "missing" ? "is-missing" : ""}`;
       meta.textContent = humanJobMessage(job);
-      pathEl.textContent = job.outputPath || job.url;
+      setHighlighted(pathEl, job.outputPath || job.url || "", words);
       existing.dataset.status = job.status;
       setProgress(existing, job);
 
@@ -402,6 +479,7 @@ function renderHelperJobs(jobs) {
       showBtn.disabled = !fileExists;
       removeBtn.disabled = isActive;
       removeBtn.dataset.fileExists = String(fileExists);
+      fillSiteTag(existing.querySelector(".site-tag"), job);
     } else {
       // Create new node
       const node = helperJobTemplate.content.firstElementChild.cloneNode(true);
@@ -409,7 +487,7 @@ function renderHelperJobs(jobs) {
       node.dataset.jobId = job.id;
       node.dataset.status = job.status;
       setProgress(node, job);
-      node.querySelector(".helper-job-title").textContent = jobTitle(job);
+      setHighlighted(node.querySelector(".helper-job-title"), jobTitle(job), words);
       const state = node.querySelector(".helper-job-state");
       state.textContent = humanStatus(job.status);
       state.classList.toggle("is-complete", job.status === "completed");
@@ -417,7 +495,7 @@ function renderHelperJobs(jobs) {
       state.classList.toggle("is-cancelled", job.status === "cancelled");
       state.classList.toggle("is-missing", job.status === "missing");
       node.querySelector(".helper-job-meta").textContent = humanJobMessage(job);
-      node.querySelector(".helper-job-path").textContent = job.outputPath || job.url;
+      setHighlighted(node.querySelector(".helper-job-path"), job.outputPath || job.url || "", words);
 
       const sourceButton = node.querySelector(".source-button");
       const resumeButton = node.querySelector(".resume-button");
@@ -441,6 +519,9 @@ function renderHelperJobs(jobs) {
       cancelButton.addEventListener("click", () => cancelJob(job.id));
       showButton.addEventListener("click", () => showJobInFolder(job.id));
       removeButton.addEventListener("click", () => openRemoveDialog(job.id, removeButton.dataset.fileExists === "true", jobTitle(job)));
+      const siteTag = node.querySelector(".site-tag");
+      fillSiteTag(siteTag, job);
+      siteTag.addEventListener("click", () => filterBySite(siteTag.dataset.site));
 
       helperJobs.appendChild(node);
       helperJobNodes.set(job.id, node);
@@ -456,7 +537,14 @@ function renderHelperJobs(jobs) {
   }
 
   if (!jobs.length) {
-    helperJobs.innerHTML = `<div class="helper-status">${getMessage("msgNoJobs")}</div>`;
+    const empty = document.createElement("div");
+    empty.className = "helper-status";
+    // textContent: the query is user input.
+    empty.textContent = query ? getMessage("msgNoMatches", { query })
+      : site ? getMessage("msgNoSiteJobs", { site })
+        : getMessage("msgNoJobs");
+    helperJobs.textContent = "";
+    helperJobs.appendChild(empty);
     helperJobNodes.clear();
   }
 }
@@ -502,6 +590,7 @@ function confirmDownload(item, onConfirm, variant = null, initial = {}) {
     hint.textContent = getMessage("dialogChromeFolderHint");
     fields.appendChild(hint);
   }
+  fields.appendChild(copyActions(item, variant, () => `${nameInput.value.trim() || defaultFileBase(item)}.${outputExtension(item)}`));
 
   const overlay = openDialog(getMessage("confirmDownloadTitle"), "", kindLabel, [
     { label: getMessage("btnCancel"), className: "btn-ghost" },
@@ -549,6 +638,33 @@ function confirmDownload(item, onConfirm, variant = null, initial = {}) {
   nameInput.focus?.();
   nameInput.select?.();
   return overlay;
+}
+
+// For using the media in another tool: its URL (the chosen quality's), and
+// for HLS/DASH a ready ffmpeg command. The command carries only the Referer;
+// cookies stay out of the clipboard. getFileName: the dialog's current name.
+function copyActions(item, variant, getFileName) {
+  const url = variant?.url || item.url;
+  const row = document.createElement("div");
+  row.className = "confirm-copy";
+  row.appendChild(copyButton(getMessage("btnCopyUrl"), () => url));
+  if (item.kind !== "direct") {
+    row.appendChild(copyButton(getMessage("btnCopyFfmpeg"), () => ffmpegCommand(url, item.sourcePageUrl, getFileName())));
+  }
+  return row;
+}
+
+function copyButton(label, getText) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "small-button";
+  button.textContent = label;
+  button.addEventListener("click", async () => {
+    const copied = await navigator.clipboard.writeText(getText()).then(() => true, () => false);
+    button.textContent = getMessage(copied ? "msgCopied" : "msgCopyFailed");
+    window.setTimeout(() => { button.textContent = label; }, 1200);
+  });
+  return button;
 }
 
 function dialogField(labelText, input, trailing) {
@@ -1142,6 +1258,57 @@ function variantSizeLabel(variant) {
   if (variant.size) return formatBytes(variant.size);
   if (variant.estimatedSize) return `${variant.sizeSource === "exact" ? "" : "~"}${formatBytes(variant.estimatedSize)}`;
   return "";
+}
+
+// A job's site ("site.example", from the helper) as a tag that filters by it.
+// Cached offline jobs have no site, and keep the tag hidden.
+function fillSiteTag(tag, job) {
+  tag.hidden = !job.site;
+  tag.textContent = job.site || "";
+  tag.dataset.site = job.site || "";
+}
+
+function filterBySite(site) {
+  if (!site) return;
+  jobSiteSelect.value = site;
+  // Shown even with a single site, so the active filter can be cleared.
+  jobSiteSelect.hidden = false;
+  loadHelperStatus();
+}
+
+// "All sites" plus every site in the helper's history with its count. Hidden
+// with fewer than two sites, unless a site filter is active.
+function renderSiteOptions(sites) {
+  const allLabel = getMessage("filterAllSites");
+  const signature = [allLabel, ...sites.map((entry) => `${entry.site}:${entry.count}`)].join("\n");
+  if (signature !== renderedSites) {
+    renderedSites = signature;
+    const selected = jobSiteSelect.value;
+    jobSiteSelect.textContent = "";
+    for (const [value, label] of [["", allLabel], ...sites.map((entry) => [entry.site, `${entry.site} · ${entry.count}`])]) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      jobSiteSelect.appendChild(option);
+    }
+    jobSiteSelect.value = sites.some((entry) => entry.site === selected) ? selected : "";
+  }
+  jobSiteSelect.hidden = sites.length < 2 && !jobSiteSelect.value;
+}
+
+// Writes text into el with the search words wrapped in <mark>. Built from
+// text nodes, so a file name never turns into HTML.
+function setHighlighted(el, text, words) {
+  el.textContent = "";
+  let pos = 0;
+  for (const [start, end] of highlightRanges(text, words)) {
+    if (start > pos) el.append(text.slice(pos, start));
+    const mark = document.createElement("mark");
+    mark.textContent = text.slice(start, end);
+    el.append(mark);
+    pos = end;
+  }
+  el.append(text.slice(pos));
 }
 
 function jobTitle(job) {
