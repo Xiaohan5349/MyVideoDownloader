@@ -5,7 +5,7 @@ import {
 } from "./shared.js";
 import { getMessage, initI18n } from "./i18n.js";
 
-console.log("[ds] Service worker started v1.11.1");
+console.log("[ds] Service worker started v1.12.0");
 
 const SETTINGS_KEY = "settings";
 const TAB_MEDIA_PREFIX = "tabMedia:";

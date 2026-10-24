@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v1.12.0 - 2026-10-24
+
 ### Added
 - Search box in the Helper tab: it searches the helper's whole job history by file name and folder (what each result shows; page and stream URLs carry random IDs and are not searched), not only the 20 most recent jobs. `GET /jobs` takes `q=`; it filters before paging, and `stats` stay global. Every word must match (case is ignored). The matched words are highlighted in each result's name and path. Esc clears the search. The progress tile and the summary keep showing all active downloads while searching.
 - Site filter next to the job search: "All sites" plus every site in the history with its job count (the source page's host without `www.`/`www53.`, so mirrors group together). Each job shows its site as a tag; clicking it filters by that site. It combines with the search and is hidden while the history has a single site. `GET /jobs` takes `site=`, returns `sites` (all jobs) and a `site` on each job.
