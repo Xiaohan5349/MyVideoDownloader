@@ -16,7 +16,6 @@ const DEFAULT_DOWNLOAD_DIR = process.env.DOWNLOAD_DIR || path.join(__dirname, "d
 const CONFIG_PATH = process.env.CONFIG_PATH || path.join(__dirname, "helper-settings.json");
 const PICKER_SCRIPT_PATH = path.join(__dirname, "pick-folder.ps1");
 const JOBS_PATH = process.env.JOBS_PATH || path.join(__dirname, "helper-jobs.json");
-const BACKGROUND_ASSET_PATH = path.join(__dirname, "..", "assets", "app-background.webp");
 const AUTH_TOKEN = process.env.DS_HELPER_TOKEN || randomUUID();
 const SIZE_PROBE_LIMIT = Number(process.env.SIZE_PROBE_LIMIT || 1500);
 const SIZE_PROBE_CONCURRENCY = Number(process.env.SIZE_PROBE_CONCURRENCY || 8);
@@ -146,16 +145,6 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    if (req.method === "GET" && req.url === "/assets/app-background.webp") {
-      const image = await readFile(BACKGROUND_ASSET_PATH);
-      res.writeHead(200, {
-        "Content-Type": "image/webp",
-        "Cache-Control": "public, max-age=86400"
-      });
-      res.end(image);
-      return;
-    }
-
     if (req.method === "GET" && req.url === "/health") {
       writeJson(res, 200, { ok: true, ffmpeg: "required", downloadDir });
       return;
@@ -188,13 +177,18 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "GET" && new URL(req.url || "/jobs", "http://127.0.0.1").pathname === "/jobs") {
       await reconcileAllJobFiles();
       const page = parseJobsPage(req.url);
-      const allJobs = Array.from(jobs.values()).reverse();
+      let allJobs = Array.from(jobs.values()).reverse();
+      if (page.query) allJobs = allJobs.filter((job) => jobMatchesQuery(job, page.query));
+      if (page.site) allJobs = allJobs.filter((job) => jobSite(job) === page.site);
       writeJson(res, 200, {
         ok: true,
-        jobs: allJobs.slice(page.offset, page.offset + page.limit),
+        jobs: allJobs.slice(page.offset, page.offset + page.limit).map((job) => ({ ...job, site: jobSite(job) })),
         total: allJobs.length,
         limit: page.limit,
         offset: page.offset,
+        query: page.query,
+        site: page.site,
+        sites: buildJobSites(),
         stats: buildJobStats()
       });
       return;
@@ -1368,10 +1362,44 @@ function parseJobsPage(url) {
     const rawOffset = Number(parsed.searchParams.get("offset") ?? 0);
     const limit = Number.isInteger(rawLimit) ? Math.min(Math.max(rawLimit, 1), JOBS_PAGE_SIZE_MAX) : JOBS_PAGE_SIZE_DEFAULT;
     const offset = Number.isInteger(rawOffset) && rawOffset >= 0 ? rawOffset : 0;
-    return { limit, offset };
+    const query = String(parsed.searchParams.get("q") ?? "").trim().slice(0, 200);
+    const site = String(parsed.searchParams.get("site") ?? "").trim().toLowerCase().slice(0, 200);
+    return { limit, offset, query, site };
   } catch {
-    return { limit: JOBS_PAGE_SIZE_DEFAULT, offset: 0 };
+    return { limit: JOBS_PAGE_SIZE_DEFAULT, offset: 0, query: "", site: "" };
   }
+}
+
+// The site a job came from: its source page's host without "www."/"www53.",
+// so mirrors of one site group together. "" when the page is unknown.
+function jobSite(job) {
+  try {
+    return new URL(job.sourcePageUrl).hostname.toLowerCase().replace(/^www\d*\./, "");
+  } catch {
+    return "";
+  }
+}
+
+// Every site in the whole history with its job count, most jobs first; the
+// popup's site filter lists these.
+function buildJobSites() {
+  const counts = new Map();
+  for (const job of jobs.values()) {
+    const site = jobSite(job);
+    if (site) counts.set(site, (counts.get(site) || 0) + 1);
+  }
+  return [...counts]
+    .map(([site, count]) => ({ site, count }))
+    .sort((a, b) => b.count - a.count || a.site.localeCompare(b.site));
+}
+
+// Popup search box: every word of `query` (already trimmed, never empty) must
+// appear, ignoring case, in the output path (folder + file name). Only what
+// the popup shows (and highlights) is searched: stream and page URLs carry
+// random IDs that match short words for no visible reason.
+function jobMatchesQuery(job, query) {
+  const haystack = String(job.outputPath || "").toLowerCase();
+  return query.toLowerCase().split(/\s+/).every((word) => haystack.includes(word));
 }
 
 function buildJobStats() {
@@ -2053,469 +2081,17 @@ function escapeHtmlText(value) {
   return String(value).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
 }
 
-// Local dashboard served at "/". Self-contained (no external fonts or scripts) so it
-// works offline. Visual language matches the extension popup ("Bento Grid").
+// "/" is a plain status page: the job list lives in the extension popup
+// (the full dashboard was removed in v1.12.0).
 function renderHomePage() {
   const safeDir = escapeHtmlText(downloadDir);
   return `<!doctype html>
 <html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>DS Video Downloader</title>
-  <style>
-    /* SYNC-POINT: tokens mirror :root in src/popup.css (Bento Grid, dark + derived light). */
-    :root {
-      color-scheme: dark;
-      --page: #0c0d10; --tile: #141519; --tile-2: #1b1c21; --inset: #0f1013;
-      --edge: rgba(255, 255, 255, 0.08); --edge-hi: rgba(255, 255, 255, 0.18); --edge-max: rgba(255, 255, 255, 0.32);
-      --tx: #f1f2f4; --tx-2: #a3a6ad; --tx-3: #8d9098;
-      --blue: #6b97ff; --teal: #3cc8b4; --amber: #f2b84b; --coral: #ff7d6e; --on-blue: #0c0d10;
-      --blue-wash: rgba(107, 151, 255, 0.14); --amber-wash: rgba(242, 184, 75, 0.13); --coral-wash: rgba(255, 125, 110, 0.13);
-      --hover: rgba(255, 255, 255, 0.05); --spot: rgba(107, 151, 255, 0.1); --scrim: rgba(5, 6, 8, 0.74);
-      --lift: 0 30px 60px -20px rgba(0, 0, 0, 0.8);
-      --r1: 18px; --r2: 12px; --r3: 9px; --r4: 6px;
-      --sans: "Segoe UI Variable Display", "Segoe UI Variable Text", "Segoe UI", "SF Pro Display", system-ui, "Microsoft YaHei UI", "PingFang SC", sans-serif;
-      --mono: "Cascadia Mono", Consolas, "SF Mono", ui-monospace, Menlo, monospace;
-    }
-    @media (prefers-color-scheme: light) {
-      :root {
-        color-scheme: light;
-        --page: #eceef2; --tile: #ffffff; --tile-2: #f5f6f8; --inset: #f0f2f5;
-        --edge: rgba(20, 26, 38, 0.1); --edge-hi: rgba(20, 26, 38, 0.2); --edge-max: rgba(20, 26, 38, 0.36);
-        --tx: #14161b; --tx-2: #4d525b; --tx-3: #646973;
-        --blue: #2c5bd0; --teal: #0b7666; --amber: #7a4e00; --coral: #c2372a; --on-blue: #ffffff;
-        --blue-wash: rgba(44, 91, 208, 0.1); --amber-wash: rgba(196, 132, 0, 0.11); --coral-wash: rgba(194, 55, 42, 0.09);
-        --hover: rgba(20, 26, 38, 0.05); --spot: rgba(44, 91, 208, 0.06); --scrim: rgba(24, 28, 36, 0.42);
-        --lift: 0 24px 50px -22px rgba(20, 26, 38, 0.35);
-      }
-    }
-    * { box-sizing: border-box; }
-    html, body { margin: 0; }
-    body { min-height: 100vh; background: var(--page); color: var(--tx); font: 13px/1.45 var(--sans); -webkit-font-smoothing: antialiased; }
-    button { font: inherit; color: inherit; cursor: pointer; }
-    button:disabled { cursor: default; opacity: 0.4; }
-    :focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
-    .icon { width: 15px; height: 15px; flex: none; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-    .wrap { padding: 24px clamp(16px, 3vw, 40px) 40px; }
-
-    .tile { position: relative; min-width: 0; padding: 12px 14px; border: 1px solid var(--edge); border-radius: var(--r1); background: var(--tile); transition: border-color 250ms; }
-    .tile:hover { border-color: var(--edge-hi); background: radial-gradient(220px circle at var(--mx, 50%) var(--my, 50%), var(--spot), transparent 70%) no-repeat, var(--tile); }
-
-    .hero { display: flex; flex-wrap: wrap; align-items: center; gap: 14px 20px; margin-bottom: 18px; }
-    .brand { display: flex; align-items: center; gap: 14px; min-width: 0; }
-    .brand-mark { flex: none; display: grid; place-items: center; width: 44px; height: 44px; border: 1px solid var(--edge-hi); border-radius: 13px; background: var(--tile-2); color: var(--blue); }
-    .brand-mark .icon { width: 22px; height: 22px; }
-    h1 { margin: 0; font-size: 26px; font-weight: 650; letter-spacing: -0.01em; line-height: 1.15; }
-    .who { color: var(--tx-2); font-size: 12.5px; }
-    .facts { display: flex; flex-wrap: wrap; gap: 6px; margin-left: auto; min-width: 0; max-width: 100%; }
-    .fact { display: inline-flex; align-items: center; gap: 8px; min-width: 0; max-width: 100%; height: 32px; padding: 0 11px; border: 1px solid var(--edge); border-radius: 10px; background: var(--tile); font: 12px var(--mono); }
-    .fact:has(button) { max-width: min(480px, 100%); padding-right: 5px; }
-    .fact small { flex: none; color: var(--tx-3); font: 11px var(--mono); }
-    .fact .val { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .fact.warn { border-color: transparent; background: var(--amber-wash); color: var(--amber); }
-    .fact button { flex: none; display: grid; place-items: center; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 7px; background: none; color: var(--tx-2); }
-    .fact button:hover { background: var(--hover); color: var(--tx); }
-    .fact button.copied { color: var(--teal); }
-    .fact button .icon { width: 14px; height: 14px; }
-
-    .stats { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 10px; }
-    .stat { grid-column: span 2; }
-    #bytesCard { grid-column: span 6; }
-    .stat-name { display: flex; align-items: center; gap: 6px; color: var(--tx-3); font: 600 11.5px var(--mono); }
-    .stat-name::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
-    #bytesCard .stat-name::before { display: none; }
-    #activeCard .stat-name { color: var(--blue); }
-    #completedCard .stat-name { color: var(--teal); }
-    #failedCard .stat-name { color: var(--coral); }
-    .stat-value { margin-top: 6px; overflow: hidden; font-size: 24px; font-weight: 650; line-height: 1.1; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
-    #bytesCard .stat-value { font-size: 44px; line-height: 1; letter-spacing: -0.02em; }
-    #activeCard .stat-value { color: var(--blue); }
-    #completedCard .stat-value { color: var(--teal); }
-    #failedCard .stat-value { color: var(--coral); }
-    .stat.is-empty .stat-value { color: var(--tx-3); }
-
-    .bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin: 22px 0 10px; }
-    .q-title { font-size: 16px; font-weight: 650; }
-    .panel-count { color: var(--tx-3); font: 12px var(--mono); }
-    .summary { margin-right: auto; color: var(--tx-2); font-size: 12.5px; }
-    .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
-    .small, .actions button { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 9px; border: 1px solid var(--edge-hi); border-radius: 8px; background: none; color: var(--tx); font-size: 11.5px; font-weight: 600; white-space: nowrap; transition: background-color 120ms; }
-    .small:hover:not(:disabled), .actions button:hover:not(:disabled) { background: var(--hover); }
-    .small .icon { width: 13px; height: 13px; }
-    .page-label { padding: 0 4px; color: var(--tx-2); font: 12px var(--mono); }
-
-    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 380px), 1fr)); gap: 10px; }
-    @media (min-width: 900px) { .row.running { grid-column: span 2; } }
-    .jh { display: flex; align-items: center; gap: 10px; min-width: 0; }
-    .status { display: inline-flex; flex: none; align-items: center; gap: 6px; color: var(--tx-2); font: 600 11.5px var(--mono); white-space: nowrap; }
-    .status::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--tx-3); }
-    .status.running, .status.queued { color: var(--blue); }
-    .status.running::before { background: var(--blue); }
-    .status.queued::before { background: none; box-shadow: inset 0 0 0 1.5px var(--blue); }
-    .status.completed { color: var(--teal); }
-    .status.completed::before { background: var(--teal); }
-    .status.failed { color: var(--coral); }
-    .status.failed::before { background: var(--coral); }
-    .status.missing { color: var(--amber); }
-    .status.missing::before { background: none; box-shadow: inset 0 0 0 1.5px var(--amber); }
-    .job-title { flex: 1; min-width: 0; overflow: hidden; font-size: 14.5px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
-    .progress { margin-top: 6px; color: var(--tx-2); font-size: 12px; overflow-wrap: anywhere; }
-    .row.failed .progress { color: var(--coral); }
-    .path { margin-top: 3px; overflow: hidden; color: var(--tx-3); font: 10.5px/1.45 var(--mono); text-overflow: ellipsis; white-space: nowrap; }
-    .bar-track { position: relative; height: 6px; margin-top: 12px; overflow: hidden; border-radius: 3px; background: var(--inset); }
-    .bar-track i { position: absolute; top: 0; bottom: 0; left: 0; border-radius: 3px; background: var(--blue); }
-    .bar-track.is-indeterminate i { animation: indeterminate 1.6s ease-in-out infinite; }
-    @keyframes indeterminate { from { transform: translateX(-100%); } to { transform: translateX(400%); } }
-    .meta { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 10px; }
-    .chip { padding: 1px 7px; border: 1px solid var(--edge); border-radius: var(--r4); color: var(--tx-2); font: 11px/18px var(--mono); }
-    details { margin-top: 9px; color: var(--tx-3); font: 11px var(--mono); }
-    summary { width: max-content; cursor: pointer; }
-    summary:hover { color: var(--tx); }
-    code { display: block; margin-top: 6px; padding: 9px 10px; border: 1px solid var(--edge); border-radius: 10px; background: var(--inset); color: var(--tx-2); font: 11px/1.5 var(--mono); word-break: break-all; }
-    .actions { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 10px; }
-    .actions button:disabled { display: none; }
-    .actions .warning { border-color: transparent; background: var(--amber-wash); color: var(--amber); }
-    .actions .danger { border-color: transparent; color: var(--coral); }
-
-    .empty { padding: 22px; border: 1px dashed var(--edge-hi); border-radius: var(--r1); color: var(--tx-2); }
-    .empty-title { color: var(--tx); font-size: 16px; font-weight: 650; }
-    .empty-text { max-width: 560px; margin-top: 6px; line-height: 1.5; }
-    .empty.failed { border-color: var(--coral); color: var(--coral); font-weight: 600; }
-
-    .remove-overlay { position: fixed; z-index: 20; inset: 0; display: grid; place-items: center; padding: 20px; background: var(--scrim); }
-    .remove-dialog { width: 100%; max-width: 380px; padding: 18px; border: 1px solid var(--edge-hi); border-radius: var(--r1); background: var(--tile); box-shadow: var(--lift); animation: dialog-in 200ms ease-out; }
-    @keyframes dialog-in { from { opacity: 0; transform: translateY(8px) scale(0.98); } }
-    .remove-dialog h3 { margin: 0 0 10px; font-size: 16px; font-weight: 650; }
-    .remove-name { margin: 0 0 14px; padding: 9px 10px; border: 1px solid var(--edge); border-radius: 10px; background: var(--inset); color: var(--tx-2); font: 11.5px/1.5 var(--mono); overflow-wrap: anywhere; }
-    .remove-dialog-actions { display: grid; gap: 6px; }
-    .remove-dialog-actions button { min-height: 38px; padding: 0 14px; border: 1px solid var(--edge-hi); border-radius: 10px; background: var(--tile-2); color: var(--tx); font-size: 13px; font-weight: 600; text-align: left; transition: border-color 120ms; }
-    .remove-dialog-actions button:hover { border-color: var(--edge-max); }
-    .remove-dialog-actions .danger { border-color: transparent; background: var(--coral-wash); color: var(--coral); }
-    .remove-dialog-actions .ghost { border-color: transparent; background: none; color: var(--tx-2); text-align: center; }
-
-    @media (max-width: 1100px) {
-      #bytesCard { grid-column: span 12; }
-      .stat { grid-column: span 4; }
-    }
-    @media (max-width: 560px) {
-      .facts { margin-left: 0; }
-    }
-    @media (prefers-reduced-motion: reduce) {
-      *, *::before, *::after { animation: none !important; transition-duration: 0.01ms !important; }
-    }
-  </style>
-</head>
-<body>
-  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
-    <symbol id="i-down" viewBox="0 0 24 24"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></symbol>
-    <symbol id="i-copy" viewBox="0 0 24 24"><path d="M9 9h11v11H9zM15 9V4H4v11h5"/></symbol>
-    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.3-5.7M20 4v5h-5"/></symbol>
-  </svg>
-  <div class="wrap">
-    <header class="hero">
-      <div class="brand">
-        <span class="brand-mark" aria-hidden="true"><svg class="icon"><use href="#i-down"/></svg></span>
-        <div><h1>Downloads</h1><div class="who">DS Video Downloader · Local helper dashboard</div></div>
-      </div>
-      <div class="facts">
-        <span class="fact"><small>service</small><span class="val">127.0.0.1:${PORT}</span></span>
-        <span class="fact"><small>downloads</small><span id="downloadPath" class="val" title="${safeDir}">${safeDir}</span>
-          <button id="copyPathButton" type="button" title="Copy download path" aria-label="Copy download path"><svg class="icon"><use href="#i-copy"/></svg></button></span>
-        <span class="fact warn">ffmpeg required for stream assembly</span>
-      </div>
-    </header>
-
-    <section class="stats" aria-label="Download summary">
-      <div id="bytesCard" class="stat tile"><div class="stat-name">downloaded</div><div id="bytesStat" class="stat-value">0 B</div></div>
-      <div id="activeCard" class="stat tile"><div class="stat-name">active</div><div id="activeStat" class="stat-value">0</div></div>
-      <div id="completedCard" class="stat tile"><div class="stat-name">completed</div><div id="completedStat" class="stat-value">0</div></div>
-      <div id="failedCard" class="stat tile"><div class="stat-name">failed</div><div id="failedStat" class="stat-value">0</div></div>
-    </section>
-
-    <div class="bar">
-      <b class="q-title">Queue</b>
-      <span id="queueCount" class="panel-count"></span>
-      <div id="summary" class="summary">Checking jobs...</div>
-      <div class="toolbar">
-        <button class="small" type="button" onclick="clearMissingJobs()">Clear missing</button>
-        <button id="prevJobsPageButton" class="small" type="button" onclick="prevJobsPage()">Prev</button>
-        <span id="jobsPageLabel" class="page-label">Page 1</span>
-        <button id="nextJobsPageButton" class="small" type="button" onclick="nextJobsPage()">Next</button>
-        <button class="small" type="button" onclick="loadJobs(true)"><svg class="icon"><use href="#i-refresh"/></svg>Refresh</button>
-      </div>
-    </div>
-
-    <section id="jobs" class="panel"><div class="empty">Loading jobs...</div></section>
-  </div>
-  <script>
-    const JOBS_PAGE_SIZE = 50;
-    let jobsPageOffset = 0;
-    // Keyed row cache: id -> { node, signature }. Rows are rebuilt only when the
-    // job's rendered fields change, so the 1s poll no longer re-creates every row
-    // (and an open "ffmpeg args" panel stays open).
-    const rowCache = new Map();
-
-    async function loadJobs(resetPage = false) {
-      const root = document.querySelector("#jobs");
-      if (resetPage) jobsPageOffset = 0;
-      try {
-        const response = await fetch('/jobs?limit=' + JOBS_PAGE_SIZE + '&offset=' + jobsPageOffset);
-        const data = await response.json();
-        const jobs = data.jobs || [];
-        const total = data.total || jobs.length;
-        const stats = data.stats || { active: 0, completed: 0, failed: 0, downloadedBytes: 0 };
-
-        // If the current page is now past the end (e.g. records were removed),
-        // jump back to the last valid page and reload once.
-        if (total > 0 && jobsPageOffset >= total) {
-          jobsPageOffset = Math.max(0, Math.floor((total - 1) / JOBS_PAGE_SIZE) * JOBS_PAGE_SIZE);
-          loadJobs();
-          return;
-        }
-
-        setText("#activeStat", stats.active);
-        setText("#completedStat", stats.completed);
-        setText("#failedStat", stats.failed);
-        setText("#bytesStat", formatBytes(stats.downloadedBytes));
-        setCardState("#activeCard", stats.active);
-        setCardState("#completedCard", stats.completed);
-        setCardState("#failedCard", stats.failed);
-        setCardState("#bytesCard", stats.downloadedBytes);
-        setText("#summary", stats.active + ' active, ' + total + ' total job' + (total === 1 ? '' : 's'));
-
-        const prevButton = document.querySelector("#prevJobsPageButton");
-        const nextButton = document.querySelector("#nextJobsPageButton");
-        if (prevButton) prevButton.disabled = jobsPageOffset === 0;
-        if (nextButton) nextButton.disabled = jobsPageOffset + jobs.length >= total;
-        setText("#jobsPageLabel", 'Page ' + (Math.floor(jobsPageOffset / JOBS_PAGE_SIZE) + 1));
-
-        if (!total) {
-          jobsPageOffset = 0;
-          setText("#queueCount", '');
-          rowCache.clear();
-          root.innerHTML = '<div class="empty"><div class="empty-title">No helper jobs yet</div><div class="empty-text">Start an HLS or DASH download from the extension popup. Jobs will appear here with progress, output path, and file actions.</div></div>';
-          return;
-        }
-        renderJobList(root, jobs, total);
-      } catch {
-        setText("#summary", 'Helper offline');
-        setText("#queueCount", '');
-        setText("#activeStat", '0');
-        setText("#completedStat", '0');
-        setText("#failedStat", '0');
-        setText("#bytesStat", '0 B');
-        rowCache.clear();
-        root.innerHTML = '<div class="empty failed">Could not read helper jobs.</div>';
-      }
-    }
-    function renderJobList(root, jobs, total) {
-      let grid = root.querySelector(".grid");
-      if (!grid) {
-        rowCache.clear();
-        root.innerHTML = '<div class="grid"></div>';
-        grid = root.querySelector(".grid");
-      }
-      const count = document.querySelector("#queueCount");
-      const countText = total + ' item' + (total === 1 ? '' : 's');
-      if (count.textContent !== countText) count.textContent = countText;
-
-      const seen = new Set();
-      let cursor = grid.firstElementChild;
-      for (const job of jobs) {
-        seen.add(job.id);
-        const signature = JSON.stringify([job.status, job.error, job.progressText, job.outputPath, job.url, job.sourcePageUrl,
-          job.fileExists, job.totalBytes, job.totalSizeSource, job.downloadedBytes, job.startedAt, job.ffmpegArgs,
-          job.receivedSegments, job.totalSegments, job.downloadedSeconds, job.durationSeconds]);
-        let entry = rowCache.get(job.id);
-        if (!entry || entry.signature !== signature) {
-          const holder = document.createElement('div');
-          holder.innerHTML = renderJob(job);
-          const node = holder.firstElementChild;
-          if (entry) {
-            const wasOpen = entry.node.querySelector('details')?.open;
-            if (wasOpen && node.querySelector('details')) node.querySelector('details').open = true;
-            entry.node.replaceWith(node);
-            if (cursor === entry.node) cursor = node;
-          }
-          entry = { node, signature };
-          rowCache.set(job.id, entry);
-        }
-        if (entry.node !== cursor) grid.insertBefore(entry.node, cursor);
-        else cursor = cursor.nextElementSibling;
-      }
-      for (const [id, entry] of rowCache) {
-        if (!seen.has(id)) {
-          entry.node.remove();
-          rowCache.delete(id);
-        }
-      }
-    }
-    function prevJobsPage() {
-      jobsPageOffset = Math.max(0, jobsPageOffset - JOBS_PAGE_SIZE);
-      loadJobs();
-    }
-    function nextJobsPage() {
-      jobsPageOffset += JOBS_PAGE_SIZE;
-      loadJobs();
-    }
-    function renderJob(job) {
-      const isActive = job.status === 'running' || job.status === 'queued';
-      const fileExists = job.fileExists !== false && Boolean(job.outputPath);
-      const canForget = !isActive;
-      const title = fileName(job.outputPath || job.url);
-      const output = job.outputPath || job.url || '';
-      const sourceUrl = job.sourcePageUrl || '';
-      const fraction = progressFraction(job);
-      const bar = isActive ? '<div class="bar-track' + (fraction === null ? ' is-indeterminate' : '') + '" aria-hidden="true"><i style="width:' + (fraction === null ? 25 : (fraction * 100).toFixed(1)) + '%"></i></div>' : '';
-      return '<article class="tile row ' + escapeHtml(job.status) + '">'
-        + '<div class="jh"><span class="status ' + escapeHtml(job.status) + '">' + escapeHtml(humanStatus(job.status)) + '</span>'
-        + '<div class="job-title" title="' + escapeHtml(title) + '">' + escapeHtml(title) + '</div></div>'
-        + bar
-        + '<div class="progress">' + escapeHtml(humanJobMessage(job)) + '</div>'
-        + '<div class="path" title="' + escapeHtml(output) + '">' + escapeHtml(middleTruncate(output, 72)) + '</div>'
-        + '<div class="meta"><span class="chip">TOTAL ' + escapeHtml(sizeLabel(job)) + '</span><span class="chip">DOWN ' + escapeHtml(formatBytes(job.downloadedBytes || 0)) + '</span><span class="chip">START ' + escapeHtml(timeLabel(job.startedAt)) + '</span></div>'
-        + '<details><summary>ffmpeg args</summary><code>' + escapeHtml((job.ffmpegArgs || []).join(' ')) + '</code></details>'
-        + '<div class="actions"><button type="button" data-action="source" data-source-url="' + escapeHtml(sourceUrl) + '" ' + (sourceUrl ? '' : 'disabled') + '>Source</button><button class="warning" type="button" data-action="cancel" data-job-id="' + escapeHtml(job.id) + '" ' + (isActive ? '' : 'disabled') + '>Stop</button><button type="button" data-action="show" data-job-id="' + escapeHtml(job.id) + '" ' + (fileExists ? '' : 'disabled') + '>Open folder</button><button class="danger" type="button" data-action="remove" data-job-id="' + escapeHtml(job.id) + '" data-file-exists="' + fileExists + '" data-title="' + escapeHtml(title) + '" ' + (canForget ? '' : 'disabled') + '>Remove</button></div>'
-        + '</article>';
-    }
-    // SYNC-POINT: mirrors jobProgressFraction() in src/shared.js.
-    function progressFraction(job) {
-      let fraction = null;
-      if (Number(job.totalSegments) > 0) fraction = Number(job.receivedSegments || 0) / Number(job.totalSegments);
-      else if (Number(job.durationSeconds) > 0 && Number.isFinite(Number(job.downloadedSeconds))) fraction = Number(job.downloadedSeconds) / Number(job.durationSeconds);
-      else if (Number(job.totalBytes) > 0 && Number.isFinite(Number(job.downloadedBytes))) fraction = Number(job.downloadedBytes) / Number(job.totalBytes);
-      if (fraction === null || !Number.isFinite(fraction)) return null;
-      return Math.min(job.status === 'completed' ? 1 : 0.99, Math.max(0, fraction));
-    }
-    async function clearMissingJobs() {
-      const response = await fetch('/jobs/clear-missing', { method: 'POST' });
-      if (response.ok) loadJobs(true);
-    }
-    async function showJob(id) {
-      await fetch('/jobs/' + encodeURIComponent(id) + '/show', { method: 'POST' });
-    }
-    async function cancelJob(id) {
-      const response = await fetch('/jobs/' + encodeURIComponent(id) + '/cancel', { method: 'POST' });
-      if (response.ok) loadJobs(true);
-    }
-    let closeActiveDialog = null;
-    function openRemoveDialog(id, fileExists, title) {
-      if (!fileExists) {
-        removeJob(id, 'record');
-        return;
-      }
-      closeActiveDialog?.();
-      const overlay = document.createElement('div');
-      overlay.className = 'remove-overlay';
-      overlay.innerHTML = '<div class="remove-dialog" role="dialog" aria-modal="true"><h3>What would you like to remove?</h3><div class="remove-body"><p class="remove-name"></p><div class="remove-dialog-actions"><button class="danger" type="button" data-remove-mode="both">Remove both</button><button type="button" data-remove-mode="file">Remove file</button><button type="button" data-remove-mode="record">Remove record</button><button class="ghost" type="button" data-remove-mode="cancel">Cancel</button></div></div></div>';
-      overlay.querySelector('.remove-name').textContent = title;
-      const close = () => {
-        overlay.remove();
-        document.removeEventListener('keydown', onKey);
-        if (closeActiveDialog === close) closeActiveDialog = null;
-      };
-      closeActiveDialog = close;
-      const onKey = (event) => { if (event.key === 'Escape') close(); };
-      overlay.addEventListener('click', event => {
-        if (event.target === overlay || event.target.dataset.removeMode === 'cancel') {
-          close();
-          return;
-        }
-        const mode = event.target.dataset.removeMode;
-        if (!mode) return;
-        close();
-        removeJob(id, mode);
-      });
-      document.addEventListener('keydown', onKey);
-      document.body.appendChild(overlay);
-      overlay.querySelector('.ghost').focus();
-    }
-    async function removeJob(id, mode) {
-      if (mode === 'file' || mode === 'both') {
-        const response = await fetch('/jobs/' + encodeURIComponent(id), { method: 'DELETE' });
-        if (!response.ok) return;
-      }
-      if (mode === 'record' || mode === 'both') {
-        const response = await fetch('/jobs/' + encodeURIComponent(id) + '/history', { method: 'DELETE' });
-        if (!response.ok) return;
-      }
-      loadJobs(true);
-    }
-    function setText(selector, value) {
-      const node = document.querySelector(selector);
-      const text = String(value);
-      if (node && node.textContent !== text) node.textContent = text;
-    }
-    function escapeHtml(value) {
-      return String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
-    }
-    function humanStatus(value) {
-      return ({ queued: 'Queued', running: 'Downloading', completed: 'Completed', failed: 'Failed', cancelled: 'Stopped', missing: 'File missing' })[value] || value;
-    }
-    function humanJobMessage(job) {
-      const message = baseJobMessage(job);
-      return job.resumable ? message + ' Use Resume in the extension popup, or download the same video again, to continue.' : message;
-    }
-    function baseJobMessage(job) {
-      if (job.error === 'DOWNLOAD_STALLED') return job.progressText || 'No data received. The task was stopped.';
-      if (job.error === 'HELPER_RESTARTED') return 'Download was interrupted when the helper stopped.';
-      if (job.error === 'SOURCE_PAGE_CLOSED') return 'The source page was closed or reloaded, so the download stopped.';
-      return job.error || job.progressText || 'Waiting';
-    }
-    function fileName(value) {
-      return String(value || '').split(/[\\\\/]/).pop() || value || '';
-    }
-    function middleTruncate(value, maxLength) {
-      const text = String(value || '');
-      if (text.length <= maxLength) return text;
-      const keep = Math.max(8, Math.floor((maxLength - 3) / 2));
-      return text.slice(0, keep) + '...' + text.slice(-keep);
-    }
-    function setCardState(selector, value) {
-      const node = document.querySelector(selector);
-      if (node) node.classList.toggle('is-empty', !value);
-    }
-    function sizeLabel(job) {
-      if (!job.totalBytes) return 'unknown';
-      return (job.totalSizeSource === 'estimated' ? '~' : '') + formatBytes(job.totalBytes) + ' (' + job.totalSizeSource + ')';
-    }
-    function formatBytes(bytes) {
-      const units = ['B', 'KB', 'MB', 'GB'];
-      let value = Number(bytes) || 0;
-      let index = 0;
-      while (value >= 1024 && index < units.length - 1) { value /= 1024; index += 1; }
-      return (value >= 10 || index === 0 ? value.toFixed(0) : value.toFixed(1)) + ' ' + units[index];
-    }
-    function timeLabel(value) {
-      if (!value) return 'unknown';
-      return new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    }
-    document.querySelector("#jobs").addEventListener("click", (event) => {
-      const button = event.target.closest("button[data-action]");
-      if (!button) return;
-      if (button.dataset.action === "cancel") cancelJob(button.dataset.jobId);
-      if (button.dataset.action === "show") showJob(button.dataset.jobId);
-      if (button.dataset.action === "remove") openRemoveDialog(button.dataset.jobId, button.dataset.fileExists === 'true', button.dataset.title || 'Download');
-      if (button.dataset.action === "source" && button.dataset.sourceUrl) window.open(button.dataset.sourceUrl, '_blank', 'noopener');
-    });
-    document.querySelector("#copyPathButton").addEventListener("click", async (event) => {
-      const button = event.currentTarget;
-      const ok = await navigator.clipboard.writeText(document.querySelector("#downloadPath").textContent).then(() => true, () => false);
-      button.classList.toggle('copied', ok);
-      if (ok) setTimeout(() => button.classList.remove('copied'), 1200);
-    });
-    // Bento hover light: keeps the hovered tile's --mx / --my at the pointer position.
-    document.addEventListener("pointermove", (event) => {
-      const tile = event.target.closest?.(".tile");
-      if (!tile) return;
-      const box = tile.getBoundingClientRect();
-      tile.style.setProperty("--mx", (event.clientX - box.left) + "px");
-      tile.style.setProperty("--my", (event.clientY - box.top) + "px");
-    }, { passive: true });
-    loadJobs();
-    setInterval(loadJobs, 1000);
-  </script>
+<head><meta charset="utf-8"><meta name="color-scheme" content="dark light"><title>DS Video Downloader helper</title></head>
+<body style="font-family:system-ui,sans-serif;margin:2rem">
+  <h1>DS Video Downloader helper is running</h1>
+  <p>Listening on 127.0.0.1:${PORT}. Downloads go to <code>${safeDir}</code>.</p>
+  <p>Open the extension popup to see and manage downloads.</p>
 </body>
 </html>`;
 }

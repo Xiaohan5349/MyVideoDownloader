@@ -26,9 +26,6 @@
   "btnRefresh": {
     "message": "刷新"
   },
-  "btnOpenDashboard": {
-    "message": "控制台"
-  },
   "btnDownload": {
     "message": "下载"
   },
@@ -376,5 +373,53 @@
   },
   "btnNextJob": {
     "message": "下一个下载"
+  },
+  "searchJobsPlaceholder": {
+    "message": "搜索下载：文件名、文件夹"
+  },
+  "msgNoMatches": {
+    "message": "没有匹配“{{query}}”的下载。"
+  },
+  "filterAll": {
+    "message": "全部"
+  },
+  "labelKindDirect": {
+    "message": "直链"
+  },
+  "filterKindAria": {
+    "message": "按媒体类型筛选"
+  },
+  "btnCopyUrl": {
+    "message": "复制链接"
+  },
+  "btnCopyFfmpeg": {
+    "message": "复制 ffmpeg 命令"
+  },
+  "msgCopied": {
+    "message": "已复制"
+  },
+  "msgCopyFailed": {
+    "message": "复制失败"
+  },
+  "notifyJobDone": {
+    "message": "下载完成"
+  },
+  "notifyJobFailed": {
+    "message": "下载失败"
+  },
+  "notifyClickToShow": {
+    "message": "点击打开所在文件夹"
+  },
+  "filterAllSites": {
+    "message": "全部网站"
+  },
+  "siteFilterAria": {
+    "message": "按网站筛选"
+  },
+  "msgNoSiteJobs": {
+    "message": "没有来自 {{site}} 的下载。"
+  },
+  "btnSiteFilterTitle": {
+    "message": "只看这个网站的下载"
   }
 }

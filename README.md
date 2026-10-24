@@ -34,7 +34,7 @@ npm run helper:start
 
 This starts the helper in the background, so the terminal can be closed.
 
-The helper dashboard opens at [http://127.0.0.1:8765](http://127.0.0.1:8765). You can monitor downloads, check ffmpeg status, and change the download directory from there.
+Downloads are listed in the popup's Helper tab, with search, Stop/Resume and Open folder. [http://127.0.0.1:8765](http://127.0.0.1:8765) only shows that the helper is running.
 
 ### Helper Management
 
@@ -55,13 +55,13 @@ npm run helper:autostart:remove   # Disable auto-start
 3. The popup lists all detected media, sharpest first and then largest, with quality (e.g. 1080p) and size; "scanning…" shows while the list is still loading, and sizes found later fill in while the popup is open. Click a file to download it
 4. For HLS and DASH streams, pick a quality variant (1080p, 720p, etc.)
 5. In the download dialog, edit the file name and choose the folder (**Browse…**). The folder starts at the helper's download directory; a different one applies to that download only
-6. Monitor progress on the helper dashboard or in the popup. With several downloads running, the Helper tab's progress tile cycles through them (or switch with ‹ ›)
+6. Monitor progress in the popup's Helper tab; search by file name or folder, or filter by site, to find older downloads. With several downloads running, the Helper tab's progress tile cycles through them (or switch with ‹ ›)
 7. HLS and DASH downloads keep running when you switch tabs or close the video page. If one stops (you pressed Stop, stalled, refused by the server, helper restarted), click **Resume** on the job in the popup, or download the same video again within 24 hours, to continue from the segments already downloaded. Direct files downloaded over byte ranges resume the same way
 8. If the helper cannot download a direct file (for example HTTP 403), click **Download with browser** in the notice or **Browser** on the failed job to let Chrome download it
 
 ## Configuration
 
-Set your download directory via the helper dashboard or by creating `helper/helper-settings.json`:
+Set your download directory in the popup's Settings tab or by creating `helper/helper-settings.json`:
 
 ```json
 {

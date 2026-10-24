@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## v1.12.0 - 2026-10-24
+
+### Added
+- Search box in the Helper tab: it searches the helper's whole job history by file name and folder (what each result shows; page and stream URLs carry random IDs and are not searched), not only the 20 most recent jobs. `GET /jobs` takes `q=`; it filters before paging, and `stats` stay global. Every word must match (case is ignored). The matched words are highlighted in each result's name and path. Esc clears the search. The progress tile and the summary keep showing all active downloads while searching.
+- Site filter next to the job search: "All sites" plus every site in the history with its job count (the source page's host without `www.`/`www53.`, so mirrors group together). Each job shows its site as a tag; clicking it filters by that site. It combines with the search and is hidden while the history has a single site. `GET /jobs` takes `site=`, returns `sites` (all jobs) and a `site` on each job.
+- Media type chips (All / HLS / DASH / Direct, with counts) above the media list when a page has more than one kind. Filtered items are hidden, not removed, so a running download keeps its status line.
+- "Copy URL" and, for HLS/DASH, "Copy ffmpeg command" in the download dialog. The URL is the chosen quality's; the command sets only the page as Referer (no cookies) and writes to the dialog's file name.
+- System notification when a helper download finishes or fails, also with the popup closed: while jobs run, the service worker checks the helper every 30 seconds (`alarms`). Clicking a "finished" notification opens the file's folder. Stopped jobs are not announced. New permissions: `alarms`, `notifications`.
+
+### Removed
+- The helper dashboard at http://127.0.0.1:8765 and the popup's Dashboard button. `/` is now a plain "helper is running" page; downloads are managed in the Helper tab. The unused dashboard background (`assets/app-background.webp`, `GET /assets/app-background.webp`) is gone too.
+
 ## v1.11.1 - 2026-10-10
 
 ### Fixed

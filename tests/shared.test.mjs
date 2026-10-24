@@ -5,6 +5,8 @@ import {
   classifyMedia,
   estimateBytes,
   fallbackBandwidthForQuality,
+  ffmpegCommand,
+  highlightRanges,
   mergeSettings,
   inferQualityLabel,
   jobProgressFraction,
@@ -264,4 +266,19 @@ test("sortMediaByQuality puts the sharpest first, then the largest", () => {
   assert.deepEqual(sortMediaByQuality(items).map((item) => item.id), [
     "master", "1080-est", "720-big", "720-small", "unknown", "nothing"
   ]);
+});
+
+test("ffmpegCommand quotes every value and leaves out a missing Referer", () => {
+  assert.equal(
+    ffmpegCommand("https://cdn.example/v/index.m3u8?t=1&s=2", "https://site.example/watch?v=1", "My \"Clip\".mp4"),
+    'ffmpeg -referer "https://site.example/watch?v=1" -i "https://cdn.example/v/index.m3u8?t=1&s=2" -c copy "My \\"Clip\\".mp4"'
+  );
+  assert.equal(ffmpegCommand("https://cdn.example/a.mpd", "", "a.mp4"), 'ffmpeg -i "https://cdn.example/a.mpd" -c copy "a.mp4"');
+});
+
+test("highlightRanges finds every word, ignoring case, and merges overlaps", () => {
+  assert.deepEqual(highlightRanges("ABCD-484 旅行记.mp4", ["abcd", "旅行"]), [[0, 4], [9, 11]]);
+  assert.deepEqual(highlightRanges("CAWB-040 cawb", ["cawb"]), [[0, 4], [9, 13]], "every occurrence");
+  assert.deepEqual(highlightRanges("Holiday Trip", ["holi", "liday"]), [[0, 7]], "overlaps merge");
+  assert.deepEqual(highlightRanges("abc", ["x", ""]), []);
 });

@@ -41,6 +41,7 @@
         <div class="tile filter-tile">
           <span id="filterSummary" class="tile-text"></span>
         </div>
+        <div id="kindFilter" class="kind-filter" role="group" data-i18n-aria="filterKindAria" hidden></div>
         <section id="mediaList" class="media-list" aria-live="polite"></section>
       </section>
 
@@ -62,9 +63,13 @@
         <section class="tile jobs-tile">
           <div class="toolbar">
             <span class="section-title" data-i18n="tabsHelper">Helper jobs</span>
-            <button id="openDashboardButton" class="small-button" type="button" data-i18n="btnOpenDashboard">Dashboard</button>
             <button id="refreshHelperButton" class="small-button" type="button" data-i18n="btnRefresh">Refresh</button>
             <button id="clearMissingButton" class="small-button" type="button" data-i18n="btnClearMissing">Clear missing</button>
+            <div class="job-search-row">
+              <input id="jobSearchInput" class="job-search" type="search" spellcheck="false" autocomplete="off"
+                data-i18n-placeholder="searchJobsPlaceholder" data-i18n-aria="searchJobsPlaceholder" placeholder="Search downloads: name, folder">
+              <select id="jobSiteSelect" class="job-site-select" data-i18n-aria="siteFilterAria" hidden></select>
+            </div>
           </div>
           <section id="helperJobs" class="job-list" aria-live="polite"></section>
         </section>
@@ -138,6 +143,7 @@
             <button class="cancel-button" type="button" data-i18n="btnStop">Stop</button>
             <button class="show-button" type="button" data-i18n="btnFolder">Open folder</button>
             <button class="remove-button" type="button" data-i18n="btnRemove">Remove</button>
+            <button class="site-tag" type="button" data-i18n-title="btnSiteFilterTitle" hidden></button>
           </div>
         </article>
       </template>

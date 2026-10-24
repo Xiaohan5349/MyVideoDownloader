@@ -95,26 +95,13 @@ it("GET /jobs returns empty array initially", async () => {
   assert.ok(Array.isArray(res.body.jobs));
 });
 
-it("GET / returns HTML dashboard", async () => {
+it("GET / returns a minimal offline status page", async () => {
   const res = await fetchJson("/");
   assert.equal(res.status, 200);
   assert.ok(typeof res.body === "string" && res.body.includes("<!doctype html>"));
-  // Must work offline: no external stylesheets, fonts, scripts or images.
-  assert.doesNotMatch(res.body, /<(link|script|img)[^>]+(href|src)="https?:/i);
-  assert.doesNotMatch(res.body, /url\(\s*["']?https?:/i);
-  assert.match(res.body, /Open folder/);
-  assert.match(res.body, /Remove file/);
-  assert.match(res.body, /Remove record/);
-  assert.match(res.body, /data-action="remove"/);
-  assert.doesNotMatch(res.body, /data-action="delete"/);
-  assert.doesNotMatch(res.body, /data-action="forget"/);
-});
-
-it("GET /assets/app-background.webp returns the dashboard background", async () => {
-  const res = await fetchJson("/assets/app-background.webp");
-  assert.equal(res.status, 200);
-  assert.equal(res.headers["content-type"], "image/webp");
-  assert.ok(typeof res.body === "string" && res.body.length > 100);
+  assert.match(res.body, /helper is running/);
+  assert.doesNotMatch(res.body, /<script/i);
+  assert.doesNotMatch(res.body, /https?:\/\//i);
 });
 
 it("POST /inspect probes direct file size without downloading the body", async () => {
@@ -409,6 +396,57 @@ it("GET /jobs supports limit, offset, total, and global stats", async () => {
   const page2 = await fetchJson("/jobs?limit=2&offset=2");
   assert.equal(page2.status, 200);
   assert.equal(page2.body.offset, 2);
+});
+
+it("GET /jobs?q= filters all jobs before paging and keeps global stats", async () => {
+  const dir = process.env.DOWNLOAD_DIR;
+  jobs.set("search-a", { id: "search-a", status: "completed", url: "https://cdn.example/a/master.m3u8",
+    sourcePageUrl: "https://videos.example/watch/Holiday-Trip", outputPath: path.join(dir, "Holiday Trip 2026.mp4"), downloadDir: dir });
+  jobs.set("search-b", { id: "search-b", status: "completed", url: "https://cdn.example/b/clip.mp4",
+    sourcePageUrl: "https://videos.example/watch/cooking", outputPath: path.join(dir, "Cooking Show.mp4"), downloadDir: dir });
+  try {
+    const byName = await fetchJson("/jobs?q=holiday%20trip");
+    assert.equal(byName.status, 200);
+    assert.deepEqual(byName.body.jobs.map((job) => job.id), ["search-a"]);
+    assert.equal(byName.body.total, 1);
+    assert.equal(byName.body.query, "holiday trip");
+    const unfiltered = await fetchJson("/jobs?limit=1");
+    assert.deepEqual(byName.body.stats, unfiltered.body.stats, "stats cover all jobs, not the matches");
+
+    const byName2 = await fetchJson("/jobs?q=cooking");
+    assert.deepEqual(byName2.body.jobs.map((job) => job.id), ["search-b"]);
+
+    // Page and stream URLs are not searched: the popup does not show them.
+    const byPageOnly = await fetchJson("/jobs?q=videos.example");
+    assert.equal(byPageOnly.body.total, 0);
+    const byUrlOnly = await fetchJson("/jobs?q=master.m3u8");
+    assert.equal(byUrlOnly.body.total, 0);
+
+    // Site filter: "www."/"www53." prefixes group together, and it combines with q.
+    jobs.set("search-c", { id: "search-c", status: "completed", url: "https://cdn.example/c.mp4",
+      sourcePageUrl: "https://www53.videos.example/watch?v=x", outputPath: path.join(dir, "Trip Extra.mp4"), downloadDir: dir });
+    const bySite = await fetchJson("/jobs?site=videos.example");
+    assert.deepEqual(bySite.body.jobs.map((job) => job.id).sort(), ["search-a", "search-b", "search-c"]);
+    assert.ok(bySite.body.jobs.every((job) => job.site === "videos.example"));
+    assert.deepEqual(bySite.body.sites.find((entry) => entry.site === "videos.example"), { site: "videos.example", count: 3 });
+    const bySiteAndWord = await fetchJson("/jobs?site=VIDEOS.example&q=trip");
+    assert.deepEqual(bySiteAndWord.body.jobs.map((job) => job.id).sort(), ["search-a", "search-c"]);
+    const otherSite = await fetchJson("/jobs?site=elsewhere.example");
+    assert.equal(otherSite.body.total, 0);
+    assert.ok(otherSite.body.sites.length >= 1, "the site list covers all jobs, not the matches");
+
+    const none = await fetchJson("/jobs?q=nothing-matches-this");
+    assert.equal(none.body.total, 0);
+    assert.deepEqual(none.body.jobs, []);
+
+    const blank = await fetchJson("/jobs?q=%20%20");
+    assert.equal(blank.body.total, jobs.size);
+    assert.equal(blank.body.query, "");
+  } finally {
+    jobs.delete("search-a");
+    jobs.delete("search-b");
+    jobs.delete("search-c");
+  }
 });
 
 it("enforceJobHistoryCap drops only old missing records above the cap", async () => {

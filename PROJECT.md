@@ -24,7 +24,7 @@ npm test
 ```
 
 - **Extension popup**: Click the extension icon in Chrome toolbar
-- **Helper dashboard**: http://127.0.0.1:8765
+- **Helper status page**: http://127.0.0.1:8765 (downloads are managed in the popup)
 - **Options page**: Right-click extension → Options (or `src/options.html`)
 
 ## Architecture Diagram
@@ -68,7 +68,7 @@ npm test
 │  Port: 8765  Host: 127.0.0.1                                │
 │                                                             │
 │  Endpoints:                                                 │
-│  GET  /              → Dashboard HTML (inline CSS/JS)        │
+│  GET  /              → Plain status page                     │
 │  GET  /health        → { ok, ffmpeg, downloadDir }          │
 │  GET  /jobs          → List all download jobs                │
 │  POST /download      → Start ffmpeg HLS/DASH download        │
@@ -105,7 +105,7 @@ npm test
 | `_locales/en/messages.json` | 90 | English strings for manifest + popup UI (~80 messages) |
 | `_locales/zh_CN/messages.json` | 90 | Chinese (Simplified) translations |
 | **Helper** | | |
-| `helper/server.js` | 1820 | HTTP server + inline dashboard HTML/CSS/JS + ffmpeg download engine + manifest inspection + segment size probing |
+| `helper/server.js` | 1820 | HTTP server + ffmpeg download engine + manifest inspection + segment size probing |
 | `helper/pick-folder.ps1` | — | PowerShell script for native Windows folder picker dialog |
 | **Scripts** | | |
 | `scripts/helper-control.ps1` | 66 | PowerShell: start/stop/restart/status for the helper via port 8765 |
@@ -157,7 +157,7 @@ background.js fetches manifest URL (with captured headers)
 1. **Port 8765** — chosen for uniqueness, avoiding collisions
 2. **No Express** — helper uses raw Node `http` module, zero npm dependencies
 3. **MV3 service worker** — uses ES `import` + `"type": "module"` (not background page)
-4. **Self-contained dashboard** — `server.js` renders inline HTML/CSS/JS, no external files
+4. **No dashboard** — removed in v1.12.0; the popup's Helper tab (with search) manages downloads
 5. **Security** — host binds `127.0.0.1` only, no auth, cookie values sanitized (CloudFlare clearance stripped)
 6. **Header capture** — only 6 header types forwarded (accept, origin, referer, user-agent, accept-language, cookie), max 500 entries in ring buffer
 7. **Filename format**: `{title}-{sha1_8chars}.mp4` (helper), `{title}.{ext}` (direct downloads)
@@ -187,7 +187,7 @@ background.js fetches manifest URL (with captured headers)
 2. Reload extension at `chrome://extensions/` (click refresh icon)
 3. Restart helper if changed: `npm run helper:restart`
 4. Run tests: `npm test`
-5. For CSS changes, just reload the popup or helper dashboard page
+5. For CSS changes, just reload the popup
 
 ## Key Environment Variables (Helper)
 
@@ -207,7 +207,7 @@ background.js fetches manifest URL (with captured headers)
 3. **ffmpeg must be on PATH** — no bundled ffmpeg; user must install separately
 4. **No download queue** — multiple downloads run concurrently (one ffmpeg per request)
 5. **No download resume** — failed/cancelled downloads can't be resumed
-6. **Inline dashboard** — the helper dashboard CSS is duplicated from popup theme, making visual updates require changes in two places
+6. ~~**Inline dashboard**~~ — removed in v1.12.0
 7. **CLAUDE.md in .gitignore** — project memory file is intentionally not versioned
 8. **Content script has no access to shared.js exports** — manual synchronization needed when shared.js functions change
 
