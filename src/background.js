@@ -4,6 +4,7 @@ import {
   normalizeMediaItem, parseDashManifest, parseHlsManifest, sanitizeFilename
 } from "./shared.js";
 import { getMessage, initI18n } from "./i18n.js";
+import { loadBilibiliDetails, loadBilibiliPlayback } from "./bilibili.js";
 
 console.log("[ds] Service worker started v1.12.0");
 
@@ -26,6 +27,8 @@ const WATCHED_JOBS_KEY = "watchedJobs";
 const JOB_WATCH_ALARM = "jobWatch";
 const JOB_NOTIFICATION_PREFIX = "job:";
 const JOB_SEARCH_LIMIT = 50;
+// Pause between the playurl calls of a batch; a burst trips Bilibili's risk control.
+const BILIBILI_REQUEST_GAP_MS = 800;
 
 // --- Message routing ---
 
@@ -176,6 +179,7 @@ async function handleMessage(message, sender) {
   }
 
   if (message.type === MESSAGE.DOWNLOADS_JOB_RESUME) return watchStartedJob(await resumeHelperJob(message.jobId));
+  if (message.type === MESSAGE.DOWNLOADS_JOBS_RESUME_ALL) return resumeAllHelperJobs();
 
   if (message.type === MESSAGE.DOWNLOADS_JOB_GET) return getHelperJob(message.jobId);
   if (message.type === MESSAGE.DOWNLOADS_JOB_SHOW) return showHelperJob(message.jobId);
@@ -192,6 +196,8 @@ async function handleMessage(message, sender) {
     return result;
   }
   if (message.type === MESSAGE.STREAM_VARIANTS_GET) return getStreamVariants(message.item);
+  if (message.type === MESSAGE.BILIBILI_INFO_GET) return getBilibiliInfo(message.url);
+  if (message.type === MESSAGE.BILIBILI_DOWNLOAD) return startBilibiliDownloads(message);
   if (message.type === MESSAGE.SETTINGS_GET) return { ok: true, settings: await getSettings() };
 
   if (message.type === MESSAGE.SETTINGS_UPDATE) {
@@ -726,11 +732,13 @@ async function startPageDownload(media, variant, { allowHelperFallback = true, o
 
 // --- Resume button ---
 
-async function resumeHelperJob(jobId) {
+// openPage: false keeps a failed stream resume from opening its page.
+async function resumeHelperJob(jobId, { openPage = true } = {}) {
   const result = await getHelperJob(jobId);
   if (!result.ok) return result;
   const job = result.job;
   if (job.resumable && job.inputMode === "direct") return resumeDirectHelperJob(job);
+  if (job.resumable && job.inputMode === "bilibili") return resumeBilibiliHelperJob(job);
   if (!job.resumable || job.inputMode !== "browser") return { ok: false, error: "JOB_NOT_RESUMABLE" };
 
   const isDash = job.streamKind === "dash";
@@ -751,7 +759,7 @@ async function resumeHelperJob(jobId) {
 
   // Usually an expired CDN token or a page-only site. Clicking download on
   // the page uses a fresh manifest URL and still resumes this job.
-  if (/^https?:\/\//i.test(job.sourcePageUrl || "")) {
+  if (openPage && /^https?:\/\//i.test(job.sourcePageUrl || "")) {
     await openOrFocusTab(job.sourcePageUrl);
     return { ok: false, error: "SOURCE_PAGE_OPENED" };
   }
@@ -767,6 +775,100 @@ async function resumeDirectHelperJob(job) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ headers })
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) return { ok: false, error: payload.error || `HELPER_${response.status}` };
+    return { ok: true, helperJob: payload.job, resumed: Boolean(payload.resumed) };
+  } catch {
+    return { ok: false, error: "HELPER_OFFLINE" };
+  }
+}
+
+// --- Bilibili ---
+
+// The API calls run here so the browser sends the user's own Bilibili cookies:
+// being logged in decides which qualities the API offers.
+async function getBilibiliInfo(url) {
+  try {
+    return { ok: true, info: await loadBilibiliDetails(url) };
+  } catch (error) {
+    return { ok: false, error: error.code || "BILIBILI_API_FAILED" };
+  }
+}
+
+// parts: [{ p, cid, filename, durationSeconds }]; quality: "" for the best
+// H.264 stream, or a quality id the stream must not exceed. One helper job per
+// part; a failing part stops the batch and reports how many were started.
+async function startBilibiliDownloads({ bvid, title = "", parts = [], quality = "", downloadDir = "" }) {
+  const policy = quality ? { mode: "at_most", qualityId: quality } : { mode: "highest_h264" };
+  const helperJobs = [];
+  for (const part of parts) {
+    if (helperJobs.length) await new Promise((resolve) => setTimeout(resolve, BILIBILI_REQUEST_GAP_MS));
+    const result = await startBilibiliPart({ bvid, title }, part, policy, downloadDir);
+    if (!result.ok) return { ...result, helperJobs };
+    helperJobs.push(result.helperJob);
+    await watchStartedJob(result);
+  }
+  return { ok: true, helperJobs };
+}
+
+async function startBilibiliPart({ bvid, title }, part, policy, downloadDir) {
+  let playback;
+  try {
+    playback = await loadBilibiliPlayback({ bvid, cid: part.cid }, policy);
+  } catch (error) {
+    return { ok: false, error: error.code || "BILIBILI_API_FAILED" };
+  }
+  return postToHelper("/download", {
+    kind: "bilibili",
+    tracks: playback.tracks.map(({ role, url }) => ({ role, url })),
+    sourcePageUrl: `https://www.bilibili.com/video/${bvid}/?p=${part.p}`,
+    bilibili: { bvid, title, cid: String(part.cid), p: part.p, selection: playback.actualSelection },
+    filename: part.filename,
+    downloadDir
+  });
+}
+
+// Stream URLs expire after a few hours, so ask again, for exactly the quality
+// and codecs the job started with: the kept chunks only fit those files.
+async function resumeBilibiliHelperJob(job) {
+  const { bvid, cid, selection } = job.bilibili || {};
+  let playback;
+  try {
+    playback = await loadBilibiliPlayback({ bvid, cid }, { mode: "highest_h264" }, { expectedSelection: selection });
+  } catch (error) {
+    return { ok: false, error: error.code || "BILIBILI_API_FAILED" };
+  }
+  return postToHelper(`/jobs/${encodeURIComponent(job.id)}/resume`, {
+    tracks: playback.tracks.map(({ role, url }) => ({ role, url }))
+  });
+}
+
+// "Resume all": every resumable job, oldest first so a batch keeps its order
+// in the queue. A stream whose resume fails stays resumable; unlike a single
+// Resume, its page is not opened (a batch would open a tab per job).
+async function resumeAllHelperJobs() {
+  const response = await fetch(`${HELPER_URL}/jobs?limit=500`).catch(() => null);
+  if (!response?.ok) return { ok: false, error: "HELPER_OFFLINE" };
+  const data = await response.json().catch(() => ({}));
+  const resumable = (Array.isArray(data.jobs) ? data.jobs : []).filter((job) => job.resumable).reverse();
+  let resumed = 0;
+  let lastError = "";
+  for (const [index, job] of resumable.entries()) {
+    if (index && job.inputMode === "bilibili") await new Promise((resolve) => setTimeout(resolve, BILIBILI_REQUEST_GAP_MS));
+    const result = await watchStartedJob(await resumeHelperJob(job.id, { openPage: false }));
+    if (result.ok) resumed += 1;
+    else lastError = result.error;
+  }
+  return { ok: !lastError, resumed, failed: resumable.length - resumed, error: lastError || undefined };
+}
+
+async function postToHelper(path, body) {
+  try {
+    const response = await fetch(`${HELPER_URL}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
     });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) return { ok: false, error: payload.error || `HELPER_${response.status}` };

@@ -41,6 +41,30 @@
         <div class="tile filter-tile">
           <span id="filterSummary" class="tile-text"></span>
         </div>
+        <section id="biliTile" class="tile bili-tile" hidden>
+          <div class="bili-head">
+            <span class="tile-cap" data-i18n="biliCaption">BILIBILI</span>
+            <span id="biliSummary" class="bili-summary"></span>
+          </div>
+          <div id="biliTitle" class="bili-title"></div>
+          <div id="biliParts" class="bili-grid" role="group" data-i18n-aria="biliPartsAria" hidden></div>
+          <div id="biliFocus" class="bili-focus" hidden></div>
+          <div class="bili-actions">
+            <div id="biliPick" class="bili-pick" hidden>
+              <button id="biliSelectAll" class="small-button" type="button" data-i18n="biliSelectAll">Select all</button>
+              <button id="biliInvert" class="small-button" type="button" data-i18n="biliInvert">Invert</button>
+              <button id="biliClear" class="small-button" type="button" data-i18n="biliSelectNone">Clear</button>
+            </div>
+            <select id="biliQuality" class="bili-quality" data-i18n-aria="biliQualityAria">
+              <option value="" data-i18n="biliQualityBest">Best quality</option>
+              <option value="80">≤ 1080P</option>
+              <option value="64">≤ 720P</option>
+              <option value="32">≤ 480P</option>
+            </select>
+            <button id="biliDownload" class="ghost-button is-primary" type="button" disabled></button>
+          </div>
+          <p id="biliStatus" class="bili-status" hidden></p>
+        </section>
         <div id="kindFilter" class="kind-filter" role="group" data-i18n-aria="filterKindAria" hidden></div>
         <section id="mediaList" class="media-list" aria-live="polite"></section>
       </section>
@@ -65,6 +89,7 @@
             <span class="section-title" data-i18n="tabsHelper">Helper jobs</span>
             <button id="refreshHelperButton" class="small-button" type="button" data-i18n="btnRefresh">Refresh</button>
             <button id="clearMissingButton" class="small-button" type="button" data-i18n="btnClearMissing">Clear missing</button>
+            <button id="resumeAllButton" class="small-button is-accent" type="button" hidden></button>
             <div class="job-search-row">
               <input id="jobSearchInput" class="job-search" type="search" spellcheck="false" autocomplete="off"
                 data-i18n-placeholder="searchJobsPlaceholder" data-i18n-aria="searchJobsPlaceholder" placeholder="Search downloads: name, folder">
@@ -97,6 +122,10 @@
             <button id="pickDownloadDirButton" class="ghost-button" type="button" data-i18n="btnSelectFolder">Select folder</button>
             <button id="saveDownloadDirButton" class="ghost-button is-primary" type="button" data-i18n="btnSaveHelperFolder">Save helper folder</button>
           </div>
+        </div>
+        <div class="setting-row tile">
+          <span class="setting-label" data-i18n="settingsSiteDirsLabel">Download folder per site</span>
+          <div id="siteDirList" class="site-dir-list"></div>
         </div>
         <label class="setting-row tile half">
           <span class="setting-label" data-i18n="settingsLanguageLabel">Language</span>

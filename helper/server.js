@@ -245,7 +245,9 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "POST" && req.url === "/download") {
       const payload = await readJson(req);
-      const result = payload?.kind === "direct" ? await startDirectDownload(payload) : await startDownload(payload);
+      const result = payload?.kind === "direct" ? await startDirectDownload(payload)
+        : payload?.kind === "bilibili" ? await startBilibiliDownload(payload)
+        : await startDownload(payload);
       writeJson(res, result.ok ? 202 : result.status || 400, result);
       return;
     }
@@ -508,6 +510,7 @@ function findResumableDirectJob(url, sourcePageUrl, totalBytes) {
 async function resumeDirectJob(id, payload) {
   const job = jobs.get(id);
   if (!job) return { ok: false, status: 404, error: "JOB_NOT_FOUND" };
+  if (job.inputMode === "bilibili" && job.resumable && existsSync(resumeDataPath(job))) return resumeBilibiliJob(job, payload);
   if (job.inputMode !== "direct" || !job.resumable || !existsSync(resumeDataPath(job))) {
     return { ok: false, status: 409, error: "JOB_NOT_RESUMABLE" };
   }
@@ -556,8 +559,19 @@ async function reopenDirectJob(job, url, headers, probe, controller) {
 }
 
 function directDoneBytes(job) {
-  const done = new Set(job.directChunksDone || []);
-  return planByteRanges(job.totalBytes, job.directChunkBytes)
+  return chunksDoneBytes(rangeTarget(job));
+}
+
+// What downloadDirectRanges works on: one file on the server. Direct jobs are
+// one target; Bilibili jobs keep one per track. chunksDone is the job's own
+// array, so finished chunks are recorded on the job.
+function rangeTarget(job) {
+  return { url: job.url, totalBytes: job.totalBytes, chunkBytes: job.directChunkBytes, chunksDone: job.directChunksDone };
+}
+
+function chunksDoneBytes(target) {
+  const done = new Set(target.chunksDone || []);
+  return planByteRanges(target.totalBytes, target.chunkBytes)
     .filter((chunk) => done.has(chunk.index))
     .reduce((sum, chunk) => sum + chunk.end - chunk.start + 1, 0);
 }
@@ -622,7 +636,7 @@ async function runDirectDownload(job, headers, probe, controller, { resume = fal
   try {
     handle = await open(partPath, resume ? "r+" : "w");
     if (probe.acceptsRanges) {
-      await downloadDirectRanges(job, headers, handle, controller.signal, progress, resume);
+      await downloadDirectRanges(rangeTarget(job), headers, handle, controller.signal, progress, resume);
     } else {
       const response = probe.response || await fetch(job.url, { headers: headersToObject(headers), signal: controller.signal });
       if (!response.ok) throw new Error(`DIRECT_HTTP_${response.status}`);
@@ -659,10 +673,10 @@ async function runDirectDownload(job, headers, probe, controller, { resume = fal
 // Workers take chunks in order and write each one at its own offset, so no
 // merge step is needed. A 403/429 means the server dislikes parallel
 // requests: drop to one connection and retry the chunk where it stopped.
-async function downloadDirectRanges(job, headers, handle, signal, progress, resume) {
-  if (!resume) await handle.truncate(job.totalBytes);
-  const done = new Set(job.directChunksDone);
-  const chunks = planByteRanges(job.totalBytes, job.directChunkBytes).filter((chunk) => !done.has(chunk.index));
+async function downloadDirectRanges(target, headers, handle, signal, progress, resume) {
+  if (!resume) await handle.truncate(target.totalBytes);
+  const done = new Set(target.chunksDone);
+  const chunks = planByteRanges(target.totalBytes, target.chunkBytes).filter((chunk) => !done.has(chunk.index));
   let next = 0;
 
   const worker = async (index) => {
@@ -671,7 +685,7 @@ async function downloadDirectRanges(job, headers, handle, signal, progress, resu
       let position = chunk.start;
       for (let attempt = 0; ; attempt += 1) {
         try {
-          const response = await fetch(job.url, {
+          const response = await fetch(target.url, {
             headers: { ...headersToObject(headers), Range: `bytes=${position}-${chunk.end}` },
             signal
           });
@@ -680,9 +694,14 @@ async function downloadDirectRanges(job, headers, handle, signal, progress, resu
             if (response.status === 403 || response.status === 429) progress.connections = 1;
             throw new Error(response.status === 200 ? "DIRECT_RANGE_IGNORED" : `DIRECT_HTTP_${response.status}`);
           }
-          position = await writeBodyAt(response.body, handle, position, (count) => { progress.bytes += count; });
+          // position moves with every write: a body cut off midway retries
+          // from the next missing byte, so no byte is fetched or counted twice.
+          await writeBodyAt(response.body, handle, position, (count) => {
+            position += count;
+            progress.bytes += count;
+          });
           if (position !== chunk.end + 1) throw new Error("DIRECT_INCOMPLETE");
-          job.directChunksDone.push(chunk.index);
+          target.chunksDone.push(chunk.index);
           break;
         } catch (error) {
           if (signal.aborted || attempt >= DIRECT_CHUNK_RETRIES) throw error;
@@ -730,6 +749,206 @@ async function writeBodyAt(body, handle, position, onBytes) {
     onBytes(chunk.length);
   }
   return position;
+}
+
+// --- Bilibili: a video file and an audio file, muxed by ffmpeg ---
+
+// The extension asks Bilibili's API for the two files with the user's
+// cookies; the CDN itself only checks the Referer.
+const BILIBILI_HEADERS = [{ name: "Referer", value: "https://www.bilibili.com/" }];
+// A batch of parts waits as "queued" instead of opening dozens of connections.
+const BILIBILI_CONCURRENCY = Number(process.env.BILIBILI_CONCURRENCY || 2);
+
+async function startBilibiliDownload(payload) {
+  const tracks = bilibiliTracks(payload?.tracks);
+  if (!tracks) return { ok: false, status: 400, error: "INVALID_TRACKS" };
+  const sourcePageUrl = validateUrl(payload?.sourcePageUrl) || "";
+  const output = await resolveOutputPath(payload, sourcePageUrl || tracks[0].url, "mp4");
+  if (!output.ok) return output;
+
+  const id = randomUUID();
+  const now = Date.now();
+  const job = {
+    id,
+    ok: true,
+    inputMode: "bilibili",
+    status: "queued",
+    url: sourcePageUrl,
+    sourcePageUrl,
+    // What the extension needs to ask for the same streams again on Resume.
+    bilibili: bilibiliSource(payload.bilibili),
+    tracks,
+    outputPath: output.outputPath,
+    downloadDir: output.outputDir,
+    tempDir: path.join(tmpdir(), `ds-video-browser-${id}`),
+    startedAt: new Date(now).toISOString(),
+    finishedAt: null,
+    error: null,
+    exitCode: null,
+    progressText: "Waiting for a free download slot",
+    downloadedBytes: 0,
+    totalBytes: null,
+    totalSizeSource: "unknown",
+    // No duration: progress would then follow ffmpeg's seconds, which stay
+    // at 0 for the whole download. Bytes tell the progress instead.
+    durationSeconds: null,
+    // "download" while the tracks come in, "merge" while ffmpeg muxes them.
+    phase: "download",
+    downloadedSeconds: 0,
+    transferRateBytesPerSecond: 0,
+    etaSeconds: null,
+    lastProgressAt: null,
+    lastProgressBytes: 0,
+    lastActivityAt: now,
+    ffmpegArgs: [],
+    log: []
+  };
+  // Created up front so a job still queued when the helper stops stays resumable.
+  await mkdir(job.tempDir, { recursive: true });
+  jobs.set(id, job);
+  enforceJobHistoryCap();
+  await persistJobsToDisk();
+  pumpBilibiliQueue();
+  return { ok: true, job };
+}
+
+// Exactly one video and one audio track. Each track is also the target
+// downloadDirectRanges fills.
+function bilibiliTracks(value) {
+  if (!Array.isArray(value) || value.length !== 2) return null;
+  const tracks = value.map((track) => ({
+    role: track?.role, url: validateUrl(track?.url), totalBytes: null, chunkBytes: DIRECT_CHUNK_BYTES, chunksDone: []
+  }));
+  if (tracks.some((track) => !track.url) || tracks.map((track) => track.role).sort().join() !== "audio,video") return null;
+  return ["video", "audio"].map((role) => tracks.find((track) => track.role === role));
+}
+
+function bilibiliSource(value = {}) {
+  const text = (item, max = 64) => String(item ?? "").slice(0, max);
+  const selection = value.selection || {};
+  return {
+    bvid: text(value.bvid, 16),
+    // The video's title; the popup groups a video's parts under it.
+    title: text(value.title, 300),
+    cid: text(value.cid, 24),
+    p: Number.isInteger(value.p) ? value.p : null,
+    selection: Object.fromEntries(["qualityId", "videoRepresentationId", "audioRepresentationId", "videoCodec", "audioCodec"]
+      .map((key) => [key, text(selection[key])]))
+  };
+}
+
+function bilibiliTrackPath(job, track) {
+  return path.join(job.tempDir, `${track.role}.m4s`);
+}
+
+// Starts queued jobs, oldest first, while fewer than BILIBILI_CONCURRENCY run.
+function pumpBilibiliQueue() {
+  const bilibiliJobs = [...jobs.values()].filter((job) => job.inputMode === "bilibili");
+  let free = BILIBILI_CONCURRENCY - bilibiliJobs.filter((job) => job.status === "running").length;
+  for (const job of bilibiliJobs) {
+    if (free <= 0) return;
+    if (job.status !== "queued") continue;
+    free -= 1;
+    runBilibiliDownload(job);
+  }
+}
+
+// POST /jobs/:id/resume with fresh track URLs (the old ones expire after a
+// few hours). Finished chunks are kept while a track keeps its size.
+async function resumeBilibiliJob(job, payload) {
+  const tracks = bilibiliTracks(payload?.tracks);
+  if (!tracks) return { ok: false, status: 400, error: "INVALID_TRACKS" };
+  for (const track of job.tracks) track.url = tracks.find((fresh) => fresh.role === track.role).url;
+  job.status = "queued";
+  job.error = null;
+  job.exitCode = null;
+  job.finishedAt = null;
+  job.resumable = false;
+  job.etaSeconds = null;
+  job.transferRateBytesPerSecond = 0;
+  job.lastProgressAt = null;
+  job.lastActivityAt = Date.now();
+  job.resumeCount = (job.resumeCount || 0) + 1;
+  job.progressText = "Waiting for a free download slot";
+  jobs.delete(job.id);
+  jobs.set(job.id, job);
+  await persistJobsNow();
+  pumpBilibiliQueue();
+  return { ok: true, job, resumed: true };
+}
+
+async function runBilibiliDownload(job) {
+  // Set before the first await, so pumpBilibiliQueue counts this job at once.
+  job.status = "running";
+  job.phase = "download";
+  // Jobs from before durations were dropped.
+  job.durationSeconds = null;
+  job.downloadedSeconds = 0;
+  job.lastActivityAt = Date.now();
+  const controller = new AbortController();
+  jobAborts.set(job.id, controller);
+  const progress = { bytes: 0, connections: DIRECT_CONNECTIONS };
+  const report = () => {
+    updateDownloadedBytes(job, progress.bytes);
+    job.etaSeconds = job.totalBytes && job.transferRateBytesPerSecond > 0
+      ? Math.max(0, job.totalBytes - job.downloadedBytes) / job.transferRateBytesPerSecond
+      : null;
+    job.progressText = formatProgress(job);
+    queuePersistJobsToDisk();
+  };
+  let reporter = null;
+
+  try {
+    // Sizes first, so the job shows its total from the start. A track whose
+    // size changed, or whose file is gone, starts over.
+    for (const track of job.tracks) {
+      const probe = await probeDirectDownload(track.url, BILIBILI_HEADERS, controller);
+      if (!probe.ok) throw new Error(probe.error);
+      await probe.response?.body?.cancel().catch(() => {});
+      if (!probe.acceptsRanges) throw new Error("DIRECT_RANGE_IGNORED");
+      if (probe.totalBytes !== track.totalBytes || !existsSync(bilibiliTrackPath(job, track))) {
+        track.totalBytes = probe.totalBytes;
+        track.chunksDone = [];
+      }
+    }
+    job.totalBytes = job.tracks.reduce((sum, track) => sum + track.totalBytes, 0);
+    job.totalSizeSource = "exact";
+    progress.bytes = job.tracks.reduce((sum, track) => sum + chunksDoneBytes(track), 0);
+    job.downloadedBytes = progress.bytes;
+    job.lastProgressBytes = progress.bytes;
+    reporter = setInterval(report, 500);
+    reporter.unref?.();
+
+    await mkdir(job.tempDir, { recursive: true });
+    for (const track of job.tracks) {
+      const resume = track.chunksDone.length > 0;
+      const handle = await open(bilibiliTrackPath(job, track), resume ? "r+" : "w");
+      try {
+        await downloadDirectRanges(track, BILIBILI_HEADERS, handle, controller.signal, progress, resume);
+      } finally {
+        await handle.close();
+      }
+    }
+    clearInterval(reporter);
+    report();
+    if (job.status !== "running") return;
+    if (progress.bytes !== job.totalBytes) throw new Error("DIRECT_INCOMPLETE");
+    job.phase = "merge";
+    job.progressText = "Muxing video and audio";
+    runFfmpeg(job, []);
+  } catch (error) {
+    controller.abort();
+    if (job.status === "running") {
+      const code = /^DIRECT_|^SERVER_/.test(error?.message || "") ? error.message : "DIRECT_FETCH_FAILED";
+      await failJob(job, code, code);
+    }
+  } finally {
+    clearInterval(reporter);
+    jobAborts.delete(job.id);
+    persistJobsToDisk();
+    // Still running means ffmpeg took over; it frees the slot when it exits.
+    if (job.status !== "running") pumpBilibiliQueue();
+  }
 }
 
 function findResumableJob(payload) {
@@ -910,7 +1129,7 @@ async function failJob(job, error, progressText, now = Date.now()) {
   job.error = error;
   job.finishedAt = new Date(now).toISOString();
   job.etaSeconds = null;
-  job.resumable = (job.inputMode === "browser" && isResumableBrowserError(error)) || isRangedDirect(job);
+  job.resumable = (job.inputMode === "browser" && isResumableBrowserError(error)) || isRangedDirect(job) || job.inputMode === "bilibili";
   job.progressText = progressText;
   if (!job.resumable) await cleanupResumeData(job);
 }
@@ -1059,7 +1278,7 @@ async function inspectManifest(url, kind, headers) {
 }
 
 function runFfmpeg(job, headers) {
-  const isLocal = job.inputMode === "browser";
+  const isLocal = job.inputMode === "browser" || job.inputMode === "bilibili";
   const args = [
     "-hide_banner",
     "-loglevel",
@@ -1080,26 +1299,33 @@ function runFfmpeg(job, headers) {
     );
   }
 
-  const playlistInputFlags = [
-    "-allowed_extensions", "ALL",
-    "-allowed_segment_extensions", "ALL",
-    "-extension_picky", "0"
-  ];
-  args.push(...playlistInputFlags);
+  if (job.inputMode === "bilibili") {
+    // Two plain mp4 files; the playlist flags below would be unknown options.
+    const [video, audio] = job.tracks;
+    args.push("-i", bilibiliTrackPath(job, video), "-i", bilibiliTrackPath(job, audio));
+    args.push("-map", "0:v:0", "-map", "1:a:0", "-c", "copy", "-movflags", "+faststart", job.outputPath);
+  } else {
+    const playlistInputFlags = [
+      "-allowed_extensions", "ALL",
+      "-allowed_segment_extensions", "ALL",
+      "-extension_picky", "0"
+    ];
+    args.push(...playlistInputFlags);
 
-  const userAgent = headers.find((header) => header.name.toLowerCase() === "user-agent")?.value;
-  const headerText = headers
-    .filter((header) => header.name.toLowerCase() !== "user-agent")
-    .map((header) => `${header.name}: ${header.value}`)
-    .join("\r\n");
+    const userAgent = headers.find((header) => header.name.toLowerCase() === "user-agent")?.value;
+    const headerText = headers
+      .filter((header) => header.name.toLowerCase() !== "user-agent")
+      .map((header) => `${header.name}: ${header.value}`)
+      .join("\r\n");
 
-  if (!isLocal && userAgent) args.push("-user_agent", userAgent);
-  if (!isLocal && headerText) args.push("-headers", `${headerText}\r\n`);
-  args.push("-i", isLocal ? job.localPlaylistPath : job.url);
-  // Input options apply per input, so the second playlist repeats them.
-  const audioInput = isLocal && job.localAudioPlaylistPath;
-  if (audioInput) args.push(...playlistInputFlags, "-i", job.localAudioPlaylistPath);
-  args.push("-map", "0:v:0?", "-map", audioInput ? "1:a:0" : "0:a:0?", "-c", "copy", "-bsf:a", "aac_adtstoasc", "-movflags", "+faststart", job.outputPath);
+    if (!isLocal && userAgent) args.push("-user_agent", userAgent);
+    if (!isLocal && headerText) args.push("-headers", `${headerText}\r\n`);
+    args.push("-i", isLocal ? job.localPlaylistPath : job.url);
+    // Input options apply per input, so the second playlist repeats them.
+    const audioInput = isLocal && job.localAudioPlaylistPath;
+    if (audioInput) args.push(...playlistInputFlags, "-i", job.localAudioPlaylistPath);
+    args.push("-map", "0:v:0?", "-map", audioInput ? "1:a:0" : "0:a:0?", "-c", "copy", "-bsf:a", "aac_adtstoasc", "-movflags", "+faststart", job.outputPath);
+  }
   job.ffmpegArgs = redactArgs(args);
 
   job.status = "running";
@@ -1123,10 +1349,13 @@ function runFfmpeg(job, headers) {
     job.finishedAt = new Date().toISOString();
     cleanupBrowserTemp(job);
     persistJobsToDisk();
+    if (job.inputMode === "bilibili") pumpBilibiliQueue();
   });
 
   child.on("close", (code) => {
     jobProcesses.delete(job.id);
+    // Deferred: the job only stops counting as running further down.
+    if (job.inputMode === "bilibili") setImmediate(pumpBilibiliQueue);
     if (job.status === "failed" || job.status === "cancelled") {
       if (!job.finishedAt) job.finishedAt = new Date().toISOString();
       job.exitCode = code;
@@ -1403,9 +1632,11 @@ function jobMatchesQuery(job, query) {
 }
 
 function buildJobStats() {
-  const stats = { active: 0, completed: 0, failed: 0, downloadedBytes: 0 };
+  // resumable: what the popup's "Resume all" would continue.
+  const stats = { active: 0, completed: 0, failed: 0, resumable: 0, downloadedBytes: 0 };
   for (const job of jobs.values()) {
     if (job.status === "queued" || job.status === "running") stats.active += 1;
+    if (job.resumable) stats.resumable += 1;
     if (job.status === "completed") stats.completed += 1;
     if (job.status === "failed") stats.failed += 1;
     stats.downloadedBytes += Number(job.downloadedBytes) || 0;
@@ -1511,7 +1742,7 @@ async function cancelJob(id) {
   job.error = null;
   // Stop works as pause for browser-fed and ranged direct jobs: keep what was
   // downloaded so Resume (or downloading the same video again) continues.
-  job.resumable = job.inputMode === "browser" || isRangedDirect(job);
+  job.resumable = job.inputMode === "browser" || job.inputMode === "bilibili" || isRangedDirect(job);
   job.progressText = "Stopped by user";
   job.finishedAt = new Date().toISOString();
   job.etaSeconds = null;

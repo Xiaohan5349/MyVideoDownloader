@@ -321,6 +321,11 @@ h1 {
   background: var(--hover);
 }
 
+.small-button.is-accent {
+  border-color: var(--blue);
+  color: var(--blue);
+}
+
 /* ---------- Tabs ---------- */
 
 .tabs {
@@ -748,6 +753,204 @@ span.variant-chip:hover {
   }
 }
 
+/* ---------- Bilibili tile ---------- */
+
+.bili-title {
+  margin-bottom: 10px;
+  font-size: 13.5px;
+  font-weight: 650;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.bili-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.bili-summary {
+  color: var(--tx-3);
+  font: 600 11px var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Numbered part chips, eight to a row; about five rows show before it scrolls. */
+.bili-grid {
+  display: grid;
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+  gap: 5px;
+  max-height: 182px;
+  margin-bottom: 8px;
+  padding: 3px;
+  overflow-y: auto;
+}
+
+.bili-chip {
+  height: 30px;
+  padding: 0;
+  border: 1px solid var(--edge-hi);
+  border-radius: var(--r4);
+  background: var(--inset);
+  color: var(--tx-2);
+  font: 600 12px var(--mono);
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  user-select: none;
+}
+
+.bili-chip:hover {
+  border-color: var(--edge-max);
+  color: var(--tx);
+}
+
+.bili-chip[aria-pressed="true"] {
+  border-color: var(--blue);
+  background: var(--blue-wash);
+  color: var(--blue);
+  box-shadow: 0 0 8px var(--blue-wash);
+}
+
+/* The part open in the tab. */
+.bili-chip.is-current {
+  outline: 1.5px solid var(--teal);
+  outline-offset: 1px;
+}
+
+.bili-focus {
+  margin-bottom: 10px;
+  overflow: hidden;
+  color: var(--tx-2);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bili-focus::before {
+  content: "▸ ";
+  color: var(--teal);
+}
+
+.bili-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.bili-pick {
+  display: flex;
+  flex: none;
+  gap: 4px;
+}
+
+.bili-actions .bili-quality {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+}
+
+.bili-status {
+  margin: 8px 0 0;
+  color: var(--tx-2);
+  font-size: 12px;
+}
+
+.bili-status.is-error {
+  color: var(--coral);
+}
+
+/* ---------- Job groups (a Bilibili video's parts) ---------- */
+
+.job-group {
+  padding: 11px 0;
+  border-top: 1px solid var(--edge);
+}
+
+.job-group:first-child {
+  border-top: 0;
+  padding-top: 6px;
+}
+
+.job-group-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--tx);
+  text-align: left;
+  cursor: pointer;
+}
+
+.job-group-head::after {
+  content: "";
+  flex: none;
+  width: 6px;
+  height: 6px;
+  margin-left: auto;
+  border-right: 1.5px solid var(--tx-2);
+  border-bottom: 1.5px solid var(--tx-2);
+  transform: rotate(-45deg);
+  transition: transform 150ms;
+}
+
+.job-group-head[aria-expanded="true"]::after {
+  transform: rotate(45deg);
+}
+
+.job-group-title {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 13.5px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.job-group-meta {
+  display: block;
+  margin-top: 3px;
+  color: var(--tx-2);
+  font-size: 12px;
+}
+
+.job-group[data-status="running"] > .progress-bar {
+  display: block;
+}
+
+.job-group[data-status="running"] > .job-group-head > .helper-job-state {
+  color: var(--blue);
+}
+
+.job-group[data-status="running"] > .job-group-head > .helper-job-state::before {
+  background: var(--blue);
+}
+
+.job-group[data-status="completed"] > .job-group-head > .helper-job-state {
+  color: var(--teal);
+}
+
+.job-group[data-status="completed"] > .job-group-head > .helper-job-state::before {
+  background: var(--teal);
+}
+
+.job-group[data-status="failed"] > .job-group-head > .helper-job-state {
+  color: var(--coral);
+}
+
+.job-group[data-status="failed"] > .job-group-head > .helper-job-state::before {
+  background: var(--coral);
+}
+
+.job-group-parts {
+  margin: 8px 0 0 3px;
+  padding-left: 12px;
+  border-left: 1px solid var(--edge-hi);
+}
+
 /* ---------- Helper panel ---------- */
 
 .run-tile {
@@ -1076,11 +1279,22 @@ span.variant-chip:hover {
 .progress-bar {
   display: none;
   position: relative;
-  height: 6px;
+  height: 10px;
   margin: 10px 0 7px;
   overflow: hidden;
-  border-radius: 3px;
+  border: 1px solid var(--edge-hi);
+  border-radius: 5px;
   background: var(--inset);
+}
+
+/* HUD ticks: a notch every 10%, drawn over the fill. */
+.progress-bar::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(90deg, transparent 0 calc(10% - 1px), var(--page) calc(10% - 1px) 10%);
+  opacity: 0.6;
+  pointer-events: none;
 }
 
 .helper-job[data-status="running"] .progress-bar,
@@ -1094,8 +1308,9 @@ span.variant-chip:hover {
   bottom: 0;
   left: 0;
   width: var(--p, 25%);
-  border-radius: 3px;
-  background: var(--blue);
+  border-radius: 4px;
+  background: linear-gradient(90deg, var(--blue), var(--teal));
+  box-shadow: 0 0 12px var(--blue);
 }
 
 .is-indeterminate .progress-bar i {
@@ -1314,6 +1529,51 @@ select {
   flex: none;
   color: var(--tx-3);
   font: 12px var(--mono);
+}
+
+.confirm-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--tx-2);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.confirm-check input {
+  margin: 0;
+  accent-color: var(--blue);
+}
+
+.site-dir-list {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.site-dir-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.site-dir-site {
+  color: var(--blue);
+  font: 600 11.5px var(--mono);
+}
+
+.site-dir-folder {
+  overflow: hidden;
+  color: var(--tx-2);
+  font: 11.5px var(--mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.site-dir-empty {
+  color: var(--tx-3);
+  font-size: 12px;
 }
 
 .confirm-hint {

@@ -9,11 +9,14 @@ export const MESSAGE = Object.freeze({
   DOWNLOADS_JOB_FORGET: "downloads:jobForget",
   DOWNLOADS_JOB_CANCEL: "downloads:jobCancel",
   DOWNLOADS_JOB_RESUME: "downloads:jobResume",
+  DOWNLOADS_JOBS_RESUME_ALL: "downloads:jobsResumeAll",
   DOWNLOADS_JOBS_CLEAR_MISSING: "downloads:jobClearMissing",
   HELPER_STATUS_GET: "helper:statusGet",
   HELPER_SETTINGS_UPDATE: "helper:settingsUpdate",
   HELPER_FOLDER_PICK: "helper:folderPick",
   STREAM_VARIANTS_GET: "streams:getVariants",
+  BILIBILI_INFO_GET: "bilibili:infoGet",
+  BILIBILI_DOWNLOAD: "bilibili:download",
   SETTINGS_GET: "settings:get",
   SETTINGS_UPDATE: "settings:update"
 });
@@ -21,8 +24,21 @@ export const MESSAGE = Object.freeze({
 export const DEFAULT_SETTINGS = Object.freeze({
   minSizeBytes: 1024 * 1024,
   showUnsupported: true,
-  filenameTemplate: "{title}"
+  filenameTemplate: "{title}",
+  // siteKey -> folder the download dialog starts in for that site.
+  siteDownloadDirs: {}
 });
+
+// A page's site: its host without "www."/"www53.", so mirrors share one
+// entry (the helper's jobSite does the same). "" for non-web pages.
+export function siteKey(pageUrl = "") {
+  try {
+    const url = new URL(pageUrl);
+    return /^https?:$/.test(url.protocol) ? url.hostname.toLowerCase().replace(/^www\d*\./, "") : "";
+  } catch {
+    return "";
+  }
+}
 
 export const DIRECT_EXTENSIONS = new Set([
   "mp4",

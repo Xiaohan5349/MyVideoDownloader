@@ -1,6 +1,6 @@
 # DS Video Downloader
 
-A Chrome MV3 extension for downloading HLS/DASH streaming videos and direct media files. Tile-based ("bento") interface with automatic light and dark themes.
+A Chrome MV3 extension for downloading HLS/DASH streaming videos, direct media files and Bilibili videos. Tile-based ("bento") interface with automatic light and dark themes.
 
 > [中文版](README_zh.md)
 
@@ -58,6 +58,9 @@ npm run helper:autostart:remove   # Disable auto-start
 6. Monitor progress in the popup's Helper tab; search by file name or folder, or filter by site, to find older downloads. With several downloads running, the Helper tab's progress tile cycles through them (or switch with ‹ ›)
 7. HLS and DASH downloads keep running when you switch tabs or close the video page. If one stops (you pressed Stop, stalled, refused by the server, helper restarted), click **Resume** on the job in the popup, or download the same video again within 24 hours, to continue from the segments already downloaded. Direct files downloaded over byte ranges resume the same way
 8. If the helper cannot download a direct file (for example HTTP 403), click **Download with browser** in the notice or **Browser** on the failed job to let Chrome download it
+9. On a Bilibili video page (`bilibili.com/video/BV…`), the Media tab shows the video's parts as numbered chips. Tick the parts you want (Shift+click selects a range; Select all / Invert / Clear), optionally cap the quality, and download. The extension asks Bilibili with your browser's login, so you get the qualities your account can watch; the helper downloads the video and audio tracks and merges them into one `.mp4`. A video's parts appear as one row in the Helper tab
+10. **Resume all** in the Helper tab continues every stopped download at once
+11. Tick **Always save downloads from <site> here** in the download dialog to remember a folder per site; the Settings tab lists the remembered sites
 
 ## Configuration
 
@@ -76,6 +79,7 @@ Default: `helper/downloads/` in the project directory.
 - Direct media: `.mp4`, `.webm`, `.mkv`, `.avi`, `.mov`, `.mp3`, `.m4a`, `.flac`, and more, with parallel and resumable downloads when the server supports byte ranges
 - HLS streams: `.m3u8` playlists with variant selection and resumable downloads
 - DASH streams: `.mpd` manifests (SegmentTemplate, SegmentList, SegmentBase) with quality selection, automatic audio pairing and resumable downloads
+- Bilibili videos (`bilibili.com/video/BV…`): single and multi-part, H.264 video with AAC audio, quality cap, at most two parts downloading at a time, resumable
 - Automatic media detection from `<video>`, `<audio>`, `<source>`, and `<a>` elements
 - Cookie/header forwarding for authenticated streams
 
@@ -84,7 +88,7 @@ Default: `helper/downloads/` in the project directory.
 - DRM-protected streams (Widevine, FairPlay, PlayReady)
 - Paywall/login-gated content that requires premium accounts
 - Cloudflare or bot-detection bypass
-- YouTube or other sites that serve media through proprietary APIs
+- YouTube or other sites that serve media through proprietary APIs (Bilibili video pages are the exception above; Bilibili bangumi/paid content is not supported)
 
 ## Security
 

@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Added
+- Bilibili videos: on a `bilibili.com/video/BV…` page the Media tab shows a Bilibili tile with the video's parts as a grid of numbered chips (the part open in the tab is ticked and outlined; the line under the grid names the part hovered or last clicked; Shift+click ticks or clears a range; Select all / Invert / Clear), a quality cap (best, ≤ 1080P, ≤ 720P, ≤ 480P) and a download button. The service worker asks Bilibili's API with the browser's own cookies, so a logged-in account gets the qualities it can watch; only H.264 video with AAC audio is chosen. Each part becomes one helper job: `POST /download` with `kind: "bilibili"` and a video and an audio track. The helper downloads both in parallel byte ranges (Referer `https://www.bilibili.com/`) and muxes them into one mp4 with ffmpeg. At most two Bilibili jobs download at a time (`BILIBILI_CONCURRENCY`); the rest wait as queued. Stop, failures and helper restarts keep the finished chunks for 24 hours; Resume asks the API again for fresh URLs of the same stream (`POST /jobs/:id/resume` with `tracks`).
+- Bilibili parts of one video show as one row in the Helper tab, with the combined progress and how many parts are done, in progress or resumable; click it to see each part.
+- "Resume all (n)" in the Helper tab resumes every resumable job, oldest first. A stream it cannot resume is counted as failed instead of opening its page (its own Resume button still does that). `GET /jobs` reports `stats.resumable`.
+- Download folder per site: the download dialog can remember its folder for the current site ("Always save downloads from bilibili.com here"); later downloads from that site start in it. The Settings tab lists the remembered sites, each with Remove.
+- Running helper downloads show their percentage next to the status, and direct files and Bilibili jobs show "downloaded / total · speed · time left" in the popup's language. The progress bar is thicker, with a gradient and a notch every 10%.
+
+### Fixed
+- Ranged downloads (direct files and Bilibili tracks) failed with `DIRECT_INCOMPLETE` after the server dropped a connection in the middle of a chunk: the retry fetched the chunk from its start again and counted those bytes twice. The retry now continues from the next missing byte.
+- Bilibili jobs showed an empty progress bar for the whole download: they carried the video's duration, so progress followed ffmpeg's seconds, which only move while muxing. They now follow the downloaded bytes.
+- Bilibili collections were named after the BV id instead of the video title: their metadata is larger than the old 1 MiB response limit. The limit is now 16 MiB.
+
 ## v1.12.0 - 2026-10-24
 
 ### Added

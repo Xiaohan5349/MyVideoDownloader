@@ -8,6 +8,7 @@ import {
   ffmpegCommand,
   highlightRanges,
   mergeSettings,
+  siteKey,
   inferQualityLabel,
   jobProgressFraction,
   normalizeMediaItem,
@@ -281,4 +282,12 @@ test("highlightRanges finds every word, ignoring case, and merges overlaps", () 
   assert.deepEqual(highlightRanges("CAWB-040 cawb", ["cawb"]), [[0, 4], [9, 13]], "every occurrence");
   assert.deepEqual(highlightRanges("Holiday Trip", ["holi", "liday"]), [[0, 7]], "overlaps merge");
   assert.deepEqual(highlightRanges("abc", ["x", ""]), []);
+});
+
+test("siteKey groups a site's hosts like the helper's site filter", () => {
+  assert.equal(siteKey("https://www.bilibili.com/video/BV1xx411c7mD/?p=2"), "bilibili.com");
+  assert.equal(siteKey("https://www53.site.example/watch"), "site.example");
+  assert.equal(siteKey("https://m.bilibili.com/video/x"), "m.bilibili.com");
+  assert.equal(siteKey("chrome://extensions"), "");
+  assert.equal(siteKey("not a url"), "");
 });

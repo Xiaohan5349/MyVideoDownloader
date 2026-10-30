@@ -421,5 +421,98 @@
   },
   "btnSiteFilterTitle": {
     "message": "只看这个网站的下载"
+  },
+  "biliCaption": {
+    "message": "B 站"
+  },
+  "biliPartsAria": {
+    "message": "本视频的分 P，Shift+点击可连选一段"
+  },
+  "biliSelectAll": {
+    "message": "全选"
+  },
+  "biliSelectNone": {
+    "message": "清空"
+  },
+  "biliQualityAria": {
+    "message": "最高下载画质"
+  },
+  "biliQualityBest": {
+    "message": "最高画质"
+  },
+  "biliDownloadCount": {
+    "message": "下载 {{count}} 个"
+  },
+  "biliLoading": {
+    "message": "正在读取分 P..."
+  },
+  "biliDialogKind": {
+    "message": "B 站 · {{count}} 个分 P · 音视频合并为 mp4"
+  },
+  "biliStarting": {
+    "message": "正在向 B 站获取 {{count}} 个分 P 的地址..."
+  },
+  "biliStarted": {
+    "message": "已开始 {{count}} 个下载，进度见“下载队列”页。"
+  },
+  "biliPartlyStarted": {
+    "message": "已开始 {{started}}/{{total}} 个，其余未开始：{{error}}"
+  },
+  "biliErrLogin": {
+    "message": "请先在这个浏览器里登录 B 站，再试一次。"
+  },
+  "biliErrRateLimited": {
+    "message": "B 站暂时限制了请求，请等一分钟再试。"
+  },
+  "biliErrAccess": {
+    "message": "当前账号无法观看这个视频（付费、地区限制或已下架）。"
+  },
+  "biliErrFormat": {
+    "message": "这个画质没有 H.264 视频流。请换一个画质，或者登录 B 站后再试。"
+  },
+  "biliErrResumeFormat": {
+    "message": "B 站已不再提供这个任务开始时的画质（可能已退出登录）。请删除任务后重新下载。"
+  },
+  "btnResumeAll": {
+    "message": "全部继续 ({{count}})"
+  },
+  "msgResumeAllStarted": {
+    "message": "已继续 {{count}} 个下载。"
+  },
+  "msgResumeAllPartial": {
+    "message": "已继续 {{resumed}} 个，{{failed}} 个无法继续（{{error}}）。HLS/DASH 任务可以单独点“继续下载”，会打开原网页重试。"
+  },
+  "jobWaitingSlot": {
+    "message": "排队中，等待空闲的下载位"
+  },
+  "jobMerging": {
+    "message": "正在合并音视频..."
+  },
+  "jobEta": {
+    "message": "剩余 {{eta}}"
+  },
+  "jobGroupDone": {
+    "message": "{{done}}/{{total}} 个分 P 已完成"
+  },
+  "jobGroupActive": {
+    "message": "{{count}} 个进行中"
+  },
+  "jobGroupResumable": {
+    "message": "{{count}} 个可继续"
+  },
+  "dialogRememberSite": {
+    "message": "以后 {{site}} 的下载都保存到这里"
+  },
+  "settingsSiteDirsLabel": {
+    "message": "按网站保存目录"
+  },
+  "settingsSiteDirsEmpty": {
+    "message": "还没有。在下载对话框里勾选“以后……的下载都保存到这里”即可添加。"
+  },
+  "biliSummary": {
+    "message": "{{total}}P · 已选 {{count}}"
+  },
+  "biliInvert": {
+    "message": "反选"
   }
 }
