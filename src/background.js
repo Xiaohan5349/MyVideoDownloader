@@ -6,7 +6,7 @@ import {
 import { getMessage, initI18n } from "./i18n.js";
 import { loadBilibiliDetails, loadBilibiliPlayback } from "./bilibili.js";
 
-console.log("[ds] Service worker started v1.12.0");
+console.log("[ds] Service worker started v1.13.0");
 
 const SETTINGS_KEY = "settings";
 const TAB_MEDIA_PREFIX = "tabMedia:";

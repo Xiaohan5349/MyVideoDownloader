@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v1.13.0 - 2026-10-30
+
 ### Added
 - Bilibili videos: on a `bilibili.com/video/BV…` page the Media tab shows a Bilibili tile with the video's parts as a grid of numbered chips (the part open in the tab is ticked and outlined; the line under the grid names the part hovered or last clicked; Shift+click ticks or clears a range; Select all / Invert / Clear), a quality cap (best, ≤ 1080P, ≤ 720P, ≤ 480P) and a download button. The service worker asks Bilibili's API with the browser's own cookies, so a logged-in account gets the qualities it can watch; only H.264 video with AAC audio is chosen. Each part becomes one helper job: `POST /download` with `kind: "bilibili"` and a video and an audio track. The helper downloads both in parallel byte ranges (Referer `https://www.bilibili.com/`) and muxes them into one mp4 with ffmpeg. At most two Bilibili jobs download at a time (`BILIBILI_CONCURRENCY`); the rest wait as queued. Stop, failures and helper restarts keep the finished chunks for 24 hours; Resume asks the API again for fresh URLs of the same stream (`POST /jobs/:id/resume` with `tracks`).
 - Bilibili parts of one video show as one row in the Helper tab, with the combined progress and how many parts are done, in progress or resumable; click it to see each part.
