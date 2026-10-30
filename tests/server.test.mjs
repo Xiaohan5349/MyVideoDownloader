@@ -1,6 +1,7 @@
 import { describe, before, after, it } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
+import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -16,6 +17,8 @@ process.env.CONFIG_PATH = path.join(process.env.DOWNLOAD_DIR, "helper-settings.j
 process.env.JOBS_PATH = path.join(process.env.DOWNLOAD_DIR, "helper-jobs.json");
 // Small chunks so a few KB of test data spreads over several range requests.
 process.env.DIRECT_CHUNK_BYTES = "1000";
+// One Bilibili job at a time, so the queue test needs only two jobs.
+process.env.BILIBILI_CONCURRENCY = "1";
 
 // Dynamic import to get server reference
 const serverPath = pathToFileURL(path.join(__dirname, "..", "helper", "server.js")).href;
@@ -1424,6 +1427,33 @@ it("a stalled ranged direct job keeps its partial file for 24 hours", async () =
   jobs.delete(job.id);
 });
 
+it("a chunk cut off mid-body continues where it stopped and counts each byte once", async () => {
+  const body = testBytes(5_000);
+  let cut = false;
+  const { upstream, stats, url } = await startUpstream(body, {
+    onRequest: async (req, res) => {
+      if (cut || req.headers.range !== "bytes=1000-1999") return false;
+      cut = true;
+      // Half the chunk, then the connection drops.
+      res.writeHead(206, { "Content-Type": "video/mp4", "Content-Length": "1000", "Content-Range": `bytes 1000-1999/${body.length}` });
+      res.write(body.subarray(1000, 1500));
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      res.destroy();
+      return true;
+    }
+  });
+  try {
+    const res = await fetchJson("/download", { method: "POST", body: { url, kind: "direct", filename: "Cut off", headers: [] } });
+    const job = await waitForJob(res.body.job.id);
+    assert.equal(job.status, "completed", job.error);
+    assert.equal(job.downloadedBytes, body.length);
+    assert.deepEqual(await readFile(job.outputPath), body);
+    assert.ok(stats.requests.includes("bytes=1500-1999"), "the retry asks only for the missing half");
+  } finally {
+    await new Promise((resolve) => upstream.close(resolve));
+  }
+});
+
 it("a direct download that cannot use ranges is not resumable after Stop", async () => {
   const body = testBytes(3_000);
   const { upstream, url } = await startUpstream(body, {
@@ -1446,6 +1476,146 @@ it("a direct download that cannot use ranges is not resumable after Stop", async
   } finally {
     upstream.closeAllConnections();
     await new Promise((resolve) => upstream.close(resolve));
+  }
+});
+
+// ─── Bilibili: video + audio tracks ───
+
+const BILIBILI_SOURCE = {
+  bvid: "BV1xx411c7mD", title: "Made-up video", cid: "1001", p: 2,
+  selection: { qualityId: "80", videoRepresentationId: "80", audioRepresentationId: "30280", videoCodec: "avc1.640032", audioCodec: "mp4a.40.2" }
+};
+
+// A one-second picture-only mp4 and sound-only m4a, like Bilibili's two DASH
+// files. null when ffmpeg is not installed.
+let bilibiliMediaPromise = null;
+function bilibiliMedia() {
+  bilibiliMediaPromise ||= (async () => {
+    const dir = path.join(process.env.DOWNLOAD_DIR, "bilibili-source");
+    await mkdir(dir, { recursive: true });
+    const run = (args) => spawnSync("ffmpeg", ["-v", "error", "-y", ...args], { windowsHide: true });
+    const video = path.join(dir, "video.mp4");
+    const audio = path.join(dir, "audio.m4a");
+    const made = run(["-f", "lavfi", "-i", "testsrc=duration=1:size=64x64:rate=10", "-c:v", "mpeg4", video]);
+    if (made.error || made.status !== 0) return null;
+    run(["-f", "lavfi", "-i", "sine=duration=1", "-c:a", "aac", audio]);
+    return { video: await readFile(video), audio: await readFile(audio) };
+  })();
+  return bilibiliMediaPromise;
+}
+
+function bilibiliPayload(videoUrl, audioUrl, extra = {}) {
+  return {
+    kind: "bilibili",
+    tracks: [{ role: "audio", url: audioUrl }, { role: "video", url: videoUrl }],
+    sourcePageUrl: "https://www.bilibili.com/video/BV1xx411c7mD?p=2",
+    bilibili: BILIBILI_SOURCE,
+    filename: "Made-up title P2",
+    downloadDir: CUSTOM_DIR,
+    ...extra
+  };
+}
+
+function streamTypes(file) {
+  const probe = spawnSync("ffprobe", ["-v", "error", "-show_entries", "stream=codec_type", "-of", "csv=p=0", file], { encoding: "utf8", windowsHide: true });
+  return probe.stdout.trim().split(/\r?\n/).sort();
+}
+
+// Answers the size probe, then never answers a range request.
+function hangAfterProbe(req) {
+  return req.headers.range !== "bytes=0-0";
+}
+
+async function closeUpstreams(...servers) {
+  for (const { upstream } of servers) {
+    upstream.closeAllConnections();
+    await new Promise((resolve) => upstream.close(resolve));
+  }
+}
+
+it("a Bilibili job downloads both tracks with the Referer and muxes them into one mp4", async (t) => {
+  const media = await bilibiliMedia();
+  if (!media) return t.skip("ffmpeg is not installed");
+  const referers = new Set();
+  const onRequest = async (req) => { referers.add(req.headers.referer); return false; };
+  const video = await startUpstream(media.video, { onRequest });
+  const audio = await startUpstream(media.audio, { onRequest });
+  try {
+    const res = await fetchJson("/download", { method: "POST", body: bilibiliPayload(video.url, audio.url) });
+    assert.equal(res.status, 202, JSON.stringify(res.body));
+    const job = await waitForJob(res.body.job.id);
+    assert.equal(job.status, "completed", `${job.error} ${job.log.join(" ")}`);
+    assert.equal(path.basename(job.outputPath), "Made-up title P2.mp4");
+    assert.equal(job.totalBytes, media.video.length + media.audio.length);
+    assert.ok(video.stats.requests.length > 2, "the video track is fetched in ranges");
+    assert.deepEqual([...referers], ["https://www.bilibili.com/"]);
+    assert.deepEqual(streamTypes(job.outputPath), ["audio", "video"]);
+    // Removed right after the status changes, without being awaited.
+    for (let i = 0; i < 50 && existsSync(job.tempDir); i += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.ok(!existsSync(job.tempDir), "the track files are removed after muxing");
+    assert.deepEqual(job.bilibili, BILIBILI_SOURCE);
+    // Progress follows bytes: a duration would pin it to ffmpeg's seconds.
+    assert.equal(job.durationSeconds, null);
+  } finally {
+    await closeUpstreams(video, audio);
+  }
+});
+
+it("a Bilibili job needs exactly one video and one audio track", async () => {
+  const body = { ...bilibiliPayload("https://cdn.example/v.m4s", "https://cdn.example/a.m4s"), tracks: [{ role: "video", url: "https://cdn.example/v.m4s" }] };
+  const res = await fetchJson("/download", { method: "POST", body });
+  assert.equal(res.status, 400);
+  assert.equal(res.body.error, "INVALID_TRACKS");
+});
+
+it("a stopped Bilibili job resumes with fresh URLs and keeps the finished track", async (t) => {
+  const media = await bilibiliMedia();
+  if (!media) return t.skip("ffmpeg is not installed");
+  const video = await startUpstream(media.video);
+  const stuck = await startUpstream(media.audio, { onRequest: hangAfterProbe });
+  const audio = await startUpstream(media.audio);
+  try {
+    const res = await fetchJson("/download", { method: "POST", body: bilibiliPayload(video.url, stuck.url, { filename: "Resume me" }) });
+    const id = res.body.job.id;
+    const videoChunks = Math.ceil(media.video.length / 1000);
+    await waitForJob(id, (job) => job.tracks[0].chunksDone.length === videoChunks);
+    await fetchJson(`/jobs/${encodeURIComponent(id)}/cancel`, { method: "POST" });
+    assert.equal(jobs.get(id).resumable, true);
+    const stopped = await fetchJson("/jobs?limit=1");
+    assert.ok(stopped.body.stats.resumable >= 1, "Resume all counts the stopped job");
+    const videoRequests = video.stats.requests.length;
+
+    const resumed = await fetchJson(`/jobs/${encodeURIComponent(id)}/resume`, {
+      method: "POST",
+      body: { tracks: [{ role: "video", url: video.url }, { role: "audio", url: audio.url }] }
+    });
+    assert.equal(resumed.status, 202, JSON.stringify(resumed.body));
+    const job = await waitForJob(id);
+    assert.equal(job.status, "completed", job.error);
+    assert.equal(video.stats.requests.length, videoRequests + 1, "only the size probe hits the finished track again");
+    assert.deepEqual(streamTypes(job.outputPath), ["audio", "video"]);
+  } finally {
+    await closeUpstreams(video, stuck, audio);
+  }
+});
+
+it("Bilibili jobs over the limit wait as queued and start when a slot frees up", async (t) => {
+  const media = await bilibiliMedia();
+  if (!media) return t.skip("ffmpeg is not installed");
+  const stuck = await startUpstream(media.video, { onRequest: hangAfterProbe });
+  const video = await startUpstream(media.video);
+  const audio = await startUpstream(media.audio);
+  try {
+    const first = await fetchJson("/download", { method: "POST", body: bilibiliPayload(stuck.url, stuck.url, { filename: "First part" }) });
+    const second = await fetchJson("/download", { method: "POST", body: bilibiliPayload(video.url, audio.url, { filename: "Second part" }) });
+    assert.equal(jobs.get(first.body.job.id).status, "running");
+    assert.equal(second.body.job.status, "queued");
+
+    await fetchJson(`/jobs/${encodeURIComponent(first.body.job.id)}/cancel`, { method: "POST" });
+    const job = await waitForJob(second.body.job.id);
+    assert.equal(job.status, "completed", job.error);
+  } finally {
+    await closeUpstreams(stuck, video, audio);
   }
 });
 

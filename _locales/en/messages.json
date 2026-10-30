@@ -421,5 +421,98 @@
   },
   "btnSiteFilterTitle": {
     "message": "Show only downloads from this site"
+  },
+  "biliCaption": {
+    "message": "BILIBILI"
+  },
+  "biliPartsAria": {
+    "message": "Parts of this video. Shift+click selects a range."
+  },
+  "biliSelectAll": {
+    "message": "Select all"
+  },
+  "biliSelectNone": {
+    "message": "Clear"
+  },
+  "biliQualityAria": {
+    "message": "Highest quality to download"
+  },
+  "biliQualityBest": {
+    "message": "Best quality"
+  },
+  "biliDownloadCount": {
+    "message": "Download {{count}}"
+  },
+  "biliLoading": {
+    "message": "Reading this video's parts..."
+  },
+  "biliDialogKind": {
+    "message": "Bilibili · {{count}} part(s) · picture and sound merged into mp4"
+  },
+  "biliStarting": {
+    "message": "Asking Bilibili for {{count}} part(s)..."
+  },
+  "biliStarted": {
+    "message": "Started {{count}} download(s). Progress is on the Helper tab."
+  },
+  "biliPartlyStarted": {
+    "message": "Started {{started}} of {{total}}; the rest did not start: {{error}}"
+  },
+  "biliErrLogin": {
+    "message": "Log in to Bilibili in this browser, then try again."
+  },
+  "biliErrRateLimited": {
+    "message": "Bilibili is limiting requests right now. Wait a minute, then try again."
+  },
+  "biliErrAccess": {
+    "message": "Your account cannot watch this video (paid, region-locked or removed)."
+  },
+  "biliErrFormat": {
+    "message": "No H.264 stream at this quality. Choose another quality, or log in to Bilibili."
+  },
+  "biliErrResumeFormat": {
+    "message": "Bilibili no longer offers the quality this download started with (logged out?). Remove it and download again."
+  },
+  "btnResumeAll": {
+    "message": "Resume all ({{count}})"
+  },
+  "msgResumeAllStarted": {
+    "message": "Resumed {{count}} download(s)."
+  },
+  "msgResumeAllPartial": {
+    "message": "Resumed {{resumed}}; {{failed}} could not resume ({{error}}). An HLS/DASH job can still use its own Resume, which opens its page to retry."
+  },
+  "jobWaitingSlot": {
+    "message": "Queued, waiting for a free download slot"
+  },
+  "jobMerging": {
+    "message": "Merging video and audio..."
+  },
+  "jobEta": {
+    "message": "{{eta}} left"
+  },
+  "jobGroupDone": {
+    "message": "{{done}}/{{total}} parts done"
+  },
+  "jobGroupActive": {
+    "message": "{{count}} in progress"
+  },
+  "jobGroupResumable": {
+    "message": "{{count}} can resume"
+  },
+  "dialogRememberSite": {
+    "message": "Always save downloads from {{site}} here"
+  },
+  "settingsSiteDirsLabel": {
+    "message": "Download folder per site"
+  },
+  "settingsSiteDirsEmpty": {
+    "message": "None yet. Tick \"Always save downloads from ... here\" in the download dialog to add one."
+  },
+  "biliSummary": {
+    "message": "{{total}} parts · {{count}} selected"
+  },
+  "biliInvert": {
+    "message": "Invert"
   }
 }

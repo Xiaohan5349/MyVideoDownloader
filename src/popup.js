@@ -1,5 +1,6 @@
-import { MESSAGE, ffmpegCommand, highlightRanges, jobProgressFraction, sanitizeFilename, sortMediaByQuality } from "./shared.js";
+import { MESSAGE, ffmpegCommand, highlightRanges, jobProgressFraction, sanitizeFilename, siteKey, sortMediaByQuality } from "./shared.js";
 import { getMessage, getUserLanguage, setUserLanguage, applyLanguageUI } from "./i18n.js";
+import { bilibiliFileName, parseBvUrl } from "./bilibili.js";
 
 const list = document.querySelector("#mediaList");
 const notice = document.querySelector("#notice");
@@ -33,6 +34,20 @@ const runPos = document.querySelector("#runPos");
 const runDots = document.querySelector("#runDots");
 const mediaPanel = document.querySelector("#mediaPanel");
 const scanLabel = document.querySelector("#scanLabel");
+const biliTile = document.querySelector("#biliTile");
+const biliTitle = document.querySelector("#biliTitle");
+const biliParts = document.querySelector("#biliParts");
+const biliSelectAll = document.querySelector("#biliSelectAll");
+const biliInvert = document.querySelector("#biliInvert");
+const biliClear = document.querySelector("#biliClear");
+const biliPick = document.querySelector("#biliPick");
+const biliSummary = document.querySelector("#biliSummary");
+const biliFocus = document.querySelector("#biliFocus");
+const biliQuality = document.querySelector("#biliQuality");
+const biliDownload = document.querySelector("#biliDownload");
+const biliStatus = document.querySelector("#biliStatus");
+const resumeAllButton = document.querySelector("#resumeAllButton");
+const siteDirList = document.querySelector("#siteDirList");
 
 let activeTab = null;
 let settings = null;
@@ -74,6 +89,17 @@ let lastMediaItems = [];
 // closes when it loses focus, and restores the dialog when it reopens.
 const PENDING_DIALOG_KEY = "pendingDownloadDialog";
 const PENDING_DIALOG_TTL_MS = 10 * 60_000;
+// Bilibili tile: the video's parts from the API, and which ones are ticked (by p).
+let biliInfo = null;
+const biliChecked = new Set();
+// Part chips by p, built once per video, and the last clicked part (where a
+// Shift+click range starts).
+const biliChips = new Map();
+let biliAnchor = null;
+// Job list groups (one per Bilibili video with several parts): bvid -> nodes,
+// and the groups the user opened, kept across the 2 s re-render.
+const jobGroupNodes = new Map();
+const expandedJobGroups = new Set();
 
 rescanButton.addEventListener("click", () => whileScanning(async () => {
   if (!activeTab?.id) return;
@@ -87,7 +113,17 @@ rescanButton.addEventListener("click", () => whileScanning(async () => {
   await loadMedia();
 }));
 
+biliSelectAll.addEventListener("click", () => setBiliSelection(() => true));
+biliInvert.addEventListener("click", () => setBiliSelection((p) => !biliChecked.has(p)));
+biliClear.addEventListener("click", () => setBiliSelection(() => false));
+// Leaving the grid shows the last clicked part (or the one open in the tab) again.
+biliParts.addEventListener("mouseleave", () => {
+  if (biliInfo) showBiliFocus(biliPage(biliAnchor) || biliInfo.selected || biliInfo.pages[0]);
+});
+biliDownload.addEventListener("click", () => confirmBiliDownload());
+
 refreshHelperButton.addEventListener("click", loadHelperStatus);
+resumeAllButton.addEventListener("click", resumeAllJobs);
 document.querySelector("#runPrev").addEventListener("click", () => renderRunTile(lastRunJobs, -1));
 document.querySelector("#runNext").addEventListener("click", () => renderRunTile(lastRunJobs, 1));
 clearMissingButton.addEventListener("click", clearMissingJobs);
@@ -127,7 +163,7 @@ if (langSelector) {
 }
 
 await applyLanguageUI();
-await Promise.all([loadSettings(), loadMedia(), loadHelperStatus()]);
+await Promise.all([loadSettings(), loadMedia().then(loadBilibili), loadHelperStatus()]);
 window.setInterval(() => {
   retryUnknownSizes();
   return loadHelperStatus();
@@ -142,6 +178,67 @@ async function loadSettings() {
   if (minSizeSelect.value !== String(settings.minSizeBytes)) minSizeSelect.value = "1048576";
   showUnsupportedInput.checked = Boolean(settings.showUnsupported);
   updateFilterSummary();
+  renderSiteDirs();
+}
+
+// --- Download folder per site ---
+
+// "Remember for <site>" under a dialog's folder field. The dialog starts in
+// the site's remembered folder; confirming saves or forgets it.
+function siteFolderOption(initial = {}) {
+  const site = siteKey(activeTab?.url);
+  if (!site) return null;
+  const remembered = settings?.siteDownloadDirs?.[site] || "";
+  const box = document.createElement("input");
+  box.type = "checkbox";
+  box.checked = initial.rememberSite ?? Boolean(remembered);
+  const label = document.createElement("label");
+  label.className = "confirm-check";
+  label.append(box, textSpan("", getMessage("dialogRememberSite", { site })));
+  return { site, remembered, box, element: label };
+}
+
+function applySiteFolder(option, folder) {
+  if (!option) return;
+  const dirs = { ...(settings?.siteDownloadDirs || {}) };
+  if (option.box.checked && folder) dirs[option.site] = folder;
+  else delete dirs[option.site];
+  if (dirs[option.site] !== settings?.siteDownloadDirs?.[option.site]) saveSiteDirs(dirs);
+}
+
+async function saveSiteDirs(dirs) {
+  const response = await chrome.runtime.sendMessage({ type: MESSAGE.SETTINGS_UPDATE, settings: { siteDownloadDirs: dirs } }).catch(() => null);
+  if (!response?.ok) {
+    showNotice(response?.error || getMessage("msgSettingsSaveFailed"), true);
+    return;
+  }
+  settings = response.settings;
+  renderSiteDirs();
+}
+
+// Settings panel: each remembered site with its folder and a Remove button.
+function renderSiteDirs() {
+  siteDirList.textContent = "";
+  const entries = Object.entries(settings?.siteDownloadDirs || {}).sort(([a], [b]) => a.localeCompare(b));
+  if (!entries.length) {
+    siteDirList.appendChild(textSpan("site-dir-empty", getMessage("settingsSiteDirsEmpty")));
+    return;
+  }
+  for (const [site, folder] of entries) {
+    const row = document.createElement("div");
+    row.className = "site-dir-row";
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "small-button";
+    remove.textContent = getMessage("btnRemove");
+    remove.addEventListener("click", () => {
+      const dirs = { ...settings.siteDownloadDirs };
+      delete dirs[site];
+      saveSiteDirs(dirs);
+    });
+    row.append(textSpan("site-dir-site", site), textSpan("site-dir-folder", folder), remove);
+    siteDirList.appendChild(row);
+  }
 }
 
 async function updateSettings(patch) {
@@ -309,6 +406,10 @@ async function loadHelperStatus() {
       console.warn("[ds-video-downloader] loadHelperStatus DOM update failed", domError);
     }
 
+    const resumable = online ? Number(stats?.resumable) || 0 : 0;
+    resumeAllButton.hidden = !resumable;
+    resumeAllButton.textContent = getMessage("btnResumeAll", { count: String(resumable) });
+
     // Searching needs the helper: offline there is only the cached recent list.
     jobSearchInput.disabled = !online;
     jobSiteSelect.disabled = !online;
@@ -340,7 +441,8 @@ function renderMedia(items, { live = false } = {}) {
     list.textContent = "";
     mediaNodes.clear();
     renderKindFilter(items);
-    showNotice(getMessage("msgEmptyHint"));
+    // A Bilibili page lists its parts in its own tile instead.
+    if (biliTile.hidden) showNotice(getMessage("msgEmptyHint"));
     return;
   }
 
@@ -437,9 +539,11 @@ function renderHelperJobs(jobs, query = "", site = "") {
     renderedJobQuery = filterKey;
     helperJobs.textContent = "";
     helperJobNodes.clear();
+    jobGroupNodes.clear();
   }
   // The search words, marked in each job's name and path.
   const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+  const groups = bilibiliJobGroups(jobs);
   // Clear empty-state if we have jobs now
   if (jobs.length && helperJobNodes.size === 0) {
     helperJobs.textContent = "";
@@ -462,7 +566,7 @@ function renderHelperJobs(jobs, query = "", site = "") {
       const showBtn = existing.querySelector(".show-button");
       const removeBtn = existing.querySelector(".remove-button");
 
-      state.textContent = humanStatus(job.status);
+      state.textContent = jobStateText(job);
       state.className = `helper-job-state ${job.status === "completed" ? "is-complete" : ""} ${job.status === "failed" ? "is-error" : ""} ${job.status === "cancelled" ? "is-cancelled" : ""} ${job.status === "missing" ? "is-missing" : ""}`;
       meta.textContent = humanJobMessage(job);
       setHighlighted(pathEl, job.outputPath || job.url || "", words);
@@ -480,6 +584,7 @@ function renderHelperJobs(jobs, query = "", site = "") {
       removeBtn.disabled = isActive;
       removeBtn.dataset.fileExists = String(fileExists);
       fillSiteTag(existing.querySelector(".site-tag"), job);
+      placeJobNode(existing, job, groups);
     } else {
       // Create new node
       const node = helperJobTemplate.content.firstElementChild.cloneNode(true);
@@ -489,7 +594,7 @@ function renderHelperJobs(jobs, query = "", site = "") {
       setProgress(node, job);
       setHighlighted(node.querySelector(".helper-job-title"), jobTitle(job), words);
       const state = node.querySelector(".helper-job-state");
-      state.textContent = humanStatus(job.status);
+      state.textContent = jobStateText(job);
       state.classList.toggle("is-complete", job.status === "completed");
       state.classList.toggle("is-error", job.status === "failed");
       state.classList.toggle("is-cancelled", job.status === "cancelled");
@@ -523,7 +628,7 @@ function renderHelperJobs(jobs, query = "", site = "") {
       fillSiteTag(siteTag, job);
       siteTag.addEventListener("click", () => filterBySite(siteTag.dataset.site));
 
-      helperJobs.appendChild(node);
+      placeJobNode(node, job, groups);
       helperJobNodes.set(job.id, node);
     }
   }
@@ -535,6 +640,7 @@ function renderHelperJobs(jobs, query = "", site = "") {
       helperJobNodes.delete(id);
     }
   }
+  renderJobGroups(groups);
 
   if (!jobs.length) {
     const empty = document.createElement("div");
@@ -546,6 +652,86 @@ function renderHelperJobs(jobs, query = "", site = "") {
     helperJobs.textContent = "";
     helperJobs.appendChild(empty);
     helperJobNodes.clear();
+    jobGroupNodes.clear();
+  }
+}
+
+// --- Job groups: a Bilibili video's parts under one row ---
+
+// bvid -> its jobs, for videos with more than one part in the list.
+function bilibiliJobGroups(jobs) {
+  const byVideo = new Map();
+  for (const job of jobs) {
+    const bvid = job.inputMode === "bilibili" ? job.bilibili?.bvid : "";
+    if (bvid) byVideo.set(bvid, [...(byVideo.get(bvid) || []), job]);
+  }
+  return new Map([...byVideo].filter(([, parts]) => parts.length > 1));
+}
+
+// A job's node goes into its video's group, or stays in the list itself.
+function placeJobNode(node, job, groups) {
+  const bvid = job.bilibili?.bvid;
+  const parent = groups.has(bvid) ? jobGroupNode(bvid).parts : helperJobs;
+  if (node.parentNode !== parent) parent.appendChild(node);
+}
+
+function jobGroupNode(bvid) {
+  if (jobGroupNodes.has(bvid)) return jobGroupNodes.get(bvid);
+  const node = document.createElement("article");
+  node.className = "job-group";
+  const head = document.createElement("button");
+  head.type = "button";
+  head.className = "job-group-head";
+  const state = textSpan("helper-job-state", "");
+  const title = textSpan("job-group-title", "");
+  head.append(state, title);
+  const bar = document.createElement("div");
+  bar.className = "progress-bar";
+  bar.appendChild(document.createElement("i"));
+  const meta = textSpan("job-group-meta", "");
+  const parts = document.createElement("div");
+  parts.className = "job-group-parts";
+  parts.hidden = !expandedJobGroups.has(bvid);
+  head.ariaExpanded = String(!parts.hidden);
+  head.addEventListener("click", () => {
+    parts.hidden = !parts.hidden;
+    if (parts.hidden) expandedJobGroups.delete(bvid);
+    else expandedJobGroups.add(bvid);
+    head.ariaExpanded = String(!parts.hidden);
+  });
+  node.append(head, bar, meta, parts);
+  helperJobs.appendChild(node);
+  const group = { node, state, title, meta, parts };
+  jobGroupNodes.set(bvid, group);
+  return group;
+}
+
+// Group rows show the parts' combined state; groups whose video no longer
+// has several parts in the list are removed (their part moved out already).
+function renderJobGroups(groups) {
+  for (const [bvid, group] of jobGroupNodes) {
+    const parts = groups.get(bvid);
+    if (!parts) {
+      group.node.remove();
+      jobGroupNodes.delete(bvid);
+      continue;
+    }
+    const count = (...statuses) => parts.filter((job) => statuses.includes(job.status)).length;
+    const active = count("running", "queued");
+    const done = count("completed");
+    const resumable = parts.filter((job) => job.resumable).length;
+    const fraction = parts.reduce((sum, job) => sum + (job.status === "completed" ? 1 : jobProgressFraction(job) || 0), 0) / parts.length;
+    const status = active ? "running" : done === parts.length ? "completed" : resumable || count("failed") ? "failed" : parts[0].status;
+    group.node.dataset.status = status;
+    group.node.style.setProperty("--p", `${(fraction * 100).toFixed(1)}%`);
+    group.state.textContent = `${humanStatus(status)} ${Math.floor(fraction * 100)}%`;
+    group.state.className = `helper-job-state ${status === "completed" ? "is-complete" : ""} ${status === "failed" ? "is-error" : ""}`;
+    group.title.textContent = parts[0].bilibili.title || parts[0].bilibili.bvid;
+    group.meta.textContent = [
+      getMessage("jobGroupDone", { done: String(done), total: String(parts.length) }),
+      active ? getMessage("jobGroupActive", { count: String(active) }) : "",
+      resumable ? getMessage("jobGroupResumable", { count: String(resumable) }) : ""
+    ].filter(Boolean).join(" · ");
   }
 }
 
@@ -574,9 +760,10 @@ function confirmDownload(item, onConfirm, variant = null, initial = {}) {
   extension.textContent = `.${outputExtension(item)}`;
   fields.appendChild(dialogField(getMessage("dialogFileNameLabel"), nameInput, extension));
 
+  const siteOption = chooseFolder ? siteFolderOption(initial) : null;
   const dirInput = document.createElement("input");
   dirInput.type = "text";
-  dirInput.value = initial.downloadDir || helperDownloadDir;
+  dirInput.value = initial.downloadDir || siteOption?.remembered || helperDownloadDir;
   dirInput.spellcheck = false;
   const browseButton = document.createElement("button");
   browseButton.type = "button";
@@ -584,6 +771,7 @@ function confirmDownload(item, onConfirm, variant = null, initial = {}) {
   browseButton.textContent = getMessage("btnBrowse");
   if (chooseFolder) {
     fields.appendChild(dialogField(getMessage("dialogFolderLabel"), dirInput, browseButton));
+    if (siteOption) fields.appendChild(siteOption.element);
   } else {
     const hint = document.createElement("p");
     hint.className = "confirm-hint";
@@ -597,10 +785,13 @@ function confirmDownload(item, onConfirm, variant = null, initial = {}) {
     {
       label: getMessage("btnDownload"),
       className: "btn-primary",
-      onClick: () => onConfirm({
-        filename: nameInput.value.trim(),
-        downloadDir: chooseFolder ? dirInput.value.trim() : ""
-      })
+      onClick: () => {
+        applySiteFolder(siteOption, dirInput.value.trim());
+        onConfirm({
+          filename: nameInput.value.trim(),
+          downloadDir: chooseFolder ? dirInput.value.trim() : ""
+        });
+      }
     }
   ], "", { content: fields, onClose: clearPendingDialog });
 
@@ -609,15 +800,22 @@ function confirmDownload(item, onConfirm, variant = null, initial = {}) {
   };
   nameInput.addEventListener("keydown", submit);
   dirInput.addEventListener("keydown", submit);
+  wireBrowseButton(browseButton, dirInput, () => ({ item, variant, filename: nameInput.value, rememberSite: siteOption?.box.checked }));
 
+  nameInput.focus?.();
+  nameInput.select?.();
+  return overlay;
+}
+
+// The Windows folder picker closes the popup, so the dialog is saved first
+// and restorePendingDialog brings it back. dialogState: what it needs for that.
+function wireBrowseButton(browseButton, dirInput, dialogState) {
   browseButton.addEventListener("click", async () => {
     browseButton.disabled = true;
     await chrome.storage.session?.set({
       [PENDING_DIALOG_KEY]: {
         tabId: activeTab?.id,
-        item,
-        variant,
-        filename: nameInput.value,
+        ...dialogState(),
         downloadDir: dirInput.value,
         savedAt: Date.now()
       }
@@ -634,10 +832,6 @@ function confirmDownload(item, onConfirm, variant = null, initial = {}) {
       showNotice(response.error === "HELPER_OFFLINE" ? getMessage("msgHelperOfflinePickDir") : response.error, true);
     }
   });
-
-  nameInput.focus?.();
-  nameInput.select?.();
-  return overlay;
 }
 
 // For using the media in another tool: its URL (the chosen quality's), and
@@ -699,9 +893,18 @@ function defaultFileBase(item) {
 async function restorePendingDialog() {
   const stored = await chrome.storage.session?.get(PENDING_DIALOG_KEY).catch(() => null);
   const state = stored?.[PENDING_DIALOG_KEY];
-  if (!state?.item) return;
+  if (!state?.item && !state?.bilibili) return;
   if (state.tabId !== activeTab?.id || Date.now() - state.savedAt > PENDING_DIALOG_TTL_MS) {
     await clearPendingDialog();
+    return;
+  }
+  if (state.bilibili) {
+    if (biliInfo?.bvid !== state.bilibili.bvid) return clearPendingDialog();
+    biliChecked.clear();
+    for (const p of state.bilibili.parts) biliChecked.add(p);
+    biliQuality.value = state.bilibili.quality;
+    renderBiliParts();
+    confirmBiliDownload(state);
     return;
   }
   const nodes = mediaNodes.get(state.item.url) || {};
@@ -713,6 +916,221 @@ async function restorePendingDialog() {
 
 function clearPendingDialog() {
   return chrome.storage.session?.remove(PENDING_DIALOG_KEY).catch(() => {});
+}
+
+// --- Bilibili tile ---
+
+const BILIBILI_ERRORS = {
+  LOGIN_REQUIRED: "biliErrLogin",
+  RATE_LIMITED: "biliErrRateLimited",
+  ACCESS_DENIED: "biliErrAccess",
+  FORMAT_SELECTION_REQUIRED: "biliErrFormat",
+  HELPER_OFFLINE: "msgStartHelperHint"
+};
+
+function bilibiliErrorMessage(code, fallback) {
+  return BILIBILI_ERRORS[code] ? getMessage(BILIBILI_ERRORS[code]) : code || fallback;
+}
+
+// A BV page gets its own tile: the parts come from Bilibili's API (asked by
+// the background, with the user's cookies), not from the scanned media list.
+async function loadBilibili() {
+  try {
+    parseBvUrl(activeTab?.url || "");
+  } catch {
+    return;
+  }
+  biliTile.hidden = false;
+  if (notice.textContent === getMessage("msgEmptyHint")) hideNotice();
+  setBiliStatus(getMessage("biliLoading"));
+  const response = await chrome.runtime.sendMessage({ type: MESSAGE.BILIBILI_INFO_GET, url: activeTab.url }).catch(() => null);
+  if (!response?.ok) {
+    setBiliStatus(bilibiliErrorMessage(response?.error, getMessage("msgCouldNotReadMedia")), true);
+    return;
+  }
+  biliInfo = response.info;
+  biliChecked.clear();
+  biliAnchor = null;
+  biliChecked.add((biliInfo.selected || biliInfo.pages[0]).p);
+  biliTitle.textContent = biliInfo.title;
+  setBiliStatus("");
+  renderBiliParts();
+}
+
+// Multi-part videos show a grid of numbered chips, like Bilibili's own part
+// picker; the line under it names the part hovered or last clicked.
+function renderBiliParts() {
+  biliParts.textContent = "";
+  biliChips.clear();
+  const multi = biliInfo.pages.length > 1;
+  const digits = Math.max(2, String(Math.max(...biliInfo.pages.map((page) => page.p))).length);
+  for (const page of biliInfo.pages) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "bili-chip";
+    chip.textContent = String(page.p).padStart(digits, "0");
+    chip.title = biliPartLabel(page);
+    // The part open in the tab.
+    chip.classList.toggle("is-current", page.p === biliInfo.selected?.p);
+    chip.addEventListener("click", (event) => toggleBiliPart(page.p, event.shiftKey));
+    chip.addEventListener("mouseenter", () => showBiliFocus(page));
+    chip.addEventListener("focus", () => showBiliFocus(page));
+    biliChips.set(page.p, chip);
+    biliParts.appendChild(chip);
+  }
+  biliParts.hidden = !multi;
+  biliPick.hidden = !multi;
+  biliFocus.hidden = !multi;
+  showBiliFocus(biliInfo.selected || biliInfo.pages[0]);
+  biliChips.get(biliInfo.selected?.p)?.scrollIntoView?.({ block: "nearest" });
+  updateBiliActions();
+}
+
+// Shift+click sets every part from the last clicked one to this one to this
+// part's new state, so a range can be ticked or cleared in one go.
+function toggleBiliPart(p, range) {
+  const select = !biliChecked.has(p);
+  const order = biliInfo.pages.map((page) => page.p);
+  const to = order.indexOf(p);
+  const from = range && biliAnchor !== null ? order.indexOf(biliAnchor) : to;
+  for (const part of order.slice(Math.min(from, to), Math.max(from, to) + 1)) {
+    if (select) biliChecked.add(part);
+    else biliChecked.delete(part);
+  }
+  biliAnchor = p;
+  updateBiliActions();
+}
+
+function setBiliSelection(isSelected) {
+  for (const page of biliInfo.pages) {
+    if (isSelected(page.p)) biliChecked.add(page.p);
+    else biliChecked.delete(page.p);
+  }
+  updateBiliActions();
+}
+
+function biliPage(p) {
+  return biliInfo.pages.find((page) => page.p === p) || null;
+}
+
+function biliPartLabel(page) {
+  return [`P${page.p}`, page.title, formatClock(page.durationSeconds)].filter(Boolean).join(" · ");
+}
+
+function showBiliFocus(page) {
+  biliFocus.textContent = biliPartLabel(page);
+}
+
+function updateBiliActions() {
+  const count = biliChecked.size;
+  const multi = biliInfo.pages.length > 1;
+  for (const [p, chip] of biliChips) chip.ariaPressed = String(biliChecked.has(p));
+  biliSummary.textContent = multi ? getMessage("biliSummary", { total: String(biliInfo.pages.length), count: String(count) }) : "";
+  biliDownload.disabled = !count;
+  biliDownload.textContent = multi ? getMessage("biliDownloadCount", { count: String(count) }) : getMessage("btnDownload");
+}
+
+function setBiliStatus(text, isError = false) {
+  biliStatus.textContent = text;
+  biliStatus.hidden = !text;
+  biliStatus.classList.toggle("is-error", isError);
+}
+
+function textSpan(className, text) {
+  const span = document.createElement("span");
+  span.className = className;
+  span.textContent = text;
+  return span;
+}
+
+function formatClock(seconds) {
+  if (!(seconds > 0)) return "";
+  const total = Math.round(seconds);
+  const pad = (value) => String(value).padStart(2, "0");
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor(total / 60) % 60;
+  return hours ? `${hours}:${pad(minutes)}:${pad(total % 60)}` : `${minutes}:${pad(total % 60)}`;
+}
+
+// One ticked part can be renamed; a batch is named by bilibiliFileName.
+// initial: the dialog the folder picker interrupted.
+function confirmBiliDownload(initial = {}) {
+  const pages = biliInfo.pages.filter((page) => biliChecked.has(page.p));
+  if (!pages.length) return;
+  const fields = document.createElement("div");
+  fields.className = "confirm-fields";
+
+  let nameInput = null;
+  if (pages.length === 1) {
+    nameInput = document.createElement("input");
+    nameInput.type = "text";
+    nameInput.value = initial.filename ?? bilibiliFileName(biliInfo, pages[0]);
+    nameInput.spellcheck = false;
+    fields.appendChild(dialogField(getMessage("dialogFileNameLabel"), nameInput, textSpan("confirm-ext", ".mp4")));
+  }
+  const siteOption = siteFolderOption(initial);
+  const dirInput = document.createElement("input");
+  dirInput.type = "text";
+  dirInput.value = initial.downloadDir || siteOption?.remembered || helperDownloadDir;
+  dirInput.spellcheck = false;
+  const browseButton = document.createElement("button");
+  browseButton.type = "button";
+  browseButton.className = "ghost-button";
+  browseButton.textContent = getMessage("btnBrowse");
+  fields.appendChild(dialogField(getMessage("dialogFolderLabel"), dirInput, browseButton));
+  if (siteOption) fields.appendChild(siteOption.element);
+
+  const overlay = openDialog(getMessage("confirmDownloadTitle"), "", getMessage("biliDialogKind", { count: String(pages.length) }), [
+    { label: getMessage("btnCancel"), className: "btn-ghost" },
+    {
+      label: getMessage("btnDownload"),
+      className: "btn-primary",
+      onClick: () => {
+        applySiteFolder(siteOption, dirInput.value.trim());
+        startBiliDownload(pages, { filename: nameInput?.value.trim() || "", downloadDir: dirInput.value.trim() });
+      }
+    }
+  ], "", { content: fields, onClose: clearPendingDialog });
+
+  const submit = (event) => {
+    if (event.key === "Enter") overlay.querySelector(".btn-primary")?.click();
+  };
+  nameInput?.addEventListener("keydown", submit);
+  dirInput.addEventListener("keydown", submit);
+  wireBrowseButton(browseButton, dirInput, () => ({
+    bilibili: { bvid: biliInfo.bvid, parts: pages.map((page) => page.p), quality: biliQuality.value },
+    filename: nameInput?.value,
+    rememberSite: siteOption?.box.checked
+  }));
+  (nameInput || dirInput).focus?.();
+}
+
+async function startBiliDownload(pages, output) {
+  const parts = pages.map((page) => ({
+    p: page.p,
+    cid: page.cid,
+    filename: pages.length === 1 && output.filename ? output.filename : bilibiliFileName(biliInfo, page)
+  }));
+  biliDownload.disabled = true;
+  setBiliStatus(getMessage("biliStarting", { count: String(parts.length) }));
+  const response = await chrome.runtime.sendMessage({
+    type: MESSAGE.BILIBILI_DOWNLOAD,
+    bvid: biliInfo.bvid,
+    title: biliInfo.title,
+    parts,
+    quality: biliQuality.value,
+    downloadDir: output.downloadDir
+  }).catch(() => null);
+  biliDownload.disabled = false;
+
+  const started = response?.helperJobs?.length || 0;
+  if (response?.ok) {
+    setBiliStatus(getMessage("biliStarted", { count: String(started) }));
+  } else {
+    const error = bilibiliErrorMessage(response?.error, getMessage("msgDownloadFailed"));
+    setBiliStatus(started ? getMessage("biliPartlyStarted", { started: String(started), total: String(parts.length), error }) : error, true);
+  }
+  if (started) await loadHelperStatus();
 }
 
 // Builds a modal: yellow header slab, paper body, action buttons. Every button
@@ -1162,7 +1580,28 @@ async function resumeJob(jobId, button) {
     showNotice(getMessage("msgResumeOpenPage"));
   } else {
     button.disabled = false;
-    showNotice(response?.error || getMessage("msgResumeFailed"), true);
+    // A Bilibili resume needs the exact stream it started with.
+    showNotice(response?.error === "FORMAT_SELECTION_REQUIRED"
+      ? getMessage("biliErrResumeFormat")
+      : bilibiliErrorMessage(response?.error, getMessage("msgResumeFailed")), true);
+  }
+  await loadHelperStatus();
+}
+
+// Every resumable job; the background resumes them one by one (Bilibili jobs
+// need fresh stream URLs each) and opens no pages for streams that fail.
+async function resumeAllJobs() {
+  resumeAllButton.disabled = true;
+  const response = await chrome.runtime.sendMessage({ type: MESSAGE.DOWNLOADS_JOBS_RESUME_ALL }).catch(() => null);
+  resumeAllButton.disabled = false;
+  if (response?.ok) {
+    showNotice(getMessage("msgResumeAllStarted", { count: String(response.resumed) }));
+  } else {
+    showNotice(getMessage("msgResumeAllPartial", {
+      resumed: String(response?.resumed || 0),
+      failed: String(response?.failed || 0),
+      error: bilibiliErrorMessage(response?.error, getMessage("msgResumeFailed"))
+    }), true);
   }
   await loadHelperStatus();
 }
@@ -1341,11 +1780,34 @@ function humanJobMessage(job) {
 }
 
 function baseJobMessage(job) {
+  const live = liveByteProgress(job);
+  if (live) return live;
   if (job.error === "DOWNLOAD_STALLED") return job.progressText || getMessage("msgDownloadStalled");
   if (job.error === "HELPER_RESTARTED") return getMessage("msgHelperRestarted");
   if (job.error === "SOURCE_PAGE_CLOSED") return getMessage("msgSourcePageClosed");
   if (String(job.error || "").startsWith("BROWSER_BLOCKED")) return getMessage("msgBrowserBlocked");
   return job.error || job.progressText || sizeLabel(job);
+}
+
+// Running helper downloads (direct files, Bilibili) as "1.2 GB / 1.6 GB ·
+// 5.0 MB/s · 1:02 left", from the job's numbers so it follows the popup's
+// language. "" where the helper's own progress text says more.
+function liveByteProgress(job) {
+  if (job.inputMode !== "direct" && job.inputMode !== "bilibili") return "";
+  if (job.status === "queued") return getMessage("jobWaitingSlot");
+  if (job.status !== "running") return "";
+  if (job.phase === "merge") return getMessage("jobMerging");
+  if (!job.totalBytes) return "";
+  const pieces = [`${formatBytes(job.downloadedBytes)} / ${formatBytes(job.totalBytes)}`];
+  if (job.transferRateBytesPerSecond > 0) pieces.push(`${formatBytes(job.transferRateBytesPerSecond)}/s`);
+  if (job.etaSeconds != null) pieces.push(getMessage("jobEta", { eta: formatClock(job.etaSeconds) || "0:00" }));
+  return pieces.join(" · ");
+}
+
+// "Running 42%" while a job runs and its progress is known.
+function jobStateText(job) {
+  const fraction = job.status === "running" ? jobProgressFraction(job) : null;
+  return fraction === null ? humanStatus(job.status) : `${humanStatus(job.status)} ${Math.floor(fraction * 100)}%`;
 }
 
 function sizeLabel(job) {
