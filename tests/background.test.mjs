@@ -918,6 +918,29 @@ test("HELPER_STATUS_GET includes the helper's total job count in stats", async (
   assert.equal(response.stats.active, 0);
 });
 
+test("HELPER_STATUS_GET reads enough jobs for twenty rows and caches those rows", async () => {
+  const listed = [];
+  const at = (minute) => new Date(Date.UTC(2026, 0, 1, 0, minute)).toISOString();
+  for (let p = 1; p <= 8; p += 1) {
+    listed.push({ id: `part${p}`, status: "completed", startedAt: at(100 + p), inputMode: "bilibili", bilibili: { bvid: "BVmadeup", p } });
+  }
+  for (let i = 0; i < 25; i += 1) listed.push({ id: `solo${i}`, status: "completed", startedAt: at(i) });
+  const urls = [];
+  globalThis.fetch = async (url) => {
+    urls.push(String(url));
+    const body = String(url).endsWith("/health") ? { ok: true } : { ok: true, jobs: listed, total: listed.length, stats: { active: 0 } };
+    return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+
+  const response = await sendRuntimeMessage({ type: "helper:statusGet" });
+
+  assert.ok(urls.some((url) => url.endsWith("/jobs?limit=200")), urls.join(" "));
+  assert.equal(response.jobs.length, 33);
+  const cached = mock.data.recentJobs.map((job) => job.id);
+  assert.equal(cached.length, 27, "8 parts in one row plus 19 single jobs");
+  assert.ok(cached.includes("part1") && cached.includes("solo6") && !cached.includes("solo5"));
+});
+
 // ─── Extension mode: offscreen document + header-replay rules ───
 
 function enableOffscreen() {

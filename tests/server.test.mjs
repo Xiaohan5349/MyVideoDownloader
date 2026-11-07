@@ -41,6 +41,8 @@ describe("server.js HTTP API", () => {
 
   after(async () => {
     await new Promise((resolve) => server.close(resolve));
+    // A probe still reading a finished file would keep it busy (EBUSY on Windows).
+    await serverModule.mediaProbesIdle();
     // Browser-fed jobs stage segments under the OS temp dir, not DOWNLOAD_DIR.
     for (const job of jobs.values()) {
       if (job.tempDir && path.basename(job.tempDir).startsWith("ds-video-browser-")) {
@@ -1559,6 +1561,118 @@ it("a Bilibili job downloads both tracks with the Referer and muxes them into on
   } finally {
     await closeUpstreams(video, audio);
   }
+});
+
+it("a finished Bilibili job records the output's resolution and bitrate", async (t) => {
+  const media = await bilibiliMedia();
+  if (!media) return t.skip("ffmpeg is not installed");
+  const video = await startUpstream(media.video);
+  const audio = await startUpstream(media.audio);
+  try {
+    const res = await fetchJson("/download", { method: "POST", body: bilibiliPayload(video.url, audio.url, { filename: "Made-up quality P1" }) });
+    const done = await waitForJob(res.body.job.id);
+    assert.equal(done.status, "completed", done.error);
+    let listed = null;
+    for (let i = 0; i < 100 && !listed?.media; i += 1) {
+      listed = (await fetchJson("/jobs?limit=200")).body.jobs.find((entry) => entry.id === done.id);
+      if (!listed?.media) await new Promise((resolve) => setTimeout(resolve, 30));
+    }
+    assert.equal(listed.media.width, 64);
+    assert.equal(listed.media.height, 64);
+    assert.equal(listed.media.codec, "mpeg4");
+    assert.ok(listed.media.bitrate > 0, JSON.stringify(listed.media));
+    assert.ok(listed.media.probedAt > 0);
+  } finally {
+    await closeUpstreams(video, audio);
+  }
+});
+
+it("probeMediaFile tells failed and sound-only files apart", async (t) => {
+  const media = await bilibiliMedia();
+  if (!media) return t.skip("ffmpeg is not installed");
+  const text = path.join(process.env.DOWNLOAD_DIR, "not-media.mp4");
+  const sound = path.join(process.env.DOWNLOAD_DIR, "sound-only.m4a");
+  await writeFile(text, "this is not a video");
+  await writeFile(sound, media.audio);
+  assert.equal((await serverModule.probeMediaFile(text)).failed, true);
+  const soundFacts = await serverModule.probeMediaFile(sound);
+  assert.equal(soundFacts.noVideo, true);
+  assert.equal(soundFacts.failed, undefined);
+});
+
+it("deleting a file waits for its running probe (Windows keeps the file busy)", async (t) => {
+  const media = await bilibiliMedia();
+  if (!media) return t.skip("ffmpeg is not installed");
+  const file = path.join(process.env.DOWNLOAD_DIR, "probe-then-delete.mp4");
+  await writeFile(file, media.video);
+  const job = { id: "probe-then-delete", status: "completed", outputPath: file, downloadDir: process.env.DOWNLOAD_DIR, startedAt: "2020-01-01T00:00:00.000Z" };
+  jobs.set(job.id, job);
+  try {
+    const probing = serverModule.backfillJobMedia();
+    await new Promise((resolve) => setImmediate(resolve));
+    const res = await fetchJson(`/jobs/${job.id}`, { method: "DELETE" });
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.ok(job.media?.width, "the probe finished before the file was removed");
+    assert.ok(!existsSync(file));
+    await probing;
+  } finally {
+    jobs.delete(job.id);
+  }
+});
+
+it("backfillJobMedia probes old completed jobs once", async (t) => {
+  const media = await bilibiliMedia();
+  if (!media) return t.skip("ffmpeg is not installed");
+  const file = path.join(process.env.DOWNLOAD_DIR, "old-finished.mp4");
+  await writeFile(file, media.video);
+  const old = { id: "old-finished-job", status: "completed", outputPath: file, startedAt: "2020-01-01T00:00:00.000Z" };
+  const deleted = { id: "old-deleted-job", status: "missing", outputPath: path.join(process.env.DOWNLOAD_DIR, "gone.mp4"), startedAt: "2020-01-01T00:00:00.000Z" };
+  jobs.set(old.id, old);
+  jobs.set(deleted.id, deleted);
+  try {
+    await serverModule.backfillJobMedia();
+    assert.equal(old.media.width, 64);
+    assert.equal(deleted.media, undefined, "a deleted file is not probed");
+    const first = old.media.probedAt;
+    await serverModule.backfillJobMedia();
+    assert.equal(old.media.probedAt, first, "probed only once");
+  } finally {
+    jobs.delete(old.id);
+    jobs.delete(deleted.id);
+  }
+});
+
+it("a Bilibili job uses the requested number of connections", async (t) => {
+  const media = await bilibiliMedia();
+  if (!media) return t.skip("ffmpeg is not installed");
+  const chunks = Math.ceil(media.video.length / 1000);
+  assert.ok(chunks > 4, "the test needs more chunks than the default 4 connections");
+  const peakWith = async (connections) => {
+    let active = 0;
+    let peak = 0;
+    const onRequest = async (req) => {
+      if (req.headers.range === "bytes=0-0") return false;
+      active += 1;
+      peak = Math.max(peak, active);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      active -= 1;
+      return false;
+    };
+    const video = await startUpstream(media.video, { onRequest });
+    const audio = await startUpstream(media.audio);
+    try {
+      const res = await fetchJson("/download", { method: "POST", body: bilibiliPayload(video.url, audio.url, { connections }) });
+      const job = await waitForJob(res.body.job.id);
+      assert.equal(job.status, "completed", `${job.error} ${job.log.join(" ")}`);
+      return { peak, stored: job.connections };
+    } finally {
+      await closeUpstreams(video, audio);
+    }
+  };
+  assert.deepEqual(await peakWith(1), { peak: 1, stored: 1 });
+  assert.deepEqual(await peakWith(8), { peak: Math.min(8, chunks), stored: 8 });
+  // Out of range falls back to the default.
+  assert.deepEqual(await peakWith(99), { peak: 4, stored: 4 });
 });
 
 it("a Bilibili job needs exactly one video and one audio track", async () => {

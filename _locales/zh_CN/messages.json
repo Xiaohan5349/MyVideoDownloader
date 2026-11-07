@@ -83,6 +83,15 @@
   "settingsNote": {
     "message": "文件大小过滤仅在浏览器报告直接文件大小时生效。HLS/DASH 播放列表始终可见。"
   },
+  "settingsBilibiliConnections": {
+    "message": "B 站每个下载的连接数"
+  },
+  "settingsConnectionsDefault": {
+    "message": "4（默认）"
+  },
+  "settingsConnectionsNote": {
+    "message": "视频没进 CDN 缓存时，多连接才有明显提速。同时会跑两个下载，选 8 时总共最多 16 条连接。"
+  },
   "settingsLanguageLabel": {
     "message": "界面语言"
   },
@@ -499,6 +508,48 @@
   },
   "jobGroupResumable": {
     "message": "{{count}} 个可继续"
+  },
+  "jobGroupBlurry": {
+    "message": "{{count}} 个分 P 偏糊"
+  },
+  "sortAria": {
+    "message": "下载结果排序方式"
+  },
+  "sortByDate": {
+    "message": "日期"
+  },
+  "sortByQuality": {
+    "message": "清晰度"
+  },
+  "sortBySize": {
+    "message": "大小"
+  },
+  "sortByName": {
+    "message": "名字"
+  },
+  "sortDirAsc": {
+    "message": "升序，点击切换为降序"
+  },
+  "sortDirDesc": {
+    "message": "降序，点击切换为升序"
+  },
+  "qualityUltra": {
+    "message": "极清"
+  },
+  "qualityHigh": {
+    "message": "高清"
+  },
+  "qualityClear": {
+    "message": "清晰"
+  },
+  "qualityBlurry": {
+    "message": "偏糊"
+  },
+  "qualitySd": {
+    "message": "标清"
+  },
+  "qualityUnknown": {
+    "message": "未知"
   },
   "dialogRememberSite": {
     "message": "以后 {{site}} 的下载都保存到这里"

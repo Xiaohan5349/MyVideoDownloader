@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Added
+
+- Settings: connections per Bilibili download (4, 6 or 8; default 4). In tests with uncached video data, 8 connections were about a third faster than 4; already-cached data showed no gain.
+- Quality grade for finished downloads: the helper reads each finished file with ffprobe (resolution, codec, bitrate; stored as `job.media`, one probe at a time, after the job shows as completed) and probes older finished jobs once on start. The Helper tab shows five cells and a word (Q5 Ultra … Q1 SD) from the resolution, lowered one or two steps when the bitrate is low for it (HEVC/AV1/VP9 count 1.5×), a grade-coloured edge, and "1080p 1920×1080 / 5.6 Mbps / 2.1 GB" under the name; a low bitrate is marked ▼. A Bilibili video's row shows its lowest part grade and how many parts are blurry. Deleted files show "Unknown".
+- Sort the download list by date, quality, size or name, ascending or descending; the choice is remembered.
+
+### Changed
+
+- The Helper tab lists the 20 newest rows instead of the 20 newest jobs: a Bilibili video's parts count as one row, so a large set no longer pushes other downloads out of the list. The popup asks the helper for up to 200 jobs.
+
 ## v1.13.0 - 2026-10-30
 
 ### Added

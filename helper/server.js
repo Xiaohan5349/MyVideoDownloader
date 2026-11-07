@@ -310,10 +310,11 @@ if (process.env.NODE_ENV !== "test") {
   server.listen(PORT, HOST, () => {
     console.log(`DS Video Downloader helper listening on http://${HOST}:${PORT}`);
     console.log(`Downloads folder: ${downloadDir}`);
+    backfillJobMedia().catch(() => {});
   });
 }
 
-export { server, jobs, isSafeDownloadPath, persistJobsToDisk, sweepStalledJobs, enforceJobHistoryCap };
+export { server, jobs, isSafeDownloadPath, persistJobsToDisk, sweepStalledJobs, enforceJobHistoryCap, probeMediaFile, backfillJobMedia, mediaProbesIdle };
 
 async function startDownload(payload) {
   const url = validateUrl(payload?.url);
@@ -654,6 +655,7 @@ async function runDirectDownload(job, headers, probe, controller, { resume = fal
     job.progressText = `Completed ${formatBytes(job.downloadedBytes)}`;
     job.finishedAt = new Date().toISOString();
     job.etaSeconds = null;
+    queueMediaProbe(job);
   } catch (error) {
     // Stop the other connections; their chunks are no longer needed.
     controller.abort();
@@ -758,6 +760,13 @@ async function writeBodyAt(body, handle, position, onBytes) {
 const BILIBILI_HEADERS = [{ name: "Referer", value: "https://www.bilibili.com/" }];
 // A batch of parts waits as "queued" instead of opening dozens of connections.
 const BILIBILI_CONCURRENCY = Number(process.env.BILIBILI_CONCURRENCY || 2);
+const BILIBILI_MAX_CONNECTIONS = 8;
+
+// Connections per job, from the extension's setting.
+function bilibiliConnections(value) {
+  const count = Number(value);
+  return Number.isInteger(count) && count >= 1 && count <= BILIBILI_MAX_CONNECTIONS ? count : DIRECT_CONNECTIONS;
+}
 
 async function startBilibiliDownload(payload) {
   const tracks = bilibiliTracks(payload?.tracks);
@@ -777,6 +786,7 @@ async function startBilibiliDownload(payload) {
     sourcePageUrl,
     // What the extension needs to ask for the same streams again on Resume.
     bilibili: bilibiliSource(payload.bilibili),
+    connections: bilibiliConnections(payload.connections),
     tracks,
     outputPath: output.outputPath,
     downloadDir: output.outputDir,
@@ -859,6 +869,7 @@ async function resumeBilibiliJob(job, payload) {
   const tracks = bilibiliTracks(payload?.tracks);
   if (!tracks) return { ok: false, status: 400, error: "INVALID_TRACKS" };
   for (const track of job.tracks) track.url = tracks.find((fresh) => fresh.role === track.role).url;
+  job.connections = bilibiliConnections(payload.connections);
   job.status = "queued";
   job.error = null;
   job.exitCode = null;
@@ -887,7 +898,7 @@ async function runBilibiliDownload(job) {
   job.lastActivityAt = Date.now();
   const controller = new AbortController();
   jobAborts.set(job.id, controller);
-  const progress = { bytes: 0, connections: DIRECT_CONNECTIONS };
+  const progress = { bytes: 0, connections: bilibiliConnections(job.connections) };
   const report = () => {
     updateDownloadedBytes(job, progress.bytes);
     job.etaSeconds = job.totalBytes && job.transferRateBytesPerSecond > 0
@@ -1239,6 +1250,80 @@ function runFfprobe(url, headers, isPlaylist) {
   });
 }
 
+// --- What a finished file really is (resolution, codec, bitrate) ---
+
+// { width, height, codec, bitrate, probedAt } | { noVideo: true, probedAt } |
+// { failed: true, probedAt } (ffprobe missing, timed out, or not a media file).
+function probeMediaFile(filePath) {
+  const args = ["-v", "error", "-show_entries", "stream=codec_type,codec_name,width,height,bit_rate:format=bit_rate", "-of", "json", filePath];
+  return new Promise((resolve) => {
+    let output = "";
+    let settled = false;
+    const finish = (facts) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ ...facts, probedAt: Date.now() });
+    };
+    const child = spawn("ffprobe", args, { windowsHide: true });
+    const timer = setTimeout(() => {
+      child.kill();
+      finish({ failed: true });
+    }, QUALITY_PROBE_TIMEOUT_MS);
+    child.stdout.on("data", (chunk) => { output += chunk; });
+    child.on("error", () => finish({ failed: true }));
+    child.on("close", (code) => {
+      try {
+        if (code !== 0) throw new Error("ffprobe failed");
+        const data = JSON.parse(output);
+        const streams = Array.isArray(data.streams) ? data.streams : [];
+        if (!streams.length) throw new Error("no streams");
+        const video = streams.find((stream) => stream.codec_type === "video" && stream.width > 0 && stream.height > 0);
+        if (!video) return finish({ noVideo: true });
+        const bitrate = Number(video.bit_rate) || Number(data.format?.bit_rate) || null;
+        finish({ width: video.width, height: video.height, codec: String(video.codec_name || ""), bitrate });
+      } catch {
+        finish({ failed: true });
+      }
+    });
+  });
+}
+
+// One ffprobe at a time; finished jobs get their facts after they show as
+// completed, never holding that up.
+let mediaProbeChain = Promise.resolve();
+// jobId -> the probe now reading that job's file. Windows cannot delete a
+// file ffprobe has open (EBUSY), so removing the file waits for it.
+const runningMediaProbes = new Map();
+function queueMediaProbe(job) {
+  if (!job?.outputPath || job.media) return mediaProbeChain;
+  mediaProbeChain = mediaProbeChain.then(async () => {
+    if (job.media || job.status !== "completed" || !existsSync(job.outputPath)) return;
+    const probe = probeMediaFile(job.outputPath);
+    runningMediaProbes.set(job.id, probe);
+    try {
+      job.media = await probe;
+    } finally {
+      runningMediaProbes.delete(job.id);
+    }
+    await persistJobsToDisk();
+  }).catch(() => {});
+  return mediaProbeChain;
+}
+
+// Resolves when nothing is reading files any more (tests clean up after this).
+function mediaProbesIdle() {
+  return mediaProbeChain;
+}
+
+// Jobs finished before the helper probed files.
+async function backfillJobMedia() {
+  for (const job of jobs.values()) {
+    if (job.status === "completed" && !job.media) queueMediaProbe(job);
+  }
+  await mediaProbeChain;
+}
+
 async function inspectManifest(url, kind, headers) {
   try {
     const response = await fetch(url, {
@@ -1369,6 +1454,7 @@ function runFfmpeg(job, headers) {
     job.finishedAt = new Date().toISOString();
     cleanupBrowserTemp(job);
     persistJobsToDisk();
+    if (code === 0) queueMediaProbe(job);
   });
 }
 
@@ -1560,6 +1646,7 @@ async function deleteJobOutput(id) {
   if (job.status === "running" || job.status === "queued") return { ok: false, status: 409, error: "JOB_STILL_RUNNING" };
   if (!isSafeDownloadPath(job.outputPath, job.downloadDir || downloadDir)) return { ok: false, status: 403, error: "OUTPUT_PATH_UNSAFE" };
 
+  await runningMediaProbes.get(job.id);
   await unlink(job.outputPath).catch((error) => {
     if (error?.code !== "ENOENT") throw error;
   });
