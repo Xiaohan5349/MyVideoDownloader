@@ -1,6 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { DEFAULT_JOB_SORT, jobRows, qualityGrade, recentRows, sortRows } from "../src/shared.js";
+import { DEFAULT_JOB_SORT, jobDateLabel, jobRows, qualityGrade, recentRows, sortRows } from "../src/shared.js";
+
+test("download dates are short this year and carry the year otherwise", () => {
+  const now = new Date(2026, 10, 6, 20, 0);
+  assert.equal(jobDateLabel(new Date(2026, 10, 6, 9, 5).toISOString(), now), "11-06 09:05");
+  assert.equal(jobDateLabel(new Date(2025, 0, 31, 23, 59).toISOString(), now), "2025-01-31");
+  assert.equal(jobDateLabel("", now), "");
+  assert.equal(jobDateLabel("not a date", now), "");
+});
 
 const media = (width, height, codec, bitrate) => ({ width, height, codec, bitrate });
 

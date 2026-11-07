@@ -497,6 +497,18 @@ function makeRow(key, jobs) {
   };
 }
 
+// A job's start time as "11-06 09:05" in the local time zone; "2025-01-31"
+// for an earlier year. Language-neutral, like the sizes next to it.
+export function jobDateLabel(iso, now = new Date()) {
+  const date = new Date(iso || NaN);
+  if (Number.isNaN(date.getTime())) return "";
+  const two = (n) => String(n).padStart(2, "0");
+  const day = `${two(date.getMonth() + 1)}-${two(date.getDate())}`;
+  return date.getFullYear() === now.getFullYear()
+    ? `${day} ${two(date.getHours())}:${two(date.getMinutes())}`
+    : `${date.getFullYear()}-${day}`;
+}
+
 // The newest `limit` rows.
 export function recentRows(jobs, limit) {
   return jobRows(jobs).sort((a, b) => b.startedAt.localeCompare(a.startedAt)).slice(0, limit);

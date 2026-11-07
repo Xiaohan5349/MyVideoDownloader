@@ -1,5 +1,5 @@
 import {
-  DEFAULT_JOB_SORT, MESSAGE, ffmpegCommand, highlightRanges, jobProgressFraction, qualityGrade, recentRows,
+  DEFAULT_JOB_SORT, MESSAGE, ffmpegCommand, highlightRanges, jobDateLabel, jobProgressFraction, qualityGrade, recentRows,
   sanitizeFilename, siteKey, sortMediaByQuality, sortRows
 } from "./shared.js";
 import { getMessage, getUserLanguage, setUserLanguage, applyLanguageUI } from "./i18n.js";
@@ -754,6 +754,8 @@ function renderJobGroups(groups) {
     group.title.textContent = parts[0].bilibili.title || parts[0].bilibili.bvid;
     group.meta.textContent = [
       getMessage("jobGroupDone", { done: String(done), total: String(parts.length) }),
+      formatBytes(row.bytes),
+      jobDateLabel(row.startedAt),
       active ? getMessage("jobGroupActive", { count: String(active) }) : "",
       resumable ? getMessage("jobGroupResumable", { count: String(resumable) }) : "",
       row.blurryCount ? getMessage("jobGroupBlurry", { count: String(row.blurryCount) }) : ""
@@ -814,11 +816,14 @@ function showQuality(row, element, quality) {
   label.append(textSpan("q-num", quality.grade ? `Q${quality.grade}` : "Q–"), getMessage(QUALITY_WORDS[quality.grade]));
 }
 
-// "1080p 1920×1080 / 5.6 Mbps / 2.1 GB" for graded files, the usual message otherwise.
+// "1080p 1920×1080 / 5.6 Mbps / 2.1 GB · 11-06 09:05" for graded files, the
+// usual message otherwise; the date is left out while the job is downloading.
 function fillJobMeta(meta, job) {
   const quality = jobQuality(job);
+  const isActive = job.status === "queued" || job.status === "running";
+  const date = isActive ? "" : jobDateLabel(job.startedAt);
   if (!quality?.grade) {
-    meta.textContent = humanJobMessage(job);
+    meta.textContent = date ? `${humanJobMessage(job)} · ${date}` : humanJobMessage(job);
     return;
   }
   const { width, height, bitrate } = job.media;
@@ -828,6 +833,7 @@ function fillJobMeta(meta, job) {
     meta.append(" / ", textSpan(quality.lowBitrate ? "q-rate is-low" : "q-rate", `${(bitrate / 1e6).toFixed(1)} Mbps${quality.lowBitrate ? " ▼" : ""}`));
   }
   meta.append(` / ${formatBytes(job.downloadedBytes || job.totalBytes)}`);
+  if (date) meta.append(` · ${date}`);
 }
 
 function rowTitle(row) {

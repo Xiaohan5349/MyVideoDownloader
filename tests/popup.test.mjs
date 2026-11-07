@@ -525,6 +525,19 @@ test("a Bilibili video's parts count as one of the twenty rows", async () => {
   });
 });
 
+test("a Bilibili set's row shows the parts' total size and download date", async () => {
+  const jobs = [1, 2].map((p) => finishedJob(`sized${p}`, p, {
+    inputMode: "bilibili", downloadedBytes: 600 * 1024 * 1024, bilibili: { bvid: "BVsized", p, title: "Made-up sized set" }
+  }));
+  await withHelperJobs(jobs, async () => {
+    await timers.setIntervalCalls[0].fn();
+    const group = getElement("#helperJobs").children.find((node) => node.className === "job-group");
+    const meta = group.children.find((node) => node.className === "job-group-meta").textContent;
+    assert.match(meta, /1\.2 GB/);
+    assert.match(meta, /\d\d-\d\d \d\d:\d\d|\d{4}-\d\d-\d\d/);
+  });
+});
+
 test("a finished job is marked with its quality grade", async () => {
   const jobs = [
     finishedJob("blurry", 2, { media: { width: 1920, height: 1080, codec: "h264", bitrate: 1_100_000 } }),
