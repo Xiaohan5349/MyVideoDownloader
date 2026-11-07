@@ -1,4 +1,7 @@
-import { MESSAGE, ffmpegCommand, highlightRanges, jobProgressFraction, sanitizeFilename, siteKey, sortMediaByQuality } from "./shared.js";
+import {
+  DEFAULT_JOB_SORT, MESSAGE, ffmpegCommand, highlightRanges, jobDateLabel, jobProgressFraction, qualityGrade, recentRows,
+  sanitizeFilename, siteKey, sortMediaByQuality, sortRows
+} from "./shared.js";
 import { getMessage, getUserLanguage, setUserLanguage, applyLanguageUI } from "./i18n.js";
 import { bilibiliFileName, parseBvUrl } from "./bilibili.js";
 
@@ -16,8 +19,11 @@ const refreshHelperButton = document.querySelector("#refreshHelperButton");
 const clearMissingButton = document.querySelector("#clearMissingButton");
 const jobSearchInput = document.querySelector("#jobSearchInput");
 const jobSiteSelect = document.querySelector("#jobSiteSelect");
+const jobSortSelect = document.querySelector("#jobSortSelect");
+const jobSortDir = document.querySelector("#jobSortDir");
 const kindFilter = document.querySelector("#kindFilter");
 const minSizeSelect = document.querySelector("#minSizeSelect");
+const bilibiliConnectionsSelect = document.querySelector("#bilibiliConnectionsSelect");
 const showUnsupportedInput = document.querySelector("#showUnsupportedInput");
 const downloadDirInput = document.querySelector("#downloadDirInput");
 const saveDownloadDirButton = document.querySelector("#saveDownloadDirButton");
@@ -54,6 +60,10 @@ let settings = null;
 const jobPollers = new Map();
 const pendingDownloads = new Set();
 const helperJobNodes = new Map();
+// Job list: 20 newest rows (a Bilibili video's parts are one row), 50 when searching.
+const JOB_ROWS = 20;
+const JOB_SEARCH_ROWS = 50;
+let jobSort = { ...DEFAULT_JOB_SORT };
 let statusLoading = false;
 let statusPending = false;
 let scansRunning = 0;
@@ -132,6 +142,8 @@ jobSearchInput.addEventListener("input", () => {
   jobSearchTimer = window.setTimeout(loadHelperStatus, JOB_SEARCH_DELAY_MS);
 });
 jobSiteSelect.addEventListener("change", loadHelperStatus);
+jobSortSelect.addEventListener("change", () => setJobSort({ ...jobSort, key: jobSortSelect.value }));
+jobSortDir.addEventListener("click", () => setJobSort({ ...jobSort, dir: jobSort.dir === "asc" ? "desc" : "asc" }));
 jobSearchInput.addEventListener("keydown", (event) => {
   if (event.key !== "Escape" || !jobSearchInput.value) return;
   // Clear the search instead of closing the popup.
@@ -146,6 +158,10 @@ document.querySelectorAll(".tab-button").forEach((button) => {
 
 minSizeSelect.addEventListener("change", () => updateSettings({
   minSizeBytes: Number(minSizeSelect.value)
+}));
+
+bilibiliConnectionsSelect.addEventListener("change", () => updateSettings({
+  bilibiliConnections: Number(bilibiliConnectionsSelect.value)
 }));
 
 showUnsupportedInput.addEventListener("change", () => updateSettings({
@@ -163,6 +179,7 @@ if (langSelector) {
 }
 
 await applyLanguageUI();
+await loadJobSort();
 await Promise.all([loadSettings(), loadMedia().then(loadBilibili), loadHelperStatus()]);
 window.setInterval(() => {
   retryUnknownSizes();
@@ -176,6 +193,7 @@ async function loadSettings() {
   settings = response?.settings || { minSizeBytes: 1024 * 1024, showUnsupported: true };
   minSizeSelect.value = String(settings.minSizeBytes);
   if (minSizeSelect.value !== String(settings.minSizeBytes)) minSizeSelect.value = "1048576";
+  bilibiliConnectionsSelect.value = String(settings.bilibiliConnections || 4);
   showUnsupportedInput.checked = Boolean(settings.showUnsupported);
   updateFilterSummary();
   renderSiteDirs();
@@ -384,7 +402,7 @@ async function loadHelperStatus() {
     const merged = [
       ...liveJobs,
       ...cachedJobs.filter(j => !liveIds.has(j.id))
-    ].sort((a, b) => (b.startedAt || "").localeCompare(a.startedAt || "")).slice(0, 20);
+    ].sort((a, b) => (b.startedAt || "").localeCompare(a.startedAt || ""));
 
     try {
       const activeCount = stats ? stats.active : runningCount(liveJobs);
@@ -415,7 +433,8 @@ async function loadHelperStatus() {
     jobSiteSelect.disabled = !online;
     if (online) renderSiteOptions(response.sites || []);
     const searching = online && Boolean(query || site);
-    renderHelperJobs(searching ? (response.searchJobs || []) : merged, searching ? query : "", searching ? site : "");
+    const rows = searching ? recentRows(response.searchJobs || [], JOB_SEARCH_ROWS) : recentRows(merged, JOB_ROWS);
+    renderHelperJobs(sortRows(rows, jobSort, rowTitle), searching ? query : "", searching ? site : "");
     renderRunTile(merged);
   } catch (error) {
     console.error("[ds-video-downloader] loadHelperStatus failed", error);
@@ -527,7 +546,9 @@ function fillMediaNode({ node, item, variants }) {
 }
 
 // query / site: the active search and site filter, for the empty-state text.
-function renderHelperJobs(jobs, query = "", site = "") {
+// rows: from recentRows + sortRows, in display order.
+function renderHelperJobs(rows, query = "", site = "") {
+  const jobs = rows.flatMap((row) => row.jobs);
   if (!helperJobTemplate) {
     console.warn("[ds-video-downloader] helperJobTemplate not found in DOM");
     return;
@@ -543,7 +564,8 @@ function renderHelperJobs(jobs, query = "", site = "") {
   }
   // The search words, marked in each job's name and path.
   const words = query.toLowerCase().split(/\s+/).filter(Boolean);
-  const groups = bilibiliJobGroups(jobs);
+  // bvid -> row, for videos whose parts share a row.
+  const groups = new Map(rows.filter((row) => row.jobs.length > 1).map((row) => [row.jobs[0].bilibili.bvid, row]));
   // Clear empty-state if we have jobs now
   if (jobs.length && helperJobNodes.size === 0) {
     helperJobs.textContent = "";
@@ -568,7 +590,8 @@ function renderHelperJobs(jobs, query = "", site = "") {
 
       state.textContent = jobStateText(job);
       state.className = `helper-job-state ${job.status === "completed" ? "is-complete" : ""} ${job.status === "failed" ? "is-error" : ""} ${job.status === "cancelled" ? "is-cancelled" : ""} ${job.status === "missing" ? "is-missing" : ""}`;
-      meta.textContent = humanJobMessage(job);
+      fillJobMeta(meta, job);
+      showQuality(existing, existing.querySelector(".job-quality"), jobQuality(job));
       setHighlighted(pathEl, job.outputPath || job.url || "", words);
       existing.dataset.status = job.status;
       setProgress(existing, job);
@@ -599,7 +622,8 @@ function renderHelperJobs(jobs, query = "", site = "") {
       state.classList.toggle("is-error", job.status === "failed");
       state.classList.toggle("is-cancelled", job.status === "cancelled");
       state.classList.toggle("is-missing", job.status === "missing");
-      node.querySelector(".helper-job-meta").textContent = humanJobMessage(job);
+      fillJobMeta(node.querySelector(".helper-job-meta"), job);
+      showQuality(node, node.querySelector(".job-quality"), jobQuality(job));
       setHighlighted(node.querySelector(".helper-job-path"), job.outputPath || job.url || "", words);
 
       const sourceButton = node.querySelector(".source-button");
@@ -641,6 +665,14 @@ function renderHelperJobs(jobs, query = "", site = "") {
     }
   }
   renderJobGroups(groups);
+  // Nodes are updated in place; put them in row order, moving only the ones
+  // out of place (a moved node loses focus and restarts its animations).
+  placeInOrder(helperJobs, rows.map((row) => {
+    const group = row.jobs.length > 1 ? jobGroupNodes.get(row.jobs[0].bilibili.bvid) : null;
+    if (!group) return helperJobNodes.get(row.jobs[0].id);
+    placeInOrder(group.parts, row.jobs.map((part) => helperJobNodes.get(part.id)));
+    return group.node;
+  }));
 
   if (!jobs.length) {
     const empty = document.createElement("div");
@@ -658,16 +690,6 @@ function renderHelperJobs(jobs, query = "", site = "") {
 
 // --- Job groups: a Bilibili video's parts under one row ---
 
-// bvid -> its jobs, for videos with more than one part in the list.
-function bilibiliJobGroups(jobs) {
-  const byVideo = new Map();
-  for (const job of jobs) {
-    const bvid = job.inputMode === "bilibili" ? job.bilibili?.bvid : "";
-    if (bvid) byVideo.set(bvid, [...(byVideo.get(bvid) || []), job]);
-  }
-  return new Map([...byVideo].filter(([, parts]) => parts.length > 1));
-}
-
 // A job's node goes into its video's group, or stays in the list itself.
 function placeJobNode(node, job, groups) {
   const bvid = job.bilibili?.bvid;
@@ -684,7 +706,8 @@ function jobGroupNode(bvid) {
   head.className = "job-group-head";
   const state = textSpan("helper-job-state", "");
   const title = textSpan("job-group-title", "");
-  head.append(state, title);
+  const quality = qualityNode();
+  head.append(state, title, quality);
   const bar = document.createElement("div");
   bar.className = "progress-bar";
   bar.appendChild(document.createElement("i"));
@@ -701,16 +724,18 @@ function jobGroupNode(bvid) {
   });
   node.append(head, bar, meta, parts);
   helperJobs.appendChild(node);
-  const group = { node, state, title, meta, parts };
+  const group = { node, state, title, quality, meta, parts };
   jobGroupNodes.set(bvid, group);
   return group;
 }
 
-// Group rows show the parts' combined state; groups whose video no longer
-// has several parts in the list are removed (their part moved out already).
+// Group rows show the parts' combined state and their lowest grade; groups
+// whose video no longer has several parts in the list are removed (their
+// part moved out already).
 function renderJobGroups(groups) {
   for (const [bvid, group] of jobGroupNodes) {
-    const parts = groups.get(bvid);
+    const row = groups.get(bvid);
+    const parts = row?.jobs;
     if (!parts) {
       group.node.remove();
       jobGroupNodes.delete(bvid);
@@ -729,10 +754,113 @@ function renderJobGroups(groups) {
     group.title.textContent = parts[0].bilibili.title || parts[0].bilibili.bvid;
     group.meta.textContent = [
       getMessage("jobGroupDone", { done: String(done), total: String(parts.length) }),
+      formatBytes(row.bytes),
+      jobDateLabel(row.startedAt),
       active ? getMessage("jobGroupActive", { count: String(active) }) : "",
-      resumable ? getMessage("jobGroupResumable", { count: String(resumable) }) : ""
+      resumable ? getMessage("jobGroupResumable", { count: String(resumable) }) : "",
+      row.blurryCount ? getMessage("jobGroupBlurry", { count: String(row.blurryCount) }) : ""
     ].filter(Boolean).join(" · ");
+    showQuality(group.node, group.quality, row.grade ? { grade: row.grade } : null);
   }
+}
+
+// Makes `nodes` the first children of parent, in order.
+function placeInOrder(parent, nodes) {
+  let cursor = parent.firstElementChild;
+  for (const node of nodes) {
+    if (node === cursor) cursor = cursor.nextElementSibling;
+    else parent.insertBefore(node, cursor);
+  }
+}
+
+// --- Quality grade (B + HUD): five cells and "Q4 High" ---
+
+const QUALITY_WORDS = ["qualityUnknown", "qualitySd", "qualityBlurry", "qualityClear", "qualityHigh", "qualityUltra"];
+
+// The graded facts to show for a job: a grade for finished files, grade 0
+// ("unknown") when the file is gone or could not be read, null otherwise.
+function jobQuality(job) {
+  if (job.status === "missing" || (job.status === "completed" && job.media?.failed)) return { grade: 0, tier: "", lowBitrate: false };
+  if (job.status !== "completed") return null;
+  const quality = qualityGrade(job.media);
+  return quality.grade ? quality : null;
+}
+
+function qualityNode() {
+  const node = document.createElement("span");
+  node.className = "job-quality";
+  node.hidden = true;
+  const cells = document.createElement("span");
+  cells.className = "q-cells";
+  for (let i = 0; i < 5; i += 1) cells.appendChild(document.createElement("i"));
+  node.append(cells, textSpan("q-label", ""));
+  return node;
+}
+
+// row: the job or group node, whose data-grade colours the cells and its edge.
+function showQuality(row, element, quality) {
+  if (!quality) {
+    delete row.dataset.grade;
+    delete row.dataset.lowRate;
+    if (element) element.hidden = true;
+    return;
+  }
+  row.dataset.grade = String(quality.grade);
+  if (quality.lowBitrate) row.dataset.lowRate = "true";
+  else delete row.dataset.lowRate;
+  if (!element) return;
+  element.hidden = false;
+  element.querySelectorAll(".q-cells i").forEach((cell, index) => cell.classList.toggle("is-on", index < quality.grade));
+  const label = element.querySelector(".q-label");
+  label.textContent = "";
+  label.append(textSpan("q-num", quality.grade ? `Q${quality.grade}` : "Q–"), getMessage(QUALITY_WORDS[quality.grade]));
+}
+
+// "1080p 1920×1080 / 5.6 Mbps / 2.1 GB · 11-06 09:05" for graded files, the
+// usual message otherwise; the date is left out while the job is downloading.
+function fillJobMeta(meta, job) {
+  const quality = jobQuality(job);
+  const isActive = job.status === "queued" || job.status === "running";
+  const date = isActive ? "" : jobDateLabel(job.startedAt);
+  if (!quality?.grade) {
+    meta.textContent = date ? `${humanJobMessage(job)} · ${date}` : humanJobMessage(job);
+    return;
+  }
+  const { width, height, bitrate } = job.media;
+  meta.textContent = "";
+  meta.append(textSpan("q-tier", quality.tier), ` ${width}×${height}`);
+  if (Number(bitrate) > 0) {
+    meta.append(" / ", textSpan(quality.lowBitrate ? "q-rate is-low" : "q-rate", `${(bitrate / 1e6).toFixed(1)} Mbps${quality.lowBitrate ? " ▼" : ""}`));
+  }
+  meta.append(` / ${formatBytes(job.downloadedBytes || job.totalBytes)}`);
+  if (date) meta.append(` · ${date}`);
+}
+
+function rowTitle(row) {
+  return row.jobs.length > 1 ? row.jobs[0].bilibili.title || row.jobs[0].bilibili.bvid : jobTitle(row.jobs[0]);
+}
+
+// --- Job list sort: saved per browser, applied to the listed rows ---
+
+async function loadJobSort() {
+  const stored = await chrome.storage.local.get("jobSort").catch(() => ({}));
+  applyJobSort(stored?.jobSort || DEFAULT_JOB_SORT);
+}
+
+function applyJobSort(sort) {
+  const key = ["date", "quality", "size", "name"].includes(sort?.key) ? sort.key : DEFAULT_JOB_SORT.key;
+  jobSort = { key, dir: sort?.dir === "asc" ? "asc" : "desc" };
+  jobSortSelect.value = jobSort.key;
+  jobSortDir.dataset.dir = jobSort.dir;
+  jobSortDir.textContent = jobSort.dir === "asc" ? "↑" : "↓";
+  jobSortDir.title = getMessage(jobSort.dir === "asc" ? "sortDirAsc" : "sortDirDesc");
+  jobSortDir.ariaLabel = jobSortDir.title;
+}
+
+async function setJobSort(sort) {
+  applyJobSort(sort);
+  await chrome.storage.local.set({ jobSort }).catch(() => {});
+  await loadHelperStatus();
 }
 
 // The download dialog: an editable file name (the extension is fixed by what

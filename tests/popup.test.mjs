@@ -61,13 +61,37 @@ class FakeElement {
     return new FakeElement("div");
   }
   querySelectorAll() { return []; }
-  appendChild(child) { this.children.push(child); return child; }
-  append(...nodes) { this.children.push(...nodes); }
-  remove() {}
+  // Like the DOM, appending a node moves it out of its old parent.
+  // FakeElement.moves counts re-insertions of nodes that already had a parent.
+  appendChild(child) { return this.insertBefore(child, null); }
+  insertBefore(child, before) {
+    if (child instanceof FakeElement) {
+      if (child.parentNode) FakeElement.moves += 1;
+      child.remove();
+      child.parentNode = this;
+    }
+    const index = before ? this.children.indexOf(before) : -1;
+    if (index >= 0) this.children.splice(index, 0, child);
+    else this.children.push(child);
+    return child;
+  }
+  get firstElementChild() { return this.children[0] || null; }
+  get nextElementSibling() {
+    const siblings = this.parentNode?.children || [];
+    return siblings[siblings.indexOf(this) + 1] || null;
+  }
+  append(...nodes) { for (const node of nodes) this.appendChild(node); }
+  remove() {
+    if (!this.parentNode) return;
+    const index = this.parentNode.children.indexOf(this);
+    if (index >= 0) this.parentNode.children.splice(index, 1);
+    this.parentNode = null;
+  }
   closest() { return null; }
   click() { this.dispatch("click"); }
   cloneNode() { return new FakeElement(this.tagName); }
 }
+FakeElement.moves = 0;
 
 const elements = new Map();
 function getElement(selector) {
@@ -408,4 +432,124 @@ test("the site filter lists the helper sites and sends the chosen one", async ()
     chromeMock.runtime.sendMessage = original;
     select.value = "";
   }
+});
+
+// --- Rows, sorting and quality grades ---
+
+function finishedJob(id, minute, extra = {}) {
+  return {
+    id, status: "completed", startedAt: new Date(Date.UTC(2026, 0, 1, 0, minute)).toISOString(),
+    outputPath: `C:\\Videos\\${id}.mp4`, downloadedBytes: 100, ...extra
+  };
+}
+
+// Answers the status poll with `jobs` while fn runs; returns the job ids of
+// the list's top-level rows, in order, after each step.
+async function withHelperJobs(jobs, fn) {
+  const original = chromeMock.runtime.sendMessage;
+  chromeMock.runtime.sendMessage = async (message) => (message?.type === "helper:statusGet"
+    ? { ok: true, online: true, health: {}, jobs, stats: { active: 0, total: jobs.length }, sites: [] }
+    : original(message));
+  try {
+    await fn();
+  } finally {
+    chromeMock.runtime.sendMessage = original;
+  }
+}
+
+const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+// The fake DOM keeps children when textContent is cleared: count job rows only.
+const rowIds = () => getElement("#helperJobs").children
+  .map((node) => node.dataset.jobId || (node.className === "job-group" ? "job-group" : ""))
+  .filter(Boolean);
+
+test("jobs are listed as rows and can be sorted by size, and the choice is saved", async () => {
+  const saved = [];
+  const originalSet = chromeMock.storage.local.set;
+  chromeMock.storage.local.set = async (value) => { saved.push(value); };
+  const jobs = [
+    finishedJob("mid", 3, { downloadedBytes: 500 }),
+    finishedJob("small", 2, { downloadedBytes: 10 }),
+    finishedJob("big", 1, { downloadedBytes: 900 })
+  ];
+  try {
+    await withHelperJobs(jobs, async () => {
+      await timers.setIntervalCalls[0].fn();
+      assert.deepEqual(rowIds(), ["mid", "small", "big"], "newest first by default");
+
+      getElement("#jobSortSelect").value = "size";
+      getElement("#jobSortSelect").dispatch("change");
+      await settle();
+      assert.deepEqual(rowIds(), ["big", "mid", "small"]);
+
+      getElement("#jobSortDir").click();
+      await settle();
+      assert.deepEqual(rowIds(), ["small", "mid", "big"]);
+      assert.deepEqual(saved.at(-1), { jobSort: { key: "size", dir: "asc" } });
+    });
+  } finally {
+    chromeMock.storage.local.set = originalSet;
+    getElement("#jobSortSelect").value = "date";
+    getElement("#jobSortSelect").dispatch("change");
+    if (getElement("#jobSortDir").dataset.dir === "asc") getElement("#jobSortDir").click();
+    await settle();
+  }
+});
+
+test("a poll that changes nothing moves no rows (focus and animations survive)", async () => {
+  const jobs = [
+    finishedJob("one", 3),
+    finishedJob("two", 2),
+    ...[1, 2].map((p) => finishedJob(`set${p}`, 1, { inputMode: "bilibili", bilibili: { bvid: "BVsteady", p, title: "Made-up steady set" } }))
+  ];
+  await withHelperJobs(jobs, async () => {
+    await timers.setIntervalCalls[0].fn();
+    const before = FakeElement.moves;
+    await timers.setIntervalCalls[0].fn();
+    assert.equal(FakeElement.moves - before, 0);
+    assert.deepEqual(rowIds(), ["one", "two", "job-group"]);
+  });
+});
+
+test("a Bilibili video's parts count as one of the twenty rows", async () => {
+  const jobs = [];
+  for (let p = 1; p <= 3; p += 1) {
+    jobs.push(finishedJob(`part${p}`, 100 + p, { inputMode: "bilibili", bilibili: { bvid: "BVmadeup", p, title: "Made-up set" } }));
+  }
+  for (let i = 0; i < 25; i += 1) jobs.push(finishedJob(`solo${i}`, i));
+  await withHelperJobs(jobs, async () => {
+    await timers.setIntervalCalls[0].fn();
+    const top = rowIds();
+    assert.equal(top.length, 20, top.join(" "));
+    assert.equal(top[0], "job-group");
+  });
+});
+
+test("a Bilibili set's row shows the parts' total size and download date", async () => {
+  const jobs = [1, 2].map((p) => finishedJob(`sized${p}`, p, {
+    inputMode: "bilibili", downloadedBytes: 600 * 1024 * 1024, bilibili: { bvid: "BVsized", p, title: "Made-up sized set" }
+  }));
+  await withHelperJobs(jobs, async () => {
+    await timers.setIntervalCalls[0].fn();
+    const group = getElement("#helperJobs").children.find((node) => node.className === "job-group");
+    const meta = group.children.find((node) => node.className === "job-group-meta").textContent;
+    assert.match(meta, /1\.2 GB/);
+    assert.match(meta, /\d\d-\d\d \d\d:\d\d|\d{4}-\d\d-\d\d/);
+  });
+});
+
+test("a finished job is marked with its quality grade", async () => {
+  const jobs = [
+    finishedJob("blurry", 2, { media: { width: 1920, height: 1080, codec: "h264", bitrate: 1_100_000 } }),
+    finishedJob("gone", 1, { status: "missing" }),
+    { ...finishedJob("busy", 3), status: "running" }
+  ];
+  await withHelperJobs(jobs, async () => {
+    await timers.setIntervalCalls[0].fn();
+    const node = (id) => getElement("#helperJobs").children.find((entry) => entry.dataset.jobId === id);
+    assert.equal(node("blurry").dataset.grade, "2");
+    assert.equal(node("blurry").dataset.lowRate, "true");
+    assert.equal(node("gone").dataset.grade, "0", "a deleted file shows as unknown");
+    assert.equal(node("busy").dataset.grade, undefined, "no grade while downloading");
+  });
 });

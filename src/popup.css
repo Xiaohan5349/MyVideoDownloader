@@ -21,6 +21,9 @@
   --teal: #3cc8b4;
   --amber: #f2b84b;
   --coral: #ff7d6e;
+  --violet: #b48cff;
+  /* Glow radius of the quality grade cells; flat in the light theme. */
+  --q-glow: 8px;
   --on-blue: #0c0d10;
   --blue-wash: rgba(107, 151, 255, 0.14);
   --teal-wash: rgba(60, 200, 180, 0.13);
@@ -58,6 +61,8 @@
     --teal: #0b7666;
     --amber: #7a4e00;
     --coral: #c2372a;
+    --violet: #6a3fc8;
+    --q-glow: 0px;
     --on-blue: #ffffff;
     --blue-wash: rgba(44, 91, 208, 0.1);
     --teal-wash: rgba(11, 118, 102, 0.1);
@@ -951,6 +956,96 @@ span.variant-chip:hover {
   border-left: 1px solid var(--edge-hi);
 }
 
+/* ---------- Quality grade (B + HUD): Q1-Q5 cells, grade-coloured edge ---------- */
+
+[data-grade="5"] { --g: var(--violet); }
+[data-grade="4"] { --g: var(--teal); }
+[data-grade="3"] { --g: var(--blue); }
+[data-grade="2"] { --g: var(--amber); }
+[data-grade="1"] { --g: var(--coral); }
+[data-grade="0"] { --g: var(--tx-3); }
+
+.helper-job[data-grade],
+.job-group-head {
+  position: relative;
+}
+
+/* A thin light on the row's left edge, in the grade's colour. */
+.helper-job[data-grade]:not([data-grade="0"])::before,
+.job-group[data-grade]:not([data-grade="0"]) > .job-group-head::before {
+  content: "";
+  position: absolute;
+  left: -9px;
+  top: 12px;
+  bottom: 12px;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--g);
+  box-shadow: 0 0 var(--q-glow) var(--g);
+}
+
+.job-group[data-grade]:not([data-grade="0"]) > .job-group-head::before {
+  top: 1px;
+  bottom: 1px;
+}
+
+.job-quality {
+  display: inline-flex;
+  flex: none;
+  flex-direction: column;
+  align-items: flex-end;
+  align-self: center;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.job-group-head:has(> .job-quality:not([hidden]))::after {
+  margin-left: 8px;
+}
+
+.q-cells {
+  display: inline-flex;
+  gap: 2px;
+}
+
+.q-cells i {
+  width: 10px;
+  height: 6px;
+  background: var(--neutral-wash);
+  transform: skewX(-20deg);
+}
+
+.q-cells i.is-on {
+  background: var(--g);
+  box-shadow: 0 0 calc(var(--q-glow) * 0.75) var(--g);
+}
+
+.q-label {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  color: var(--g);
+  font: 700 11px/1 var(--mono);
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+}
+
+.q-num {
+  color: var(--tx-3);
+  font-size: 9px;
+  letter-spacing: 0.12em;
+}
+
+.helper-job[data-grade] .helper-job-meta {
+  font: 11px/1.45 var(--mono);
+}
+
+.q-tier,
+.q-rate.is-low {
+  color: var(--g);
+  font-weight: 700;
+}
+
 /* ---------- Helper panel ---------- */
 
 .run-tile {
@@ -1109,6 +1204,7 @@ span.variant-chip:hover {
 .job-search-row {
   display: flex;
   flex: 1 0 100%;
+  min-width: 0;
   gap: 6px;
   margin-top: 4px;
 }
@@ -1120,6 +1216,38 @@ span.variant-chip:hover {
   height: 30px;
   margin: 0;
   font-size: 11.5px;
+}
+
+/* The row holds four controls: the selects give way before the search box does. */
+.job-search-row .job-site-select,
+.job-search-row .job-sort-select {
+  min-width: 0;
+}
+
+.job-search-row .job-sort-select {
+  flex: 0 1 auto;
+  width: auto;
+  height: 30px;
+  margin: 0;
+  font-size: 11.5px;
+}
+
+.job-sort-dir {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid var(--edge-hi);
+  border-radius: var(--r3);
+  background: var(--inset);
+  color: var(--tx);
+  font: 600 13px var(--mono);
+  cursor: pointer;
+}
+
+.job-sort-dir:hover {
+  border-color: var(--blue);
+  color: var(--blue);
 }
 
 .toolbar .job-search {

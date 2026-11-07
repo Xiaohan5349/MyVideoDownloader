@@ -83,6 +83,15 @@
   "settingsNote": {
     "message": "The size filter only applies when the browser reports a direct file size. HLS/DASH playlists stay visible."
   },
+  "settingsBilibiliConnections": {
+    "message": "Bilibili connections per download"
+  },
+  "settingsConnectionsDefault": {
+    "message": "4 (default)"
+  },
+  "settingsConnectionsNote": {
+    "message": "More connections help when the video is not cached by the CDN. Two downloads run at once, so 8 means up to 16 in total."
+  },
   "settingsLanguageLabel": {
     "message": "Language"
   },
@@ -499,6 +508,48 @@
   },
   "jobGroupResumable": {
     "message": "{{count}} can resume"
+  },
+  "jobGroupBlurry": {
+    "message": "{{count}} parts blurry"
+  },
+  "sortAria": {
+    "message": "Sort downloads by"
+  },
+  "sortByDate": {
+    "message": "Date"
+  },
+  "sortByQuality": {
+    "message": "Quality"
+  },
+  "sortBySize": {
+    "message": "Size"
+  },
+  "sortByName": {
+    "message": "Name"
+  },
+  "sortDirAsc": {
+    "message": "Ascending — click for descending"
+  },
+  "sortDirDesc": {
+    "message": "Descending — click for ascending"
+  },
+  "qualityUltra": {
+    "message": "Ultra"
+  },
+  "qualityHigh": {
+    "message": "High"
+  },
+  "qualityClear": {
+    "message": "Clear"
+  },
+  "qualityBlurry": {
+    "message": "Blurry"
+  },
+  "qualitySd": {
+    "message": "SD"
+  },
+  "qualityUnknown": {
+    "message": "Unknown"
   },
   "dialogRememberSite": {
     "message": "Always save downloads from {{site}} here"

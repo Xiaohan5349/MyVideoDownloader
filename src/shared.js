@@ -25,6 +25,8 @@ export const DEFAULT_SETTINGS = Object.freeze({
   minSizeBytes: 1024 * 1024,
   showUnsupported: true,
   filenameTemplate: "{title}",
+  // Connections per Bilibili job (up to two jobs run at once).
+  bilibiliConnections: 4,
   // siteKey -> folder the download dialog starts in for that site.
   siteDownloadDirs: {}
 });
@@ -426,4 +428,104 @@ export function jobProgressFraction(job = {}) {
   if (fraction === null || !Number.isFinite(fraction)) return null;
   const cap = job.status === "completed" ? 1 : 0.99;
   return Math.min(cap, Math.max(0, fraction));
+}
+
+// --- Download quality grade (Q1-Q5) from the helper's ffprobe facts ---
+
+// Bitrate a video of this short side needs to look sharp in H.264.
+const REFERENCE_BITRATES = [[2160, 16e6], [1440, 8e6], [1080, 5e6], [720, 2.8e6], [480, 1.4e6], [360, 0.8e6]];
+// Newer codecs look as sharp with less data.
+const EFFICIENT_CODECS = new Set(["hevc", "h265", "av1", "vp9"]);
+
+// media: { width, height, codec, bitrate } as stored in job.media.
+// Returns { grade: 0-5 (0 = no facts), tier: "1080p", lowBitrate }.
+export function qualityGrade(media) {
+  const width = Number(media?.width);
+  const height = Number(media?.height);
+  if (!(width > 0 && height > 0)) return { grade: 0, tier: "", lowBitrate: false };
+  const side = Math.min(width, height);
+  const base = side >= 2160 ? 5 : side >= 1080 ? 4 : side >= 720 ? 3 : side >= 540 ? 2 : 1;
+  const tier = side >= 2160 ? "4K" : `${side}p`;
+  const bitrate = Number(media.bitrate);
+  if (!(bitrate > 0)) return { grade: base, tier, lowBitrate: false };
+  const reference = (REFERENCE_BITRATES.find(([minSide]) => side >= minSide) || REFERENCE_BITRATES.at(-1))[1];
+  const ratio = bitrate * (EFFICIENT_CODECS.has(String(media.codec).toLowerCase()) ? 1.5 : 1) / reference;
+  const penalty = ratio < 0.35 ? 2 : ratio < 0.6 ? 1 : 0;
+  return { grade: Math.max(1, base - penalty), tier, lowBitrate: penalty > 0 };
+}
+
+// --- Job list rows: one row per job, or per Bilibili video with several parts ---
+
+export const DEFAULT_JOB_SORT = { key: "date", dir: "desc" };
+
+// Rows keep the jobs' order of first appearance.
+export function jobRows(jobs = []) {
+  const byVideo = new Map();
+  for (const job of jobs) {
+    const bvid = job.inputMode === "bilibili" ? job.bilibili?.bvid : "";
+    if (bvid) byVideo.set(bvid, [...(byVideo.get(bvid) || []), job]);
+  }
+  const rows = [];
+  const placed = new Set();
+  for (const job of jobs) {
+    const bvid = job.inputMode === "bilibili" ? job.bilibili?.bvid : "";
+    const parts = bvid ? byVideo.get(bvid) : null;
+    if (parts?.length > 1) {
+      if (placed.has(bvid)) continue;
+      placed.add(bvid);
+      rows.push(makeRow(`bv:${bvid}`, [...parts].sort((a, b) => Number(a.bilibili.p) - Number(b.bilibili.p))));
+    } else {
+      rows.push(makeRow(job.id, [job]));
+    }
+  }
+  return rows;
+}
+
+function makeRow(key, jobs) {
+  const graded = jobs
+    .map((job) => ({ job, ...qualityGrade(job.status === "completed" ? job.media : null) }))
+    .filter((entry) => entry.grade > 0);
+  const worst = graded.reduce((low, entry) => (!low || entry.grade < low.grade ? entry : low), null);
+  return {
+    key,
+    jobs,
+    startedAt: jobs.reduce((latest, job) => ((job.startedAt || "") > latest ? job.startedAt : latest), ""),
+    bytes: jobs.reduce((sum, job) => sum + (Number(job.downloadedBytes) || 0), 0),
+    grade: worst?.grade || 0,
+    bitrate: Number(worst?.job.media.bitrate) || 0,
+    blurryCount: graded.filter((entry) => entry.grade <= 2 || entry.lowBitrate).length
+  };
+}
+
+// A job's start time as "11-06 09:05" in the local time zone; "2025-01-31"
+// for an earlier year. Language-neutral, like the sizes next to it.
+export function jobDateLabel(iso, now = new Date()) {
+  const date = new Date(iso || NaN);
+  if (Number.isNaN(date.getTime())) return "";
+  const two = (n) => String(n).padStart(2, "0");
+  const day = `${two(date.getMonth() + 1)}-${two(date.getDate())}`;
+  return date.getFullYear() === now.getFullYear()
+    ? `${day} ${two(date.getHours())}:${two(date.getMinutes())}`
+    : `${date.getFullYear()}-${day}`;
+}
+
+// The newest `limit` rows.
+export function recentRows(jobs, limit) {
+  return jobRows(jobs).sort((a, b) => b.startedAt.localeCompare(a.startedAt)).slice(0, limit);
+}
+
+// sort: { key: "date" | "quality" | "size" | "name", dir: "asc" | "desc" }.
+// Rows without a grade stay last when sorting by quality. Ties: newest first.
+export function sortRows(rows, sort = DEFAULT_JOB_SORT, titleOf = (row) => row.key) {
+  const sign = sort?.dir === "asc" ? 1 : -1;
+  const compare = {
+    date: (a, b) => a.startedAt.localeCompare(b.startedAt),
+    size: (a, b) => a.bytes - b.bytes,
+    name: (a, b) => String(titleOf(a)).localeCompare(String(titleOf(b)), undefined, { numeric: true }),
+    quality: (a, b) => a.grade - b.grade || a.bitrate - b.bitrate
+  }[sort?.key] || ((a, b) => a.startedAt.localeCompare(b.startedAt));
+  return [...rows].sort((a, b) => {
+    if (sort?.key === "quality" && !a.grade !== !b.grade) return a.grade ? -1 : 1;
+    return sign * compare(a, b) || b.startedAt.localeCompare(a.startedAt);
+  });
 }

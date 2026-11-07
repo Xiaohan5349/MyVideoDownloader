@@ -94,6 +94,13 @@
               <input id="jobSearchInput" class="job-search" type="search" spellcheck="false" autocomplete="off"
                 data-i18n-placeholder="searchJobsPlaceholder" data-i18n-aria="searchJobsPlaceholder" placeholder="Search downloads: name, folder">
               <select id="jobSiteSelect" class="job-site-select" data-i18n-aria="siteFilterAria" hidden></select>
+              <select id="jobSortSelect" class="job-sort-select" data-i18n-aria="sortAria">
+                <option value="date" data-i18n="sortByDate">Date</option>
+                <option value="quality" data-i18n="sortByQuality">Quality</option>
+                <option value="size" data-i18n="sortBySize">Size</option>
+                <option value="name" data-i18n="sortByName">Name</option>
+              </select>
+              <button id="jobSortDir" class="job-sort-dir" type="button" data-dir="desc">↓</button>
             </div>
           </div>
           <section id="helperJobs" class="job-list" aria-live="polite"></section>
@@ -115,6 +122,15 @@
           <span class="setting-label" data-i18n="settingsShowUnsupported">Show unsupported or protected media</span>
           <input id="showUnsupportedInput" class="switch" type="checkbox">
         </label>
+        <label class="setting-row tile half">
+          <span class="setting-label" data-i18n="settingsBilibiliConnections">Bilibili connections per download</span>
+          <select id="bilibiliConnectionsSelect">
+            <option value="4" data-i18n="settingsConnectionsDefault">4 (default)</option>
+            <option value="6">6</option>
+            <option value="8">8</option>
+          </select>
+        </label>
+        <p class="settings-note tile half" data-i18n="settingsConnectionsNote">More connections help when the video is not cached by the CDN. Two downloads run at once, so 8 means up to 16 in total.</p>
         <div class="setting-row tile">
           <label class="setting-label" for="downloadDirInput" data-i18n="settingsDownloadDirLabel">Helper download directory</label>
           <input id="downloadDirInput" type="text" data-i18n-placeholder="settingsDownloadDirPlaceholder" placeholder="C:\Users\you\Videos">
@@ -161,6 +177,7 @@
           <div class="helper-job-title-row">
             <div class="helper-job-state"></div>
             <div class="helper-job-title"></div>
+            <span class="job-quality" hidden><span class="q-cells"><i></i><i></i><i></i><i></i><i></i></span><span class="q-label"></span></span>
           </div>
           <div class="progress-bar" aria-hidden="true"><i></i></div>
           <div class="helper-job-meta"></div>

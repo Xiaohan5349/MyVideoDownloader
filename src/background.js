@@ -1,12 +1,12 @@
 import {
   MESSAGE, addUniqueMedia, classifyMedia, DIRECT_EXTENSIONS,
   estimateBytes, fallbackBandwidthForQuality, isSegmentFile, mergeSettings,
-  normalizeMediaItem, parseDashManifest, parseHlsManifest, sanitizeFilename
+  normalizeMediaItem, parseDashManifest, parseHlsManifest, recentRows, sanitizeFilename
 } from "./shared.js";
 import { getMessage, initI18n } from "./i18n.js";
 import { loadBilibiliDetails, loadBilibiliPlayback } from "./bilibili.js";
 
-console.log("[ds] Service worker started v1.13.0");
+console.log("[ds] Service worker started v1.14.0");
 
 const SETTINGS_KEY = "settings";
 const TAB_MEDIA_PREFIX = "tabMedia:";
@@ -802,9 +802,10 @@ async function getBilibiliInfo(url) {
 async function startBilibiliDownloads({ bvid, title = "", parts = [], quality = "", downloadDir = "" }) {
   const policy = quality ? { mode: "at_most", qualityId: quality } : { mode: "highest_h264" };
   const helperJobs = [];
+  const { bilibiliConnections } = await getSettings();
   for (const part of parts) {
     if (helperJobs.length) await new Promise((resolve) => setTimeout(resolve, BILIBILI_REQUEST_GAP_MS));
-    const result = await startBilibiliPart({ bvid, title }, part, policy, downloadDir);
+    const result = await startBilibiliPart({ bvid, title }, part, policy, downloadDir, bilibiliConnections);
     if (!result.ok) return { ...result, helperJobs };
     helperJobs.push(result.helperJob);
     await watchStartedJob(result);
@@ -812,7 +813,7 @@ async function startBilibiliDownloads({ bvid, title = "", parts = [], quality = 
   return { ok: true, helperJobs };
 }
 
-async function startBilibiliPart({ bvid, title }, part, policy, downloadDir) {
+async function startBilibiliPart({ bvid, title }, part, policy, downloadDir, connections) {
   let playback;
   try {
     playback = await loadBilibiliPlayback({ bvid, cid: part.cid }, policy);
@@ -824,6 +825,7 @@ async function startBilibiliPart({ bvid, title }, part, policy, downloadDir) {
     tracks: playback.tracks.map(({ role, url }) => ({ role, url })),
     sourcePageUrl: `https://www.bilibili.com/video/${bvid}/?p=${part.p}`,
     bilibili: { bvid, title, cid: String(part.cid), p: part.p, selection: playback.actualSelection },
+    connections,
     filename: part.filename,
     downloadDir
   });
@@ -840,6 +842,7 @@ async function resumeBilibiliHelperJob(job) {
     return { ok: false, error: error.code || "BILIBILI_API_FAILED" };
   }
   return postToHelper(`/jobs/${encodeURIComponent(job.id)}/resume`, {
+    connections: (await getSettings()).bilibiliConnections,
     tracks: playback.tracks.map(({ role, url }) => ({ role, url }))
   });
 }
@@ -1124,7 +1127,8 @@ async function getHelperStatus(query = "", site = "") {
   try {
     const [healthRes, jobsRes, searchRes] = await Promise.all([
       fetch(`${HELPER_URL}/health`),
-      fetch(`${HELPER_URL}/jobs?limit=20`),
+      // The popup lists 20 rows; a Bilibili video's parts share one row.
+      fetch(`${HELPER_URL}/jobs?limit=200`),
       search || siteFilter ? fetch(`${HELPER_URL}/jobs?${searchParams}`) : null
     ]);
     const health = await healthRes.json().catch(() => ({}));
@@ -1133,9 +1137,7 @@ async function getHelperStatus(query = "", site = "") {
     const found = searchRes ? await searchRes.json().catch(() => ({})) : null;
 
     if (healthRes.ok) {
-      const recent = jobsList
-        .sort((a, b) => (b.startedAt || "").localeCompare(a.startedAt || ""))
-        .slice(0, 20);
+      const recent = recentRows(jobsList, 20).flatMap((row) => row.jobs);
       await chrome.storage.local.set({ recentJobs: recent }).catch(() => {});
       await watchHelperJobs(jobsList);
     }
