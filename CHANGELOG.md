@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v1.14.0 - 2026-11-06
+
 ### Added
 
 - Settings: connections per Bilibili download (4, 6 or 8; default 4). In tests with uncached video data, 8 connections were about a third faster than 4; already-cached data showed no gain.
